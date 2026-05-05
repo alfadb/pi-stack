@@ -73,28 +73,21 @@ pi install git:github.com/alfadb/pi-stack
 
 ## 维护节奏
 
-```bash
-# 看上游更新
-npm run vendor:diff:gstack
-npm run vendor:diff:pensieve
+上游升级**不**通过机械脚本，而是 LLM 协作工作流：
 
-# 升级 vendor pointer（手动决策每次升级）
-cd vendor/gstack && git checkout <new-sha> && cd ../..
-git add vendor/gstack && git commit -m "chore(vendor): bump gstack to <sha>"
+1. 在 pi 当前会话里让助手 `git fetch` + `git log --oneline HEAD..origin/main` 列出上游未合入的 commit
+2. 助手对每条 commit 跑 `git show` 看 diff，按性质分类（bug 修复 / 新功能 / 与 pi 无关 / 与端口层冲突）
+3. 助手把分类结果呈给 alfadb，逐条讨论每个变更是否值得移植、移植到哪、有什么连锁改动
+4. 决策后助手用 edit 工具在 `extensions/skills/prompts/runtime` 端口层改文件
+5. `chore(vendor)` commit bump SHA，紧跟 `feat(<area>)` commit 完成端口适配
+6. 助手同步更新 [UPSTREAM.md](./UPSTREAM.md)
 
-# 把上游有价值的改动 cherry-pick 到端口层
-# （手工编辑 skills/extensions/prompts/runtime/ 内文件）
-git commit -m "feat(<area>): port <feature> from gstack <sha>"
-
-# 更新跟踪文档
-$EDITOR UPSTREAM.md
-git add UPSTREAM.md && git commit -m "docs(upstream): record port"
-```
+详细工作流见 UPSTREAM.md 的「上游升级工作流」章节。
 
 ## 上游
 
-- `vendor/gstack` ← `https://github.com/garrytan/gstack`
-- `vendor/pensieve` ← `https://github.com/kingkongshot/Pensieve`
+- `vendor/gstack` ← `https://github.com/garrytan/gstack`（外部上游，alfadb 是 read-only 消费者）
+- `vendor/pensieve` ← `https://github.com/kingkongshot/Pensieve`（pensieve 项目上游，alfadb 是其中一名维护者）
 
 详细跟踪表见 [UPSTREAM.md](./UPSTREAM.md)。
 

@@ -1,7 +1,11 @@
 # pi-stack 上游跟踪
 
 > 维护原则: brain maxim `prefer-read-only-vendor-submodules-with-owned-adaptation-layers-over-forking-ext`
-> 仪式: 上游发版 → `git submodule update --remote vendor/<x>` → diff → 决定哪些值得移植 → 在端口层改 → 在本表更新基线 SHA
+>
+> **跟进方式: LLM 协作而非机械脚本**
+> 上游有新 commit 时，让 pi 当前会话里的助手把上游 diff 交给 LLM 阅读、分析、与 alfadb 讨论：每条 commit 是否值得移植、移植到哪个端口位置、是否有连锁改动。决策完成后由 LLM 直接执行端口层 edit + bump vendor SHA + 更新本表。
+>
+> 这一条**明确反对**通过 `npm run` 脚本机械地拉 diff 列表然后批量决策——上游变更需要语义理解，不是文件清单比对。
 
 ---
 
@@ -63,9 +67,10 @@
 
 ### 基线
 - URL: `https://github.com/kingkongshot/Pensieve`
-- 跟踪分支: `main`（kingkongshot/Pensieve 是 alfadb 自己维护的 pensieve 中文化主线，作为事实上游存在）
+- 跟踪分支: `main`
+- 项目身份: pensieve 项目的上游主仓。alfadb 作为该项目的**维护成员之一**参与上游协作（不是作者，也不是个人 fork）
 - SHA: `<待 pin，第一次 git submodule add 后填写>`
-- 跟进策略: kingkongshot/Pensieve@main 上有新 commit → 看 diff → 决定是否值得移植
+- 跟进策略: 上游 main 有新 commit 时，让助手把 diff 交给 LLM 阅读、分类（bug 修复 / 新能力 / 与 pi 无关 / 与端口层冲突）、与 alfadb 讨论每条决策、再执行端口层修改
 
 ### 端口层映射（来自废弃的 `pi` 分支）
 
@@ -111,42 +116,30 @@
 
 ---
 
-## 上游升级仪式（标准流程）
+## 上游升级工作流（LLM 协作）
 
-### 1. 看 diff
-```bash
-npm run vendor:diff:gstack       # 或 vendor:diff:pensieve
-# 等价于:
-cd vendor/<x> && git fetch origin && git log --oneline HEAD..origin/main
-```
+核心理念：**diff 是给人/LLM 读的，不是给脚本批处理的**。上游变更的语义判断（值不值得移植、移植到哪、连锁影响是什么）必须经过 LLM 推理 + alfadb 讨论，不能简化成 "看文件名清单 → 决定 yes/no"。
 
-### 2. 决定是否升级
-- 看 changelog / commit message
-- 决定哪些 commit 值得移植到端口层
+标准回合（在 pi 当前会话里执行）：
 
-### 3. 升级 vendor pointer
-```bash
-cd vendor/<x>
-git checkout <new-sha>
-cd ../..
-git add vendor/<x>
-git commit -m "chore(vendor): bump <x> to <new-sha>"
-```
+1. **触发**: alfadb 想看上游有什么更新，或定期想做一次同步
+2. **拉取**: 助手在 `vendor/<x>/` 里跑 `git fetch origin && git log --oneline HEAD..origin/main`，列出未合入的 commit
+3. **LLM 阅读 diff**: 助手对每条 commit 跑 `git show <sha>` 看完整 diff，结合 commit message 判断变更性质
+4. **LLM 分类汇报**: 助手把 commit 列表分组呈给 alfadb，例如：
+   - 🟢 直接价值的 bug 修复（建议移植）
+   - 🟡 新功能（需要讨论是否符合 pi 端口层风格）
+   - 🔵 与 pi 无关的 claude-code 专属改动（不移植）
+   - 🔴 与本仓端口层冲突的（需要 alfadb 决定怎么 reconcile）
+5. **alfadb 讨论决策**: 对 🟡🔴 类逐条决定
+6. **执行**: 助手用 edit 工具在端口层（extensions/skills/prompts/runtime）改文件
+7. **bump vendor**: `cd vendor/<x> && git checkout <new-sha> && cd ../..`，然后独立 commit `chore(vendor): bump <x> to <new-sha>`
+8. **端口适配**: 紧跟着的 commit 是端口层改动 `feat(<area>): port <feature> from <vendor> <new-sha>`
+9. **更新本表**: 助手把新出现的端口路径加进对应 vendor 章节，更新顶部 SHA
+10. **本表 commit**: `docs(upstream): record port for <x> at <new-sha>`
 
-### 4. 移植到端口层
-- skills / extensions / prompts / runtime/ 内逐个改
-- 每个改动一个 commit: `feat(skills/<name>): port <feature> from <vendor> <new-sha>`
+---
 
-### 5. 更新本表
-- 任何端口层路径首次出现 → 在对应 vendor 章节加一行
-- 任何 alfadb 增强 → 在 "alfadb 自创增强" 章节加一行
-- 基线 SHA 更新 → 顶部 SHA 字段更新
-
-### 6. 提交本表更新
-```bash
-git add UPSTREAM.md
-git commit -m "docs(upstream): record port for <x> at <new-sha>"
-```
+注：上面这 10 步是「这个动作链条由人和 LLM 协作完成」的描述，不是 `npm run` 脚本编排。**故意不写成 Makefile 或 scripts 入口**，因为每一步都需要 LLM 推理 + alfadb 决策。
 
 ---
 

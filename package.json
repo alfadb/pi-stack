@@ -22,12 +22,6 @@
     "skills": ["./skills"],
     "prompts": ["./prompts"]
   },
-  "scripts": {
-    "vendor:status": "git submodule status vendor/",
-    "vendor:fetch": "git submodule foreach 'git fetch origin'",
-    "vendor:diff:gstack": "cd vendor/gstack && git fetch origin && git log --oneline HEAD..origin/main",
-    "vendor:diff:pensieve": "cd vendor/pensieve && git fetch origin && git log --oneline HEAD..origin/main"
-  },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",
     "@mariozechner/pi-ai": "*",
