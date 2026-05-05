@@ -1,0 +1,37 @@
+{
+  "name": "@alfadb/pi-stack",
+  "version": "0.1.0",
+  "description": "alfadb's personal pi distribution: vendored gstack + pensieve, ported to pi, plus alfadb-native multi-agent / sediment / model-curator / gbrain extensions.",
+  "keywords": [
+    "pi-package",
+    "alfadb",
+    "distribution",
+    "review",
+    "qa",
+    "memory",
+    "multi-agent",
+    "model-curator"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:alfadb/pi-stack.git"
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  },
+  "scripts": {
+    "vendor:status": "git submodule status vendor/",
+    "vendor:fetch": "git submodule foreach 'git fetch origin'",
+    "vendor:diff:gstack": "cd vendor/gstack && git fetch origin && git log --oneline HEAD..origin/main",
+    "vendor:diff:pensieve": "cd vendor/pensieve && git fetch origin && git log --oneline HEAD..origin/main"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  }
+}
