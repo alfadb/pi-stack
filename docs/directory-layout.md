@@ -12,7 +12,7 @@ alfadb/pi-stack/
 │
 ├── docs/
 │   └── adr/
-│       └── 0001-pi-stack-as-author-distro.md
+│       └── 0001-pi-stack-as-personal-pi-workflow.md
 │
 ├── vendor/                            # ▼▼▼ READ-ONLY，仅作 diff/参考源 ▼▼▼
 │   ├── gstack/                        # submodule → garrytan/gstack@bf65487

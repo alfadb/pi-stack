@@ -1,11 +1,11 @@
 {
   "name": "@alfadb/pi-stack",
   "version": "0.1.0",
-  "description": "alfadb's personal pi distribution: vendored gstack + pensieve, ported to pi, plus alfadb-native multi-agent / sediment / model-curator / gbrain extensions.",
+  "description": "alfadb's personal pi workflow: a curated set of extensions, skills, prompts, and runtime materials built specifically for pi (similar to how gstack is built for claude-code). Vendors gstack + pensieve and ports them to pi, alongside alfadb-native multi-agent / sediment / model-curator / gbrain extensions.",
   "keywords": [
     "pi-package",
     "alfadb",
-    "distribution",
+    "workflow",
     "review",
     "qa",
     "memory",

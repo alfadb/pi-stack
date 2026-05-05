@@ -1,7 +1,7 @@
 # pi-stack 迁移步骤（submodule 工作流）
 
 > 状态: 仅列步骤，**未到执行阶段**。Review 通过后再机械执行。
-> 上下文: 参见 [docs/adr/0001](../adr/0001-pi-stack-as-author-distro.md)。
+> 上下文: 参见 [docs/adr/0001](../adr/0001-pi-stack-as-personal-pi-workflow.md)。
 > 工作流模型: alfadb 是唯一作者+使用者，pi-stack 以 git submodule 形式挂在 `~/.pi/agent/skills/pi-stack/`。
 
 ---
