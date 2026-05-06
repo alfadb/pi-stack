@@ -442,9 +442,10 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      const dispatchStart = Date.now();
       const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-      // Batch into concurrency-limited groups
+      // Concurrency-limited worker pool
       const results: SubprocessResult[] = new Array(tasks.length);
       let nextIdx = 0;
 
@@ -458,10 +459,25 @@ export default function (pi: ExtensionAPI) {
       };
 
       const workers = new Array(Math.min(MAX_CONCURRENCY, tasks.length)).fill(null).map(() => worker());
-      await Promise.all(workers);
+      await Promise.allSettled(workers);
+      const totalWall = ((Date.now() - dispatchStart) / 1000).toFixed(1);
+
+      // Log parallelism: serial time estimate vs actual
+      const serialEstimate = results.reduce((s, r) => s + r.durationMs, 0);
+      const maxSingle = Math.max(...results.map((r) => r.durationMs));
 
       // Build summary table
-      const lines: string[] = ["## Dispatch Results\n"];
+      const lines: string[] = [
+        `## Dispatch Results (${tasks.length} tasks, ${totalWall}s total)`,
+      ];
+      if (tasks.length > 1) {
+        const parallelRatio = (serialEstimate / (maxSingle || 1)).toFixed(1);
+        lines.push(
+          `_serial sum: ${(serialEstimate / 1000).toFixed(1)}s → ` +
+          `parallel actual: ${totalWall}s (${parallelRatio}× speedup)_\n`,
+        );
+      }
+      lines.push("");
       lines.push(`| # | Model | Duration | Status |`);
       lines.push(`|---|-------|----------|--------|`);
 
