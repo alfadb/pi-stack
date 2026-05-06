@@ -16,6 +16,9 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
@@ -24,9 +27,42 @@ import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
 
 const MAX_PARALLEL = 16;
 const MAX_CONCURRENCY = 4;
-const DEFAULT_TIMEOUT_MS = 300_000;
+const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
+
+/** Prompts longer than this are written to a temp .md file and passed via @file. */
+const MD_FILE_THRESHOLD = 500;
 
 const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
+
+// ── Prompt file helper ──────────────────────────────────────────
+
+/**
+ * If the prompt is long, write it to a temp .md file and return the
+ * @file-path argument. Otherwise return the prompt as a plain string.
+ * The caller passes the result as the positional argument to pi.
+ *
+ * Temp files are cleaned up when the subprocess closes (via spawn's
+ * close event), never before.
+ */
+function promptArg(
+  prompt: string,
+  tmpDir: string,
+): { arg: string; cleanup?: () => void } {
+  if (prompt.length <= MD_FILE_THRESHOLD) {
+    return { arg: prompt };
+  }
+
+  const file = path.join(tmpDir, "dispatch-prompt.md");
+  fs.mkdirSync(tmpDir, { recursive: true });
+  fs.writeFileSync(file, prompt, "utf-8");
+  return {
+    arg: `@${file}`,
+    cleanup: () => {
+      try { fs.unlinkSync(file); } catch {}
+      try { fs.rmdirSync(tmpDir); } catch {}
+    },
+  };
+}
 
 // ── Tool validation ─────────────────────────────────────────────
 
@@ -82,6 +118,9 @@ function runSubprocess(
 ): Promise<SubprocessResult> {
   return new Promise((resolve) => {
     const start = Date.now();
+    const tmpDir = path.join(os.tmpdir(), `pi-dispatch-${Date.now()}`);
+    const { arg: promptArgValue, cleanup: cleanupTemp } = promptArg(prompt, tmpDir);
+
     const args = [
       "--mode", "json",
       "-p",
@@ -95,7 +134,7 @@ function runSubprocess(
     }
 
     // The prompt as the positional argument
-    args.push(prompt);
+    args.push(promptArgValue);
 
     let child: ChildProcess | null = null;
     let timedOut = false;
@@ -109,6 +148,7 @@ function runSubprocess(
     const cleanup = () => {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
+      cleanupTemp?.();
     };
 
     const onAbort = () => {
