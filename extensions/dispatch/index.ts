@@ -451,21 +451,29 @@ export default function (pi: ExtensionAPI) {
       const results: SubprocessResult[] = new Array(tasks.length);
       let nextIdx = 0;
       let done = 0;
+      let started = 0;
+      const total = tasks.length;
 
-      ctx.ui.setStatus("Dp", `0/${tasks.length}`);
+      const updateStatus = () => {
+        const running = started - done;
+        ctx.ui.setStatus("Dp", `${running}/${done}/${total}`);
+      };
+      updateStatus();
 
       const worker = async () => {
         while (true) {
           const i = nextIdx++;
-          if (i >= tasks.length) return;
+          if (i >= total) return;
+          started++;
+          updateStatus();
           const t = tasks[i];
           results[i] = await runSubprocess(t.model, t.thinking, t.prompt, signal, t.timeoutMs ?? timeoutMs);
           done++;
-          ctx.ui.setStatus("Dp", `${done}/${tasks.length}`);
+          updateStatus();
         }
       };
 
-      const workers = new Array(Math.min(MAX_CONCURRENCY, tasks.length)).fill(null).map(() => worker());
+      const workers = new Array(Math.min(MAX_CONCURRENCY, total)).fill(null).map(() => worker());
       await Promise.allSettled(workers);
       ctx.ui.setStatus("Dp", undefined);
       const totalWall = ((Date.now() - dispatchStart) / 1000).toFixed(1);
