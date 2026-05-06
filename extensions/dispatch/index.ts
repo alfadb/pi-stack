@@ -98,6 +98,9 @@ interface SubprocessResult {
 /**
  * Spawn a pi subprocess, consume its JSON event stream, return the
  * final assistant output. pi handles multi-turn tool calling internally.
+ *
+ * onSpawn is called synchronously with the child PID once the process
+ * starts — before any event listeners are set up.
  */
 function runSubprocess(
   model: string,
@@ -105,6 +108,7 @@ function runSubprocess(
   prompt: string,
   signal: AbortSignal,
   timeoutMs: number,
+  onSpawn?: (pid: number) => void,
 ): Promise<SubprocessResult> {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -161,6 +165,7 @@ function runSubprocess(
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
       });
+      if (child.pid) onSpawn?.(child.pid);
     } catch (e: any) {
       cleanup();
       resolve({
@@ -451,23 +456,23 @@ export default function (pi: ExtensionAPI) {
       const results: SubprocessResult[] = new Array(tasks.length);
       let nextIdx = 0;
       let done = 0;
-      let started = 0;
+      let running = 0;
       const total = tasks.length;
 
-      const updateStatus = () => {
-        const running = started - done;
-        ctx.ui.setStatus("Dp", `${running}/${done}/${total}`);
-      };
+      const updateStatus = () => ctx.ui.setStatus("Dp", `${running}/${done}/${total}`);
       updateStatus();
 
       const worker = async () => {
         while (true) {
           const i = nextIdx++;
           if (i >= total) return;
-          started++;
-          updateStatus();
           const t = tasks[i];
-          results[i] = await runSubprocess(t.model, t.thinking, t.prompt, signal, t.timeoutMs ?? timeoutMs);
+          results[i] = await runSubprocess(
+            t.model, t.thinking, t.prompt, signal,
+            t.timeoutMs ?? timeoutMs,
+            (pid) => { running++; updateStatus(); },
+          );
+          running--;
           done++;
           updateStatus();
         }
