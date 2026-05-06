@@ -380,7 +380,9 @@ export default function (pi: ExtensionAPI) {
       }
 
       const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      ctx.ui.setStatus("Dp", "⏳");
       const result = await runSubprocess(params.model, params.thinking, params.prompt, signal, timeoutMs);
+      ctx.ui.setStatus("Dp", undefined);
 
       const text = formatResult("dispatch", params.model, result);
 
@@ -433,7 +435,7 @@ export default function (pi: ExtensionAPI) {
       return { tasks, timeoutMs: (args as any).timeoutMs };
     },
 
-    async execute(_id: string, params: any, signal: AbortSignal, _onUpdate: any, _ctx: any) {
+    async execute(_id: string, params: any, signal: AbortSignal, _onUpdate: any, ctx: any) {
       const tasks = params.tasks ?? [];
       if (tasks.length === 0) {
         return {
@@ -445,9 +447,12 @@ export default function (pi: ExtensionAPI) {
       const dispatchStart = Date.now();
       const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-      // Concurrency-limited worker pool
+      // Concurrency-limited worker pool with status bar progress
       const results: SubprocessResult[] = new Array(tasks.length);
       let nextIdx = 0;
+      let done = 0;
+
+      ctx.ui.setStatus("Dp", `0/${tasks.length}`);
 
       const worker = async () => {
         while (true) {
@@ -455,11 +460,14 @@ export default function (pi: ExtensionAPI) {
           if (i >= tasks.length) return;
           const t = tasks[i];
           results[i] = await runSubprocess(t.model, t.thinking, t.prompt, signal, t.timeoutMs ?? timeoutMs);
+          done++;
+          ctx.ui.setStatus("Dp", `${done}/${tasks.length}`);
         }
       };
 
       const workers = new Array(Math.min(MAX_CONCURRENCY, tasks.length)).fill(null).map(() => worker());
       await Promise.allSettled(workers);
+      ctx.ui.setStatus("Dp", undefined);
       const totalWall = ((Date.now() - dispatchStart) / 1000).toFixed(1);
 
       // Log parallelism: serial time estimate vs actual
