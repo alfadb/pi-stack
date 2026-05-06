@@ -29,29 +29,19 @@ const MAX_PARALLEL = 16;
 const MAX_CONCURRENCY = 4;
 const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
 
-/** Prompts longer than this are written to a temp .md file and passed via @file. */
-const MD_FILE_THRESHOLD = 500;
-
 const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
 
 // ── Prompt file helper ──────────────────────────────────────────
 
 /**
- * If the prompt is long, write it to a temp .md file and return the
- * @file-path argument. Otherwise return the prompt as a plain string.
- * The caller passes the result as the positional argument to pi.
- *
- * Temp files are cleaned up when the subprocess closes (via spawn's
- * close event), never before.
+ * If the prompt is short enough to pass as an argument safely, return it
+ * directly. Otherwise write to a temp .md file and return the @file-path.
+ * All prompts are passed via @file for safety — no threshold guessing.
  */
 function promptArg(
   prompt: string,
   tmpDir: string,
 ): { arg: string; cleanup?: () => void } {
-  if (prompt.length <= MD_FILE_THRESHOLD) {
-    return { arg: prompt };
-  }
-
   const file = path.join(tmpDir, "dispatch-prompt.md");
   fs.mkdirSync(tmpDir, { recursive: true });
   fs.writeFileSync(file, prompt, "utf-8");
