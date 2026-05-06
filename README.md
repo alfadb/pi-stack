@@ -76,7 +76,7 @@ echo pi-stack > ~/.pi/agent/skills/pi-stack/.gbrain-source
 
 ```bash
 cd ~/.pi/agent/skills/pi-stack
-$EDITOR extensions/multi-agent/runner.ts    # 直接改
+$EDITOR extensions/dispatch/index.ts    # 直接改
 git add . && git commit -m "fix: ..."
 git push                                    # 推到 GitHub
 
@@ -97,7 +97,7 @@ pi install git:github.com/alfadb/pi-stack
 ## 内容
 
 ### Extensions（pi 行为扩展）
-- `multi-agent/` — 自带基础能力 `dispatch_agent` / `dispatch_agents`（主会话自由组合） + `vision` + `imagine`；兼容 `multi_dispatch`；4 种 cookbook 模板供主会话参考（ADR 0009）
+- `dispatch/` — subprocess-based `dispatch_agent` / `dispatch_agents`（主会话自由组合）；每个子 agent 是独立 pi 进程，OS 级隔离（ADR 0009）
 - `sediment/` — 后台沉淀代理（gbrain 唯一写入者，v6.7 双轨 project+world，ADR 0011）
 - `model-curator/` — 模型能力快照与选择建议
 - `gbrain/` — 主会话记忆 read tool（`gbrain_search/get/query`），含 markdown fallback
@@ -110,7 +110,7 @@ pi install git:github.com/alfadb/pi-stack
 ### Prompts
 - `commit.md` / `plan.md` / `review.md` / `sync-to-main.md`（4 pipelines，从 pensieve 提取；是否同步落地为 gbrain guide 节点延后到核心链路稳定后）
 - `ship.md`（来自 garrytan/gstack）
-- `multi-*.md`（来自 alfadb/pi-multi-agent）
+- `dispatch-*.md`（pi-stack 自己）
 
 ## 维护节奏
 
