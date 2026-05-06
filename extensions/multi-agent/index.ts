@@ -167,7 +167,7 @@ export default function (pi: ExtensionAPI) {
           model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
-          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist or 'readonly' })),
+          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist or 'readonly'" })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 300000)" })),
         }),
         { description: "Array of task specifications (max 16)" },
