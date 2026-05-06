@@ -1,7 +1,7 @@
 {
   "name": "@alfadb/pi-stack",
   "version": "0.1.0",
-  "description": "alfadb's personal pi workflow: a curated set of extensions, skills, prompts, and runtime materials built specifically for pi (similar to how gstack is built for claude-code). Vendors gstack + pensieve and ports them to pi, alongside alfadb-native multi-agent / sediment / model-curator / gbrain extensions.",
+  "description": "alfadb's personal pi workflow + memory infrastructure: extensions, skills, prompts built specifically for pi (similar to how gstack is built for claude-code). Sediment writes to two targets — pensieve (project-local .pensieve/ filesystem) and gbrain default (universal engineering principles); main session is read-only on both. ADR 0012 reverted v6.7's two-track gbrain-source design after gbrain v0.27 multi-source isolation proved unimplemented. Vendors garrytan/gstack as port reference; consolidates alfadb-native multi-agent / sediment / model-curator / gbrain / retry-stream-eof.",
   "keywords": [
     "pi-package",
     "alfadb",
@@ -9,6 +9,8 @@
     "review",
     "qa",
     "memory",
+    "gbrain",
+    "sediment",
     "multi-agent",
     "model-curator"
   ],
@@ -20,7 +22,7 @@
   "pi": {
     "extensions": ["./extensions"],
     "skills": ["./skills"],
-    "prompts": ["./prompts"]
+    "prompts": ["./prompts", "./extensions/multi-agent/prompts"]
   },
   "peerDependencies": {
     "@mariozechner/pi-coding-agent": "*",

@@ -9,7 +9,44 @@
 
 ---
 
-## vendor/gstack — `garrytan/gstack`
+## 上游关系三分类
+
+详见 [ADR 0006](./docs/adr/0006-component-consolidation.md)。
+
+| 类别 | 含义 | 是否进本表 |
+|---|---|---|
+| **A 类：自有功能** | alfadb 永久 own，不向上游 PR | ❌ 不进本表 |
+| **B 类：vendor 移植参考** | 上游只读引用，pi 端口在 pi-stack 内 | ✅ 进本表（主体） |
+| **C 类：内部组件迁入** | 曾经独立的 alfadb 自有 npm 包 | ❌ 不进本表（不是上游协作） |
+
+### A 类：自有功能（不进本表，仅列举）
+
+| 组件 | 理由 |
+|---|---|
+| `extensions/retry-stream-eof/` | alfadb 自己的功能，上游对 PR 态度大多直接关闭 |
+| `skills/memory-wand/` | pensieve-wand 改写后是 pi-stack 自有产权 |
+| `extensions/sediment/` 改造（voter、source-router、schema-enforcer、derivation-handler、pending-queue、audit-logger、markdown-exporter、import-triage） | v6.5 自有设计，含 pensieve 4 象限 + gstack 字段哲学 |
+| `extensions/sediment/prompts/` 全套 rubric（vote-prompt / maxim-rubric / decision-rubric / knowledge-rubric / short-term-rubric / derivation-rubric / do-not-write-rubric / source-routing-policy） | 提取自 pensieve references + ADR 0004/0008 写作，pi-stack 私有 |
+| `extensions/multi-agent/` ADR 0009 重构（`dispatch_agent` / `dispatch_agents` 基础能力 + `templates/` cookbook + `multi_dispatch` 兼容层） | v6.5 自有设计 |
+| `extensions/multi-agent/input-compat.ts` + `input-compat.test.ts`（ADR 0009 § 2.5）：双重 JSON 字符串 unwrap + 限定字段类型转换（tools array→CSV / timeoutMs string→number） + 错误消息四要素 | v6.5 自有设计 |
+| `prompts/{commit,plan,review,sync-to-main}.md` | 从 pensieve pipelines 提取后是 pi-stack 私有 |
+| `defaults/pi-stack.defaults.json` | package-local fallback / 文档示例（运行时走官方 pi settings chain） |
+| `extensions/gbrain/` 的 markdown fallback 增强 | 自有改造，ADR 0007 |
+
+### C 类：内部组件迁入（不进本表，仅列举）
+
+| 组件 | 原仓 | 处置 |
+|---|---|---|
+| `extensions/multi-agent/` | `alfadb/pi-multi-agent` | subtree merge，原仓 archive，README 指向 pi-stack |
+| `extensions/sediment/` | `alfadb/pi-sediment` | subtree merge，原仓 archive，README 指向 pi-stack |
+| `extensions/model-curator/` | `~/.pi/agent/skills/pi-model-curator/`（in-tree） | cp 迁入 |
+| `skills/{19 个}/` + `extensions/browse/` + `prompts/ship.md` | `alfadb/pi-gstack` | cp 迁入，原仓 archive |
+| `extensions/gbrain/` | `~/.pi/agent/extensions/gbrain/` | cp 迁入 |
+| `extensions/retry-stream-eof/` | `~/.pi/agent/extensions/retry-stream-eof.ts` | cp 迁入（同时升级为 A 类自有功能） |
+
+---
+
+## B 类：vendor/gstack — `garrytan/gstack`
 
 ### 基线
 - URL: `https://github.com/garrytan/gstack`
@@ -54,7 +91,7 @@
 | `prompts/ship.md` | `ship/SKILL.md` | Template | 2026-04-30 |
 | `extensions/browse/` | `browse/src/*.ts` | Extension | 2026-04-30 |
 
-### alfadb 自创增强（不来自 vendor）
+### alfadb 自创增强（不来自 vendor，但落在 vendor 端口路径）
 | 路径 | 描述 | 日期 |
 |---|---|---|
 | `skills/cso/SKILL.md` Phases 5,11,12 | 增强（不在上游） | 2026-05-01 |
@@ -63,60 +100,24 @@
 
 ---
 
-## vendor/pensieve — `kingkongshot/Pensieve`
+## 已废弃 vendor 引用
 
-### 基线
-- URL: `https://github.com/kingkongshot/Pensieve`
-- 跟踪分支: `main`
-- 项目身份: pensieve 项目的上游主仓。alfadb 作为该项目的**维护成员之一**参与上游协作（不是作者，也不是个人 fork）
-- SHA: `<待 pin，第一次 git submodule add 后填写>`
-- 跟进策略: 上游 main 有新 commit 时，让助手把 diff 交给 LLM 阅读、分类（bug 修复 / 新能力 / 与 pi 无关 / 与端口层冲突）、与 alfadb 讨论每条决策、再执行端口层修改
+### ~~vendor/pensieve — `kingkongshot/Pensieve`~~
 
-### 端口层映射（来自废弃的 `pi` 分支）
+**已废弃**：pensieve 项目作为 pi-stack 组件退场。详见 [ADR 0005](./docs/adr/0005-pensieve-deprecated.md)。
 
-| pi-stack 路径 | 上游来源 | 类别 | 备注 |
-|---|---|---|---|
-| `extensions/pensieve-context/index.ts` | `pi/extensions/pensieve-context/index.ts` | A 类 | alfadb 100% 自创，pi adapter 主体 |
-| `extensions/pensieve-context/package.json` | `pi/extensions/pensieve-context/package.json` | A 类 | alfadb 100% 自创 |
-| `skills/pensieve-wand/SKILL.md` | `pi/skills/pensieve-wand/SKILL.md` | A 类 | alfadb 100% 自创 |
-| `runtime/pensieve/install.sh` | `pi/install.sh` | A 类 | alfadb 写的 install 流程 |
-| `runtime/pensieve/manifest.json` | `.src/manifest.json` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/core/hooks.json` | `.src/core/hooks.json` | B 类 | alfadb 100% 新增 |
-| `runtime/pensieve/scripts/planning-prehook.sh` | `.src/scripts/planning-prehook.sh` | B 类 | alfadb 100% 新增 |
-| `runtime/pensieve/scripts/register-hooks.sh` | `.src/scripts/register-hooks.sh` | B 类 | alfadb 100% 新增 |
-| `runtime/pensieve/scripts/stop-hook-auto-sediment.sh` | `.src/scripts/stop-hook-auto-sediment.sh` | B 类 | alfadb 100% 新增 |
-| `runtime/pensieve/scripts/run-hook.sh` | `.src/scripts/run-hook.sh` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/scripts/lib.sh` | `.src/scripts/lib.sh` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/scripts/init-project-data.sh` | `.src/scripts/init-project-data.sh` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/scripts/maintain-project-state.sh` | `.src/scripts/maintain-project-state.sh` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/scripts/sync-project-skill-graph.sh` | `.src/scripts/sync-project-skill-graph.sh` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/scripts/pensieve-session-marker.sh` | `.src/scripts/pensieve-session-marker.sh` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/templates/maxims/*.md` | `.src/templates/maxims/*.md` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/templates/pipeline.*.md` | `.src/templates/pipeline.*.md` (modified, 含新增 run-when-planning.md) | C-i | 部分新增 |
-| `runtime/pensieve/templates/agents/pensieve-wand.md` | `.src/templates/agents/pensieve-wand.md` | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/templates/knowledge/taste-review/content.md` | `.src/templates/knowledge/taste-review/content.md` | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/references/*.md` (9 个) | `.src/references/*.md` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/loop/DESIGN.template.md` | `.src/loop/DESIGN.template.md` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/loop/REQUIREMENTS.template.md` | `.src/loop/REQUIREMENTS.template.md` (modified) | C-i | 上游有，alfadb 改过 |
-| `runtime/pensieve/tools/*.md` (6 个) | `.src/tools/*.md` (modified) | C-i | 上游有，alfadb 改过 |
-
-### 类别图例（来自 ADR 0001 偏离点说明）
-- **A 类**: alfadb 100% 新增，与上游无关
-- **B 类**: alfadb 100% 新增的 hook 脚本/manifest 字段
-- **C-i 类**: 上游有，alfadb 改过 → 完整 own 一份在 runtime/，**不**走 patches queue（明确选择）
-
-### 仅在 vendor/pensieve 不进入 runtime/ 的部分
-（这些是上游 alfadb 没改的，作为升级 diff 参考保留在 vendor/pensieve）
-- `.src/loop/` 主体（除 DESIGN.template.md / REQUIREMENTS.template.md）
-- `.src/core/` 主体（除 hooks.json）
-- `.src/agents/`
-- vendor 自带的 README、CHANGELOG、LICENSE、SKILL.md
-
-⚠️ **运行时不能引用 vendor/pensieve**。如果上游某个未改文件未来需要使用，应当显式拷贝到 runtime/pensieve/ 并在本表注册。
+- 不建立 `vendor/pensieve` submodule
+- 从 ~/.pi/.gitmodules 移除 `agent/skills/pensieve` submodule
+- alfadb 在 pensieve 上游身份明牌（self-demote 或找替补 user-maintainer）
+- 4 个 pipelines 提取为 `prompts/*.md`
+- 写入规范进入 `extensions/sediment/prompts/`（主会话不可见）
+- pensieve-wand skill 改写为 `skills/memory-wand/`（gbrain 包装，A 类自有）
 
 ---
 
 ## 上游升级工作流（LLM 协作）
+
+仅适用于 B 类（vendor/gstack）。A 类自有功能不向上游 PR；C 类内部组件迁入是一次性动作。
 
 核心理念：**diff 是给人/LLM 读的，不是给脚本批处理的**。上游变更的语义判断（值不值得移植、移植到哪、连锁影响是什么）必须经过 LLM 推理 + alfadb 讨论，不能简化成 "看文件名清单 → 决定 yes/no"。
 
@@ -131,7 +132,7 @@
    - 🔵 与 pi 无关的 claude-code 专属改动（不移植）
    - 🔴 与本仓端口层冲突的（需要 alfadb 决定怎么 reconcile）
 5. **alfadb 讨论决策**: 对 🟡🔴 类逐条决定
-6. **执行**: 助手用 edit 工具在端口层（extensions/skills/prompts/runtime）改文件
+6. **执行**: 助手用 edit 工具在端口层（extensions/skills/prompts/）改文件
 7. **bump vendor**: `cd vendor/<x> && git checkout <new-sha> && cd ../..`，然后独立 commit `chore(vendor): bump <x> to <new-sha>`
 8. **端口适配**: 紧跟着的 commit 是端口层改动 `feat(<area>): port <feature> from <vendor> <new-sha>`
 9. **更新本表**: 助手把新出现的端口路径加进对应 vendor 章节，更新顶部 SHA
@@ -147,11 +148,13 @@
 
 | 实体 | 废弃日期 | 接收者 |
 |---|---|---|
-| `alfadb/pi-gstack` repo | 2026-05-05 | 整体并入 pi-stack |
-| `alfadb/pi-multi-agent` repo | 2026-05-05 | subtree merge 入 pi-stack/extensions/multi-agent |
-| `alfadb/pi-sediment` repo | 2026-05-05 | subtree merge 入 pi-stack/extensions/sediment |
-| `kingkongshot/Pensieve@feature/auto-sediment-hook` 分支 | 2026-05-05 | 已通过 `pi` 分支替代后再废弃 |
-| `kingkongshot/Pensieve@pi` 分支 | 2026-05-05 | 内容并入 pi-stack（A/B/C-i 三类）|
-| `~/.pi/agent/extensions/gbrain/` | 2026-05-05 | pi-stack/extensions/gbrain |
-| `~/.pi/agent/extensions/retry-stream-eof.ts` | 2026-05-05 | pi-stack/extensions/retry-stream-eof.ts |
-| `~/.pi/agent/skills/pi-model-curator/` | 2026-05-05 | pi-stack/extensions/model-curator |
+| `alfadb/pi-gstack` repo | 2026-05-05 | 整体并入 pi-stack（C 类） |
+| `alfadb/pi-multi-agent` repo | 2026-05-05 | subtree merge 入 pi-stack/extensions/multi-agent（C 类） |
+| `alfadb/pi-sediment` repo | 2026-05-05 | subtree merge 入 pi-stack/extensions/sediment（C 类） |
+| `kingkongshot/Pensieve@feature/auto-sediment-hook` 分支 | 2026-05-05 | 删除（ADR 0005） |
+| `kingkongshot/Pensieve@pi` 分支 | 2026-05-05 | 删除（ADR 0005） |
+| `~/.pi/agent/extensions/gbrain/` | 2026-05-05 | pi-stack/extensions/gbrain（C 类） |
+| `~/.pi/agent/extensions/retry-stream-eof.ts` | 2026-05-05 | pi-stack/extensions/retry-stream-eof（C 类迁入 → A 类永久 own） |
+| `~/.pi/agent/skills/pi-model-curator/` | 2026-05-05 | pi-stack/extensions/model-curator（C 类） |
+| `~/.pi/.pensieve/` 数据 | 2026-05-05 | triage + import 到 gbrain `source: pi-stack`，物理目录删除 |
+| `~/.pi/agent/skills/pensieve/` submodule | 2026-05-05 | 从 ~/.pi/.gitmodules 移除（ADR 0005） |
