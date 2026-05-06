@@ -360,7 +360,7 @@ export default function (pi: ExtensionAPI) {
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
       tools: Type.Optional(Type.String({ description: "Ignored in subprocess mode — sub-pi uses built-in tools" })),
-      timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 300000)" })),
+      timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
     }),
 
     prepareArguments(args: Record<string, unknown>) {
@@ -419,11 +419,11 @@ export default function (pi: ExtensionAPI) {
           model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
-          timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 300000)" })),
+          timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 1800000 = 30min)" })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
       ),
-      timeoutMs: Type.Optional(Type.Number({ description: "Default per-task timeout in ms (default 300000)" })),
+      timeoutMs: Type.Optional(Type.Number({ description: "Default per-task timeout in ms (default 1800000 = 30min)" })),
     }),
 
     prepareArguments(args: Record<string, unknown>) {
