@@ -1,10 +1,13 @@
 # Pi 知识管理架构设计
 
-> 基于 2026-05-06 用户原始架构想法 + Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro 三方深度讨论综合而成。
+> 基于 2026-05-06 用户原始架构想法 + 两轮 T0 深度讨论综合而成。
+> 参与者：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro
 
-## 原始起因（用户原始想法，2026-05-06）
+---
 
-关于知识沉淀，用户提出以下更高层次的框架性想法，作为本设计的出发点：
+## 1. 原始起因：用户的 9 点框架性想法（2026-05-06）
+
+关于知识沉淀，用户提出以下框架性想法，作为本设计的出发点：
 
 1. 知识分为两层：**项目级知识**和**世界级知识**
 2. 项目级知识提取原则来自 pensieve 的 maxims / decisions / knowledge 三个维度
@@ -16,92 +19,85 @@
 8. 上述工具中只有 sidecar 使用的写入工具需要区分项目级写入还是世界级写入
 9. 以上是粗略想法，需要进一步补充和完善
 
-## 0. 核心原则
+---
+
+## 2. 用户补充追问（2026-05-06）
+
+在第一轮讨论后，用户针对三个关键设计决策点提出进一步追问：
+
+**追问 A：short-term 概念是否还有用？**
+> 在旧的 pensieve 体系中有一个"short-term"分类。在新架构中，Session 层已覆盖会话内临时知识，但"跨 session 但仍为临时"的知识（如分支临时决策）和"世界级暂存"（如未经验证的洞察）是否需要 short-term？如果需要，它应该是 scope 的一层还是任意层的属性？
+
+**追问 B：gbrain 是否真的有必要？**
+> 从检索质量、版本控制、离线可用、人类可编辑、搭建复杂度、维护负担、跨机器同步、扩展性、成本、锁定风险、AI 原生特性、多项目联邦、与 project 层同构性等多个维度，全面评估 gbrain 与纯 markdown 存储的优劣。是否存在"md 做主存储 + 自动构建向量索引"的混合方案？
+
+**追问 C：~/.abrain 是否可行？**
+> 如果世界级也用 markdown + git 存储，放在 `~/.abrain/` 作为独立版本化仓库。分析这个方案是否合理，以及它与 `~/.pi/.pensieve/` 的功能边界、引用机制、多机器同步策略。
+
+---
+
+## 3. 核心架构原则
+
+从用户原始想法和两轮 T0 讨论中提炼的核心原则：
 
 1. **读写分离**：只有 sediment sidecar 可以写持久知识。主 session、dispatch 子进程、所有其他 LLM 调用路径只能读。
 2. **读接口统一**：对 LLM 暴露的查询工具不区分项目级/世界级——区分是噪音。
 3. **写入显式 scoped**：只有 sidecar 的写入工具需要区分目标层级。
-4. **存储后端可插拔**：project 用 markdown + git，world 用 gbrain。Facade 确保切换后端不改工具接口。
+4. **Scope × Lifetime 正交**：知识的适用范围（scope）和失效时间（lifetime）是两个独立维度，不应折叠。
+5. **Markdown 为唯一源真（source of truth）**：所有知识以 markdown + git 存储。向量索引、图索引为可重建的派生制品——索引是 view，文本是 table。
+6. **Facade 模式隔离**：LLM 只看到统一的 Memory Facade，底层存储拓扑变更不影响上层。
+7. **默认永久，显式临时**：大部分知识无过期时间。只有真正临时的条目显式声明 lifetime。
+8. **Graceful degradation**：派生索引不可用时（离线、损坏、未构建），系统降级到 grep，不失效。
+9. **拒绝完备性**：默会知识入库的永远是投影，不是本体。staging 区容纳未经验证的洞察，不强行要求 clean rule。
 
 ---
 
-## 1. 三层知识模型
+## 4. 知识模型
 
-### 1.1 层级定义
+### 4.1 三层 Scope
 
-| 层 | 生命周期 | 存储 | 写入者 | 示例 |
+| 层 | 生命周期 | 存储位置 | 写入者 | 示例 |
 |---|---|---|---|---|
 | **Session** | 当前会话 | 内存 scratchpad | 主 agent（零摩擦） | "已验证 foo.ts 调用链安全，别再查"、"B 方案已排除" |
-| **Project** | 项目存活期 | Markdown + git（`.pensieve/`） | sediment sidecar | ADR 决策、模块边界、测试规范、部署约束 |
-| **World** | 跨项目持久 | gbrain | sediment sidecar（with gates） | dispatch 并行陷阱、tmux 主 pane 不关、argv/@file 选择 |
+| **Project** | 项目存活期 | `<project>/.pensieve/`（md + git） | sediment sidecar | 架构决策、模块边界、测试规范、部署约束 |
+| **World** | 跨项目持久 | `~/.abrain/`（md + git） | sediment sidecar（with promotion gates） | dispatch 并行陷阱、tmux 主 pane 不关、argv/@file 选择 |
 
-**Session 层关键设计**：
-- 主 agent 可以直接写 session scratchpad，不需要走 voter/sidecar。
-- Session 结束自动蒸发（或保留 3 轮 activity 作为 sticky note）。
-- 与 project/world 完全分离的写入路径——session 层的随意性不污染持久层。
+**不需要的层级**：团队/组织层（当前单用户架构不需要身份模型。如有需要，通过 git 共享 `.pensieve/` 即可）。
 
-### 1.2 不需要的层级
+### 4.2 正交属性：Scope × Lifetime × Maturity
 
-- **团队/组织层**：当前是单用户 agent，不需要身份模型。如有需要，通过 git 共享 `.pensieve/` 即可。
-- **用户偏好层**：可以放在 world 层作为特殊 type（`type: preference`），不需要独立物理层。
+short-term 不作为 scope 第四层，而作为任意持久层上的 **lifetime 属性**。用 2×2 矩阵验证正交性：
 
----
+| scope \ lifetime | permanent | ephemeral |
+|---|---|---|
+| **Session** | ❌ 矛盾 | ✅ 会话内临时上下文 |
+| **Project** | ✅ 项目长期决策 | ✅ 分支实验决策、本周优先级 |
+| **World** | ✅ 经验证的通用 maxim | ✅ 未经验证的 staging 候选 |
 
-## 2. 二维 Schema（scope × kind）
+六个有效象限，四个已有真实用例。如果硬把 short-term 当 scope 层，会丢失"world 级临时暂存"这个关键需求。
 
-"项目级 / 世界级"是一维 scope。知识条目还需要第二维 **kind**。
+**推荐模型**：
 
-### 2.1 Schema 定义
+```yaml
+# 知识条目的核心元数据
+scope: session | project | world       # 空间边界——适用于哪里？
+kind: maxim | decision | anti-pattern | pattern | fact | preference | smell
+status: provisional | active | contested | deprecated | superseded | archived
+confidence: 0-10
 
-```typescript
-interface KnowledgeEntry {
-  // 主键
-  slug: string;          // e.g. "world:dispatch-parallel-trap"
-
-  // 二维分类
-  scope: 'session' | 'project' | 'world';
-  kind:  'maxim' | 'decision' | 'anti-pattern' | 'pattern' | 'fact' | 'preference' | 'smell';
-
-  // 生命周期
-  status: 'provisional' | 'active' | 'contested' | 'deprecated' | 'superseded' | 'archived';
-  confidence: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
-
-  // 内容
-  title: string;
-  summary: string;       // ≤200 tokens，用于 search snippet
-  body: string;          // 完整内容
-  trigger_phrases: string[];   // 被动回忆触发词
-
-  // 演化
-  superseded_by?: string;
-  relates_to?: string[];
-  derives_from?: string[];
-
-  // 来源
-  provenance: {
-    session_id: string;
-    project_source: string;
-    model: string;
-    created_at: string;
-    updated_at: string;
-    last_verified_at?: string;
-  };
-
-  // 边界
-  applies_to_versions?: string;    // e.g. "pi >= 6.5, node >= 20"
-  boundaries?: string;             // 什么时候不适用
-
-  // 安全
-  visibility: 'private' | 'project' | 'world';
-  contains_sensitive: boolean;
-
-  // 证据
-  evidence_count: number;
-  evidence_sessions: string[];
-}
+lifetime:                              # 时间边界——何时失效？
+  kind: permanent | ttl | event | review
+  expires_at: 2026-05-14               # kind=ttl
+  expire_on: branch_merged:feat/x      # kind=event（"分支合入后失效"）
+  review_after: 2026-05-10             # kind=review（"到期复查是否应 promote"）
 ```
 
-### 2.2 kind 详细定义
+- 默认 `lifetime.kind: permanent`，绝大多数条目零负担
+- Event-driven expiry（`expire_on: branch_merged`）比固定 7 天更准确
+- Session scope 的 lifetime 强制为 `session`（write-path validator 保证）
+- GC 是独立 pipeline，不挑 scope，过期条目移入 `archive/` 而非直接删除
+
+### 4.3 Kind 详细定义
 
 | kind | 权威性 | 说明 | 例子 |
 |---|---|---|---|
@@ -113,33 +109,19 @@ interface KnowledgeEntry {
 | **preference** | PREFER | 用户/项目偏好 | "用户喜欢中文回复" |
 | **smell** | MAYBE | 刚浮现的模式，confidence < 5 | "这个错误信息 smells like 权限问题" |
 
-### 2.3 写入分流规则
+### 4.4 默会知识管道（Tacit Knowledge Pipeline）
 
-| scope | kind 支持 | 写入路径 |
-|---|---|---|
-| session | preference, fact | 主 agent 直接写 scratchpad |
-| project | maxim, decision, anti-pattern, pattern, fact, preference | sediment project lane |
-| world | maxim, anti-pattern, pattern, fact | sediment world lane（with gates） |
-
----
-
-## 3. 默会知识管道
-
-### 3.1 核心洞察
-
-Polanyi 的"默会知识"不是"不可说"，而是"不能**完全**说"。每次外化都会产生新的默会背景。架构上要承认：**库里存的永远是 tacit knowledge 的投影，不是本体。**
-
-### 3.2 三级管道
+Polanyi 的"默会知识"不是"不可说"，而是"不能**完全**说"。每次外化都会产生新的默会背景。架构上承认：库里存的永远是 tacit knowledge 的**投影**，不是本体。
 
 ```
 smell (staging)  ──验证──→  pattern (project)  ──promotion gates──→  maxim (world)
     ↓                            ↓                                    ↓
 confidence < 5              confidence 5-7                       confidence 8-10
 project scope only          project scope                       world scope
-trigger_phrases 粗粒度       trigger_phrases 结构化              trigger_phrases 精确
+随意捕获，低承诺              半形式化，有边界                   跨项目验证，高承诺
 ```
 
-### 3.3 何时可以入库 vs 何时保留为默会
+**可显式化 vs 必须保持默会的边界**：
 
 | 可以写 | staging 中等待 | 永远不写（保持默会） |
 |---|---|---|
@@ -147,349 +129,315 @@ trigger_phrases 粗粒度       trigger_phrases 结构化              trigger_p
 | "argv 传 long prompt 用 @file" | "这个 PR 的 shape 不对" | 知道什么时候停止调查、该动手试 |
 | "tmux 永不关主 pane" | "感觉这个架构会 brittle" | 判断"该重构还是该加 if"的嗅觉 |
 
-### 3.4 Smell Entry 格式
-
-```yaml
-slug: smell:permission-smell-pattern
-kind: smell
-scope: project
-confidence: 3
-status: provisional
-title: "错误信息含 EACCES 时的排查嗅觉"
-summary: >
-  当看到一个 EACCES 错误但路径显然正确时，
-  smell 的方向依次是：父目录权限 → SELinux → container uid mapping
-trigger: "EACCES 错误 + 路径看似正确"
-boundaries: "标准 Linux 环境，不适用于 Windows ACL"
-provenance:
-  session_id: "session-xxx"
-  model: "claude-opus-4-7"
-```
-
----
-
-## 4. Memory 工具接口
-
-### 4.1 暴露给 LLM 的工具（读）
-
-```
-memory_search(query: string, filters?: { scope?, kind?, status? })
-  → SearchResult[] {
-      slug, title, summary, score,
-      scope, kind, confidence, status,
-      source: 'md-grep' | 'gbrain-hybrid',
-      related_slugs: string[]
-    }
-
-memory_get(slug: string, options?: { include_related?: boolean })
-  → KnowledgeEntry (完整内容 + 关联条目摘要)
-
-memory_list(filters: { scope?, kind?, status?, limit?, cursor? })
-  → { entries: EntryMeta[], next_cursor? }
-  // LLM 很少用，主要用于浏览和调试
-
-memory_relate(from_slug: string, to_slug: string, relation: string)
-  → void
-  // 声明关系，不写内容。sidecar 后续处理物理写入
-```
-
-### 4.2 暴露给 sediment 的工具（写）
-
-```
-memory_write(entry: Omit<KnowledgeEntry, 'provenance'>)
-  → { slug: string, status: 'created' | 'merged' | 'rejected', reason?: string }
-
-memory_update(slug: string, patch: Partial<KnowledgeEntry>)
-  → void
-
-memory_deprecate(slug: string, reason: string, superseded_by?: string)
-  → void
-
-memory_merge(source_slugs: string[], target_slug: string)
-  → void
-
-memory_promote(slug: string, target_scope: 'world')
-  → { slug: string, promoted: boolean, gates_passed: string[] }
-```
-
-### 4.3 LLM 不暴露的参数
-
-- `scope`（在 search 中隐式处理：默认两层都搜，当前 project 加权）
-- 底层后端详情（`source` 字段只影响排序，不由 LLM 控制）
-- 写入相关工具
-
 ---
 
 ## 5. 存储架构
 
-### 5.1 Facade 模式（不用统一 Interface）
+### 5.1 核心决策：Markdown 为 Source of Truth
+
+> **知识管理系统应选择最长半衰期的格式作为 source of truth，所有性能结构（向量索引、全文搜索、图边）都作为可重建的派生制品。索引是 view，文本是 table。永远不要让索引成为 source of truth。**
+
+经过多维度评估，**世界级知识与项目级知识统一使用 markdown + git 作为 source of truth**：
+
+| 维度 | gbrain 专用服务 | 纯 md + git | 评估 |
+|------|----------------|-------------|------|
+| 检索质量 | 🟢 语义向量 + 关键词 + 图查询 | 🟡 仅 grep，用词不同时漏检 | gbrain 胜出，但可通过派生索引获得 |
+| 版本控制 | 🟡 需自己实现 | 🟢 git 原生（blame/diff/revert） | md 碾压 |
+| 离线可用 | 🔴 依赖网络/本地服务 | 🟢 纯文件系统，永远可用 | 决定性差异 |
+| 人类可读可编辑 | 🟡 通过 CLI | 🟢 任何编辑器直接改 | md 碾压 |
+| 搭建复杂度 | 🔴 安装服务、配置、运行 | 🟢 `mkdir` 即可 | 零搭建 vs 持续维护 |
+| 维护负担 | 🔴 服务需升级、排障 | 🟢 `git commit` 即为维护 | 长期成本差异巨大 |
+| 跨机器同步 | 🟡 取决于后端实现 | 🟢 `git push/pull` | 30 年工业验证 |
+| 锁定风险 | 🔴 后端特定格式 | 🟢 纯文本，`cp -r` 迁移 | 50 年后 md 依然可读 |
+| AI 原生特性 | 🟢 嵌入向量、图、聚类 | 🔴 纯文本无结构理解 | 可通过派生索引获得 |
+| 多项目联邦 | 🟢 统一索引 | 🟡 需遍历多目录 | gbrain 胜出，但 md+facade 可行 |
+
+**结论**：gbrain 的优势（语义检索、AI 原生特性）都可以通过 **从 md 派生的可重建索引层** 获得，而 md 的结构性优势（离线、git、人类可编辑、零锁定）是 gbrain 换不回来的。**gbrain 的理想角色不是替代 markdown，而是作为索引构建 pipeline 中的一个组件。**
+
+### 5.2 存储拓扑
+
+```
+源真层（source of truth）                  派生索引层（可重建）
+─────────────────────────────          ──────────────────────────
+project/                                .gitignore'd:
+  <project>/.pensieve/**/*.md            .pensieve/.index/
+                                           ├── vectors.db
+world/                                    ├── fulltext.db
+  ~/.abrain/**/*.md                       └── graph.db
+    ├── maxims/
+    ├── patterns/                       ~/.abrain/.state/index/
+    ├── anti-patterns/                    ├── vectors.db
+    ├── facts/                            ├── fulltext.db
+    ├── staging/                          └── graph.db
+    ├── archive/
+    ├── schemas/
+    └── _index.md
+```
+
+**关键约束**：
+1. 必须先有 rebuild 脚本，再构建索引——从干净 checkout 可完全重建。这是"索引是派生品"的契约证明。
+2. Graceful degradation 是设计保证：派生索引不可用时 fallback 到 `rg`，结果标注 `degraded: true`。
+3. 索引重建应在秒到分钟级完成（数百到数千条 entry）。
+4. Embedding 模型优先本地（CPU 可跑），避免引入新的云依赖。
+
+### 5.3 Facade 模式
+
+不统一 `KnowledgeStorage` interface（会按最小公约数砍掉两边长处），而用 Facade 路由：
 
 ```
                         LLM Tools
                   memory_search | memory_get | memory_list
                               │
                         Memory Facade
-                    (路由、归并、排序、去重、脱敏、权限)
+                    (路由、归并、排序、去重、脱敏、权限、degrade)
                      /                    \
             ProjectStore               WorldStore
-    (markdown + ripgrep +         (gbrain: vector + keyword
-     optional embed cache)               + graph)
+    (markdown + ripgrep +         (markdown + ripgrep +
+     optional embed index)         optional embed index)
+    ── <project>/.pensieve/       ── ~/.abrain/
 ```
-
-### 5.2 为什么不统一 Interface
-
-| 能力 | Markdown | gbrain |
-|---|---|---|
-| grep 精确搜索 | ✅ 强 | ⚠️ 中 |
-| 语义搜索 | ❌ 弱（需额外 embed） | ✅ 强 |
-| graph 遍历 | ❌ 弱 | ✅ 强 |
-| git 版本化 | ✅ 原生 | ❌ 弱 |
-| 人类直接编辑 | ✅ 强 | ⚠️ 取决于实现 |
-| 离线读取 | ✅ 强 | ❌ 弱 |
-
-统一接口会按最小公约数砍掉两边长处。Facade 让各后端保留全部能力。
-
-### 5.3 搜索结果归并
 
 ```typescript
 // Facade 中的 search 逻辑
-async function search(query: string, context: SessionContext): Promise<SearchResult[]> {
-  // 并发查询两边
-  const [mdResults, gbrainResults] = await Promise.all([
+async function search(query: string, ctx: SessionContext): Promise<SearchResult[]> {
+  const [projectResults, worldResults] = await Promise.all([
     projectStore.search(query),
     worldStore.search(query),
   ]);
 
-  // 统一格式化
-  const allResults = [
-    ...mdResults.map(r => ({ ...r, source: 'md-grep' })),
-    ...gbrainResults.map(r => ({ ...r, source: 'gbrain-hybrid' })),
-  ];
-
-  // 排序（当前 project → world 加权，引用热度加权，confidence 加权）
-  const scored = allResults.map(r => ({
+  // 排序（当前 project 加权 > 引用热度 > confidence）
+  const scored = [projectResults, worldResults].flat().map(r => ({
     ...r,
     finalScore: r.score
-      * (r.scope === 'project' ? context.projectBoost : 1)
-      * Math.log(1 + r.citationCount)
-      * (r.confidence / 10),
+      * (r.scope === 'project' ? ctx.projectBoost : 1)
+      * Math.log(1 + (r.citationCount ?? 0))
+      * ((r.confidence ?? 5) / 10),
   }));
 
   return scored
     .filter(r => r.status !== 'archived')
     .sort((a, b) => b.finalScore - a.finalScore)
-    .slice(0, 20);  // 截断，LLM 从 metadata + snippet 中选择 hydrate
+    .slice(0, 20);
 }
 ```
 
-### 5.4 项目级 Markdown 布局
+### 5.4 ~/.abrain 设计
 
-```text
-.pensieve/
-├── maxims/                    # 项目级 maxims
-│   └── never-close-main-tmux-pane.md
-├── decisions/                 # ADR 式决策
-│   └── 2026-05-06-use-pnpm.md
-├── knowledge/                 # 事实、pattern、anti-pattern
-│   └── foo-module-call-chain.md
-├── staging/                   # smell / provisional entries
-│   └── permission-smell-pattern.md
-├── _index.md                  # 自动生成的 catalogue
-└── _state.md                  # 元数据
+**定位**：世界级知识的独立 git 仓库，与 `~/.pi` 完全平行、无文件系统耦合。
+
+**目录结构**：
+
+```
+~/.abrain/
+├── maxims/              # 硬约束、通用原则
+├── patterns/            # 可复用解决方案
+├── anti-patterns/       # 已知陷阱
+├── facts/               # 跨项目事实
+├── staging/             # 未经验证的暂存洞察
+├── archive/             # 过期/废弃条目
+├── schemas/             # frontmatter schema 定义
+├── _index.md            # 自动生成的目录
+└── .state/              # gitignored
+    ├── index/           # 派生向量/全文索引
+    ├── locks/           # 写入锁
+    └── pending.jsonl    # 待处理队列
 ```
 
-条目文件格式：
+**~/.abrain vs ~/.pi/.pensieve/ 边界**：
+
+| 维度 | `.pensieve/` (project) | `~/.abrain/` (world) |
+|------|------------------------|---------------------|
+| scope | 本项目特定 | 跨项目通用 |
+| 判断标准 | 离开当前 repo 不成立 | 换完全不同的项目仍然成立 |
+| 示例 | "本项目用 pnpm，不用 npm" | "argv 传 long prompt 一律用 @file" |
+| 示例 | "`src/foo.ts` 的设计原因是 X" | "scope 和 lifetime 应建模为正交维度" |
+
+**写入决策树**：
+
+```
+sediment 拿到新洞察 P：
+
+P 引用了具体文件路径 / 模块名 / API 名？
+├─ 是 → 写 <project>/.pensieve/
+└─ 否 → P 在 ≥2 个不同领域的项目验证过？
+        ├─ 是 → 写 ~/.abrain/{maxims|patterns|anti-patterns}/
+        └─ 否 → 写 ~/.abrain/staging/，等第二次命中再 promote
+```
+
+辅助规则：
+- pensieve 条目可以引用 abrain 条目（"本项目应用了 abrain:某原则"）
+- abrain 条目不应引用 pensieve 条目（通用不依赖具体）
+- 引用用 logical id（`abrain:model-orthogonal-concerns`），不用 filesystem path
+
+**引用机制：环境变量 `ABRAIN_ROOT`**
+
+```typescript
+const ABRAIN_ROOT = process.env.ABRAIN_ROOT ?? path.join(os.homedir(), '.abrain');
+```
+
+| 方案 | 判断 |
+|------|------|
+| `ABRAIN_ROOT` 环境变量 | ✅ 零耦合，测试可指 fixture，不同机器可不同路径 |
+| git submodule | ❌ 把 abrain commit 钉到 pi，每次写入产生 dirty pointer |
+| symlink | ❌ 跨平台不一致，backup/clone 时悬空 |
+
+**跨机器同步**：
+
+| 时机 | 动作 |
+|---|---|
+| 机器启动 / session 开始 | `git pull --rebase --autostash` |
+| sediment 写完一条 | `git add . && git commit`（不 auto push） |
+| 会话结束 | 安全脚本：`pull --rebase --autostash && push` |
+| 冲突 | 不自动解决，pending 等人工 |
+
+**条目内 append-only timeline 段**减少 git 冲突：
 
 ```markdown
----
-slug: project:never-close-main-tmux-pane
-scope: project
-kind: maxim
-status: active
-confidence: 10
-trigger_phrases: [tmux, kill-pane, close-window, detach]
-boundaries: "适用于 tmux 环境，不适用于 screen/zellij"
-created_at: 2026-05-01T12:00:00Z
-updated_at: 2026-05-06T08:30:00Z
-last_verified_at: 2026-05-06T08:30:00Z
-model: claude-opus-4-7
-session_id: sess-abc123
-project_source: pi-global
-superseded_by:
-relates_to: [world:tmux-escape-time-250ms]
-derives_from:
-evidence_count: 5
-evidence_sessions: [sess-abc123, sess-def456, sess-ghi789]
+## Timeline
+- 2026-05-07 | machine-A | First captured during pi memory design
+- 2026-05-09 | machine-B | Validated in OAuth refactor
+```
+
+纯追加的 merge 几乎总能自动完成。
+
 ---
 
-# 永不关闭 tmux 主 pane
+## 6. Memory 工具接口
 
-## Principle
+### 6.1 暴露给 LLM 的读工具（统一接口，不暴露 scope）
 
-pi 在 tmux 中运行时，运行 pi 的 pane（主 pane）绝对不能通过
-kill-pane / kill-window 关闭。
+```
+memory_search(query: string, filters?: { kind?, status? })
+  → SearchResult[] {
+      slug, title, summary, score,
+      scope, kind, confidence, status,
+      backend: 'rg' | 'vector' | 'graph',   // 后端标签，不做强制融合
+      degraded?: true,
+      missing_backends?: string[],
+      related_slugs: string[]
+    }
 
-## Action
+memory_get(slug: string, options?: { include_related?: boolean })
+  → KnowledgeEntry {
+      slug, title, summary, body,
+      scope, kind, status, confidence,
+      trigger_phrases, related, superseded_by,
+      provenance, boundaries, visibility
+    }
 
-- 所有 `tmux kill-pane` / `tmux kill-window` 操作前必须检查目标
-- 拆分 pane / new-window 后立即 `select-pane` 切回主 pane
-- 关闭其他 pane 时确保主 pane 不在目标列表中
+memory_list(filters: { scope?, kind?, status?, limit?, cursor? })
+  → { entries: EntryMeta[], next_cursor? }
 
-## Boundaries
+memory_relate(from_slug: string, to_slug: string, relation: string)
+  → void
+  // 声明关系，不写内容。sidecar 后续处理物理写入
+```
 
-- 主 pane 的定义：运行 `pi` 进程的那个 pane
-- 不适用于：非 tmux 环境、screen、zellij
-- 例外：pi 进程已主动退出时
+### 6.2 暴露给 sediment 的写工具（不对外暴露）
 
-## Evidence
+```
+memory_write(entry, destination: 'project' | 'world')
+  → { slug, status: 'created' | 'merged' | 'rejected', reason? }
 
-- sess-abc123: 误关主 pane 导致 session 丢失
-- sess-def456: split-window 后忘记 select-pane，日志写入错误 pane
-- sess-ghi789: kill-window 误杀主 pane（5 次确认后）
+memory_update(slug, patch)
+memory_deprecate(slug, reason, superseded_by?)
+memory_merge(source_slugs[], target_slug)
+memory_promote(slug, target_scope: 'world')
+  → { slug, promoted, gates_passed[] }
 ```
 
 ---
 
-## 6. 注入策略
+## 7. 注入策略
 
-### 6.1 三层注入
+### 7.1 三层注入
 
 | 注入位置 | 内容 | Token 预算 | 更新频率 |
 |---|---|---|---|
-| **System Prompt (T1)** | 当前 project 的顶级 maxims（≤5 条）+ 导航卡 | ≤2K tokens | 每 session 启动 |
-| **Tool Retrieval (T2)** | 按需 search → get hydrate | ≤6K tokens per turn | 按需 |
-| **Passive Nudge (T3)** | trigger phrase 匹配推送 | ≤300 tokens per turn | 每轮 agent_end |
+| **System Prompt (T1)** | 当前 project 的顶级 maxims（≤5 条）+ 导航 catalogue | ≤2K tokens | 每 session 启动 |
+| **Tool Retrieval (T2)** | 按需 search → get hydrate | ≤6K tokens/轮 | 按需 |
+| **Passive Nudge (T3)** | trigger phrase 匹配推送 | ≤300 tokens/轮 | 每轮 agent_end |
 
-### 6.2 导航卡（注入到 system prompt 最末尾）
+### 7.2 被动回忆（Passive Nudge）
 
-```
-## Memory
-You have access to persistent project and world knowledge:
-- memory_search "query" — find relevant entries
-- memory_get "slug" — read full entry
-- memory_list — browse entries
-- memory_relate — connect entries
+解决"你不会 search 你不知道存在的东西"这个根本矛盾：
 
-Current project memory: 12 maxims, 8 decisions, 31 knowledge entries
-Use memory_search before changing architecture or when encountering errors.
-```
-
-### 6.3 被动回忆（Passive Nudge）
-
-每条 world knowledge 带 `trigger_phrases` 字段。sidecar 在 `agent_end` 后的 pipeline 中检测 agent 本轮发言是否命中任何 trigger phrase，命中则注入该条目的 summary 到下一轮的 T3 nudge。
+每条 world knowledge 带 `trigger_phrases` 字段（创建时自动提取）。sidecar 在每轮 agent_end 后检测 agent 发言是否命中 trigger phrase，命中则注入该条目 summary 到下一轮的 T3 nudge。
 
 ```typescript
-// sidecar 中的 passive recall 逻辑
-function matchPassiveRecall(agentMessages: string[], knowledge: KnowledgeEntry[]): Nudge[] {
-  const nudges: Nudge[] = [];
-  const agentText = agentMessages.join(' ').toLowerCase();
-
-  for (const entry of knowledge) {
-    if (entry.status === 'archived' || entry.status === 'deprecated') continue;
-    for (const phrase of entry.trigger_phrases) {
-      if (agentText.includes(phrase.toLowerCase())) {
-        nudges.push({
-          slug: entry.slug,
-          title: entry.title,
-          summary: entry.summary,
-          confidence: entry.confidence,
-          trigger: phrase,
-        });
-        break;
-      }
-    }
-  }
-
-  return nudges.slice(0, 3);  // 最多 3 条
+function matchPassiveNudge(agentText: string, knowledge: KnowledgeEntry[]): Nudge[] {
+  return knowledge
+    .filter(e => e.status === 'active')
+    .filter(e => e.trigger_phrases.some(p => agentText.toLowerCase().includes(p.toLowerCase())))
+    .slice(0, 3)
+    .map(e => ({ slug: e.slug, title: e.title, summary: e.summary }));
 }
 ```
 
-### 6.4 Context Budget 硬约束
+### 7.3 Context Budget 硬约束
 
 ```
-T1 (system prompt)     ≤ 2,000 tokens
-T2 (tool retrieval)    ≤ 6,000 tokens per turn
-T3 (passive nudge)     ≤ 300 tokens per turn
-──────────────────────────────────────
-Total memory overhead  ≤ 8,300 tokens
-
-超过 8K tokens 后，额外知识从零收益变为负收益
-（挤占 LLM 对当前任务的注意力）
+T1 (system)     ≤ 2,000 tokens
+T2 (retrieval)  ≤ 6,000 tokens
+T3 (nudge)      ≤   300 tokens
+───────────────────────────
+Total            ≤ 8,300 tokens
 ```
+
+超过 8K 后额外知识从零收益变为负收益（挤占 LLM 对当前任务的注意力）。
 
 ---
 
-## 7. 读写分离
+## 8. 读写分离
 
-### 7.1 规则
+### 8.1 规则
 
 | 角色 | 读 | 写 session | 写 project | 写 world |
 |---|---|---|---|---|
 | 主 session agent | ✅ | ✅ | ❌ | ❌ |
 | dispatch 子进程 | ✅ | ❌ | ❌ | ❌ |
 | sediment sidecar | ✅ | ❌ | ✅ | ✅ (with gates) |
-| 用户（`/skill:pensieve self-improve`） | ✅ | ❌ | 触发 intent | 触发 intent |
+| 用户显式触发 | ✅ | ❌ | 触发 intent | 触发 intent |
 
-### 7.2 主 session 的"意图通道"
-
-主 agent 不能写持久知识，但可以通过 `memory_relate` 声明关系，或表达"这条值得记"的意图：
-
-```
-memory_relate("project:foo-decision", "world:dispatch-parallel-trap", "derives_from")
-```
-
-这产生一个结构化 intent，sidecar 在 turn end 读取并决定是否写入。
-
-### 7.3 单写入者保证
-
-多个 pi 进程可能同时有 sediment 在跑。必须用 file lock 保证单写入者：
-
-```typescript
-// sediment 启动时
-async function acquireWriteLock(): Promise<boolean> {
-  const lockFile = path.join(lockDir, 'sediment.lock');
-  try {
-    // O_CREAT | O_EXCL → 原子 create
-    fs.writeFileSync(lockFile, String(process.pid), { flag: 'wx' });
-    return true;
-  } catch (e) {
-    if (e.code === 'EEXIST') {
-      // 已有其他 sediment 实例持有锁
-      return false;
-    }
-    throw e;
-  }
-}
-
-// 抢锁失败 → 退化为只读 + 入队 pending queue
-if (!(await acquireWriteLock())) {
-  mode = 'readonly';
-  enqueueInsights(insights);  // 等下次拿到锁再写
-}
-```
-
-### 7.4 写入路由（fail-closed）
+### 8.2 写入路由（Fail-Closed）
 
 不能靠 cwd 推断目标项目。写入由 harness 显式注入：
 
 ```typescript
-// sediment 收到 agent_end 时的 context
 interface WriteContext {
-  project_source: string;      // e.g. "pi-global"
-  project_root: string;        // e.g. "/home/worker/.pi"
+  project_source: string;     // e.g. "pi-global"
+  project_root: string;       // e.g. "/home/worker/.pi"
   user_id: string;
   session_id: string;
   allowed_scopes: ('project' | 'world')[];
 }
 ```
 
-无法确定 target project 时 → **不写，记录 warning**。错写比漏写危险。
+无法确定 target project → **不写，记录 warning**。错写比漏写危险。
+
+### 8.3 单写入者保证
+
+多个 pi 进程可能同时有 sediment 在跑。用 file lock 保证单写入者：
+
+```typescript
+async function acquireWriteLock(lockDir: string): Promise<boolean> {
+  const lockFile = path.join(lockDir, 'sediment.lock');
+  try {
+    fs.writeFileSync(lockFile, String(process.pid), { flag: 'wx' }); // O_CREAT | O_EXCL
+    return true;
+  } catch (e) {
+    if (e.code === 'EEXIST') return false; // 已有其他实例持有锁
+    throw e;
+  }
+}
+// 抢锁失败 → 退化为只读 + 入队 pending queue
+```
 
 ---
 
-## 8. 演化机制
+## 9. 演化机制
 
-### 8.1 Promotion（Project → World）
+### 9.1 Promotion（Project → World）
 
 ```
 project knowledge
@@ -512,24 +460,19 @@ Gate 5: 冲突检查
 promoted → world scope, confidence ≥ 7, status: active
 ```
 
-### 8.2 Deprecation
+### 9.2 Deprecation
 
-```
-触发条件（任一）:
-  - 被新证据推翻（平台升级后旧规则不再成立）
-  - 命中频率连续 6 个月为 0
-  - 与新条目冲突且新条目证据更强
-  - 用户显式标记 obsolete
+触发条件（任一）：
+- 被新证据推翻（平台升级后旧规则不再成立）
+- 命中频率连续 6 个月为 0
+- 与新条目冲突且新条目证据更强
+- 用户显式标记 obsolete
 
-操作:
-  status → 'deprecated'
-  superseded_by → 新条目 slug（如有）
-  retains body, provenance（保留历史，可查"为什么以前这么做"）
-```
+操作：`status → deprecated`，`superseded_by → 新条目 slug`。保留 body 和 provenance（可查"为什么以前这么做"）。
 
-### 8.3 Specialization
+### 9.3 Specialization（不是降级）
 
-不是降级，而是加约束条件：
+world 知识不降级为 project。若某 world maxim 只在特定条件下成立，通过 specialization 加约束：
 
 ```
 world:avoid-argv-long-prompt
@@ -538,146 +481,72 @@ world:avoid-argv-long-prompt (pi-spawn-mode)
     boundaries: "仅适用于 spawn 传参，REST API/HTTP POST 无此问题"
 ```
 
-### 8.4 版本化
-
-不要 semver 版本化。用 git 免费获得完整版本历史。知识条目只需：
-
-- `superseded_by`：取代链
-- `updated_at` / `last_verified_at`：时间戳
-- `applies_to_versions`：版本约束（如 "pi >= 6.5"）
-- git blame：细粒度 diff
+不存在 World → Project 降级。如果 world 知识被证伪，直接 deprecate。
 
 ---
 
-## 9. 治理
+## 10. 治理
 
-### 9.1 冲突管理
+### 10.1 冲突管理
 
-两条规则互相矛盾时：
+两条规则矛盾时：**不要急着删**。两条都标 `status: contested`，互相 link，让 LLM 检索到时自行判断。冲突本身就是有价值的信息。
 
-```
-不要急着删一条。
-→ 两条都标 status: contested
-→ 互相 link（relates_to）
-→ 在 body 顶部加 conflict notice
-→ LLM 检索到时看到冲突 → 它自行判断
-```
+### 10.2 安全脱敏
 
-冲突本身就是有价值的信息。
-
-### 9.2 引用热度排序
-
-搜索结果排序不只靠文本相关性：
-
-```
-finalScore = textScore
-  × projectBoost（当前 project 加分）
-  × log(1 + citationCount)（被多少条目引用）
-  × (confidence / 10)
-  × recencyDecay（最近更新的加分，但权重低于热度）
-```
-
-### 9.3 安全脱敏
-
-sediment 写入前必须过脱敏层：
+sediment 写入前过 redactor pipeline：
 
 | 模式 | 处理 |
 |---|---|
-| 像 credential 的字符串 | 替换为 `[REDACTED]` |
-| IP 地址 / 内部 hostname | 替换为 `[HOST]` |
-| 绝对路径含用户 home | 替换为 `$HOME/...` |
-| API key / token | 整条 knowledge 拒绝写入 |
+| credential 字符串 | 替换为 `[REDACTED]` |
+| IP / 内部 hostname | 替换为 `[HOST]` |
+| 绝对路径含 $HOME | 替换为 `$HOME/...` |
+| API key / token | 整条拒绝写入 |
 
 脱敏在 capture 阶段做，不事后 redact。
 
-### 9.4 Unsafe Failures
-
-```
-sidecar 看到如下内容 → 完全拒绝写入：
-- 可解析为 credential 的字符串
-- 客户数据
-- prompt injection payload
-- 非公开的内部 URL
-```
-
-### 9.5 检索评估
-
-长期需要指标：
+### 10.3 检索评估指标
 
 | 指标 | 含义 |
 |---|---|
 | precision@k | top-K 结果中相关比例 |
 | recall@k | 应召回的知识实际被召回的比例 |
-| deprecated-hit rate | LLM 使用的知识中有多少是已废弃的 |
-| duplicate rate | 搜索结果中重复/近似条目的比例 |
+| deprecated-hit rate | LLM 使用的知识中有多少已废弃 |
+| duplicate rate | 搜索结果中重复条目比例 |
 | wrong-scope write rate | project 知识被误写入 world 的频率 |
-| time-to-retrieve | 从 search 到 get hydrate 的延迟 |
-
----
-
-## 10. 索引与目录（Index / Catalogue）
-
-### 10.1 问题
-
-> "你不会 search 你不知道存在的东西"
-
-如果 agent 不知道 `dispatch-parallel-trap` 这条知识存在，它永远不会主动 search "dispatch 并行"。
-
-### 10.2 解决：自动生成的 Catalogue
-
-sediment 每次写入后增量重建 `_index.md`：
-
-```markdown
-# Project Knowledge Index
-
-## Maxims (3)
-- [永不关闭 tmux 主 pane](maxims/never-close-main-tmux-pane.md) — 运行 pi 的 pane 绝对不能 kill
-- [主 session 只读不写](maxims/main-session-read-only.md) — 只有 sidecar 可以持持久化
-- [文件操作用 edit 不用 write 覆盖](maxims/edit-not-write.md) — 小改动避免全文覆盖
-
-## Decisions (5)
-- [2026-05-01 gbrain 作为唯一记忆存储](decisions/2026-05-01-gbrain-as-sole-memory-store.md)
-- [2026-05-02 sediment 双轨管道](decisions/2026-05-02-sediment-two-track-pipeline.md)
-
-## Anti-Patterns (4)
-- [dispatch_agents 串行陷阱](knowledge/dispatch-parallel-trap.md)
-- [argv 传 long prompt](knowledge/argv-long-prompt.md)
-
-## Patterns (3)
-...
-
-## Facts (6)
-...
-```
-
-System prompt 中 include 这个文件。≤500 tokens 的开销换回"agent 知道该搜什么"的能力。
 
 ---
 
 ## 11. 实现路线图
 
-### Phase 1：Project 层落地（当前 pensieve 的升级）
+### Phase 1：Project 层落地（当前 pensieve 升级）
 
 1. Markdown 条目格式标准化（统一 frontmatter schema）
-2. `memory_search/get/list` 工具实现（grep-based，仅 project 层）
+2. `memory_search / get / list` 的 grep-based 实现（仅 project 层）
 3. Auto-generated `_index.md` catalogue
 4. Sediment 双轨管道（project lane + world lane）
 
 ### Phase 2：World 层接入
 
-1. gbrain `memory_search` hybrid 后端
-2. `memory_get` 跨 store dispatch
-3. World knowledge trigger_phrases + passive nudge
-4. Promotion gates（project → world）
+1. `~/.abrain/` 目录结构落地，独立 git repo
+2. `ABRAIN_ROOT` 环境变量支持
+3. Memory Facade 跨 store dispatch + graceful degradation
+4. Trigger phrases + passive nudge 机制
+5. Promotion gates（project → world）
 
-### Phase 3：治理与评估
+### Phase 3：派生索引
+
+1. `abrain reindex` rebuild 脚本（从 md 构建向量/全文/图索引）
+2. Facade 向量搜索 + grep fallback
+3. 索引新鲜度检测（git commit 对比）
+
+### Phase 4：治理与评估
 
 1. 冲突检测与 contested 状态
 2. 引用热度排序
 3. 安全脱敏 pipeline
 4. 检索评估指标采集
 
-### Phase 4：Session 层（可选）
+### Phase 5：Session 层（可选）
 
 1. Session scratchpad API
 2. Intent 通道（memory_relate）
@@ -685,198 +554,7 @@ System prompt 中 include 这个文件。≤500 tokens 的开销换回"agent 知
 
 ---
 
-## 补充分析（用户追加问题，2026-05-06）
-
-> 基于 Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro 三方二次讨论。
-
-### 问题 A：short-term 概念是否还有用？
-
-**结论：short-term 不应作为 scope 的第四层，应降级为任意持久层上的 lifetime 属性。**
-
-#### 为什么不是 scope 层？
-
-用 2×2 正交矩阵验证：
-
-| scope \ lifetime | permanent | ephemeral (short-term) |
-|---|---|---|
-| **Session** | ❌ 矛盾（session 蒸发） | ✅ 会话内临时上下文 |
-| **Project** | ✅ 项目长期决策 | ✅ 分支实验决策、本周优先级 |
-| **World** | ✅ 经过验证的通用 maxim | ✅ 未经验证的 staging 候选 |
-
-六个有效象限，四个已有实际用例。如果硬把 short-term 当 scope 层（Session/ShortTerm/Project/World），会丢失"world 级的临时暂存"这个真实需求。
-
-#### 推荐方案
-
-```yaml
-scope: session | project | world
-lifetime:
-  kind: permanent | ttl | event | review
-  expires_at: 2026-05-14          # kind=ttl 时
-  expire_on: branch_merged:feat/x # kind=event 时（如"分支合入后失效"）
-  review_after: 2026-05-10        # kind=review 时（如"到期复查"）
-```
-
-- 默认 `lifetime.kind: permanent`，绝大多数条目零负担
-- 只有真正临时的条目显式声明 lifetime
-- Event-driven expiry（`expire_on: branch_merged`）通常比固定 7 天更准确
-- Session scope 的 lifetime 强制为 `session`（write-path validator 保证）
-
-#### 世界级是否需要短期？
-
-**需要，且这是最关键的场景。** 首次踩坑的洞察只在一个项目验证过，直接写进 `world/maxims/` 会污染世界知识库。应写入 `world/staging/`（scope: world, status: staging, lifetime: ephemeral, ttl: 90d），等第二个项目验证后 promote 为 permanent。
-
-#### GC 策略
-
-- GC 是独立 pipeline，不挑 scope，按 frontmatter 的 lifetime 字段扫描
-- 过期条目不直接删除，移入 `archive/` 目录，保留失效原因
-- 提前 1 天提醒："以下条目即将过期，是否有值得保留的？"
-
----
-
-### 问题 B：gbrain 是否真的有必要？
-
-**结论：gbrain 不应作为 world 级知识的主存储。正确架构是 markdown + git = source of truth，向量/图索引 = 可重建的派生层。gbrain 的理想角色是索引构建 pipeline 中的一个组件。**
-
-#### 核心原则
-
-> **知识管理系统应选择最长半衰期的格式作为 source of truth，所有性能结构（向量索引、全文搜索、图边）都作为可重建的派生制品。索引是 view，文本是 table。永远不要让索引成为 source of truth。**
-
-#### 方案 C：md SoT + 派生索引（推荐）
-
-```
-源真层（source of truth）              派生索引层（可重建）
-─────────────────────────          ───────────────────────
-~/.abrain/**/*.md                  .gitignore'd:
-  ├── maxims/                        ├── .index/vectors.db
-  ├── patterns/                      ├── .index/fulltext.db
-  ├── anti-patterns/                 └── .index/graph.db
-  ├── facts/
-  └── staging/
-│                                  │
-│  每次 commit 后触发 hook        │
-│  或定时 rebuild                │
-└──────────────────────────────────┘
-      写入路径: agent → md → git commit
-      读取路径: agent → facade → [向量搜索 + grep 回退]
-```
-
-#### 关键约束
-
-1. **必须先有 rebuild 脚本，再构建索引。** 从干净 checkout 可完全重建。这是"索引是派生品"的契约证明。
-2. **graceful degradation 是设计保证，不是容错补丁。** 向量索引不可用时 fallback 到 `rg`，结果标注 `degraded: true, missing_backends: ["vector"]`。
-3. **索引重建时间应在秒到分钟级。** 数百到数千条 entry，embedding 生成 + 索引构建不应超过 2-3 分钟。
-4. **embedding 模型优先本地**（bge-small / nomic-embed-text，CPU 可跑），避免引入新的云依赖。
-
-#### gbrain 的重新定位
-
-- 不废弃 gbrain。让它从"主存储"降级为"可重建的派生索引层"
-- 如果 gbrain 已经存在并工作，让它就是方案 C 里的 indexer
-- 但要明确：SoT 是 `~/.abrain/*.md`，gbrain 的 DB 是从 md 导入的派生表，可以 drop & rebuild
-- 这样 gbrain 的"独立服务"问题被降级为"可选加速器"——挂了不影响阅读和编辑知识
-
----
-
-### 问题 C：~/.abrain 的可行性
-
-**结论：方案合理且推荐。~/.abrain 作为独立 git repo，通过 `ABRAIN_ROOT` 环境变量引用。**
-
-#### 目录结构
-
-```
-~/.abrain/
-├── maxims/              # 通用原则、启发式规则
-├── patterns/            # 可复用的解决方案模式
-├── anti-patterns/       # 应避免的做法
-├── facts/               # 事实性知识
-├── staging/             # 未经验证的暂存洞察
-├── archive/             # 过期/废弃条目的归档
-├── schemas/             # frontmatter schema 定义
-├── _index.md            # 自动生成的目录索引
-└── .state/              # gitignored：索引、锁、pending queue
-    ├── index/
-    ├── locks/
-    └── pending.jsonl
-```
-
-#### ~/.abrain vs ~/.pi/.pensieve/ 的边界
-
-| 维度 | `.pensieve/` (project) | `~/.abrain/` (world) |
-|------|------------------------|---------------------|
-| scope | 本项目特定 | 跨项目通用 |
-| 判断标准 | 离开当前 repo 不成立 | 换完全不同的项目仍然成立 |
-| 示例 | "本项目用 pnpm，不用 npm" | "argv 传 long prompt 一律用 @file" |
-| 示例 | "`src/foo.ts` 的设计原因是 X" | "scope 和 lifetime 应建模为正交维度" |
-
-**写入决策树**：
-
-```
-sediment 拿到新洞察 P：
-
-P 引用了具体文件路径 / 模块名 / API 名？
-├─ 是 → 写 ~/<project>/.pensieve/
-└─ 否 → P 在 ≥2 个不同领域的项目验证过？
-        ├─ 是 → 写 ~/.abrain/{maxims|patterns|anti-patterns}/
-        └─ 否 → 写 ~/.abrain/staging/，等第二次命中再 promote
-```
-
-辅助规则：
-- pensieve 条目可以引用 abrain 条目（"本项目应用了 abrain:model-orthogonal-concerns"）
-- abrain 条目不应引用 pensieve 条目（通用不该依赖具体）
-- 引用一律用 logical id（`abrain:model-orthogonal-concerns`），不用 filesystem path
-
-#### 引用机制
-
-**推荐：环境变量 `ABRAIN_ROOT`**（默认 `~/.abrain`）
-
-| 方案 | 判断 |
-|------|------|
-| 环境变量 `ABRAIN_ROOT` | ✅ 零耦合，不同机器可不同路径，测试可指 fixture |
-| git submodule | ❌ 把 abrain 的 commit 钉到 pi，每次写都会让 pi 出现 dirty submodule pointer |
-| symlink | ❌ git 跨平台处理不一致，backup/clone 时容易悬空 |
-
-```typescript
-// memory-facade.ts
-const ABRAIN_ROOT = process.env.ABRAIN_ROOT ?? path.join(os.homedir(), '.abrain');
-const PENSIEVE_ROOT = path.join(projectRoot, '.pensieve');
-```
-
-- 主进程从不见到物理路径
-- abrain 不存在时 facade 检测到目录缺失，只走 pensieve，发回 `degraded: missing_abrain`
-- 测试时 `ABRAIN_ROOT=/tmp/test-abrain pi run ...`
-
-#### 跨机器同步
-
-`~/.abrain` 是独立 private git repo：
-
-| 时机 | 动作 |
-|---|---|
-| 机器启动 / session 开始 | `git pull --rebase --autostash` |
-| sediment 写完一条 | `git add . && git commit`（**不 auto push**）|
-| 会话结束 | 安全脚本：`pull --rebase --autostash && push` |
-| 冲突 | 不自动解决，pending 等人工。timeline 段 append-only 自然减少冲突 |
-
-**冲突缓解**（每条 md 内加 append-only timeline 段）：
-
-```markdown
-## Timeline
-- 2026-05-07 | machine-A | First captured during pi memory design
-- 2026-05-09 | machine-B | Validated in another OAuth refactor
-- 2026-05-10 | machine-A | Boundary refined: not applicable to async contexts
-```
-
-git 对纯追加 section 的 merge 几乎总能自动完成。
-
-#### 潜在陷阱
-
-1. **world 污染**：单项目经验过早写成世界原则。缓解：promotion gate（≥2 项目验证 + 反例检查 + 冷却期 + 冲突检查）
-2. **隐私泄漏**：项目路径、客户名、token 进入 abrain。缓解：sediment 写入前过 redactor pipeline
-3. **索引陈旧**：md 更新后向量索引落后。缓解：索引记录 git commit，stale 时降级到 grep
-4. **命名空间重叠**：`~/.abrain` 与 `~/.pi` 完全独立，无文件系统耦合
-5. **多人场景**：abrain 是个人世界知识库，团队场景另建 org/team layer，不要把团队需求塞进个人 abrain
-
----
-
-## 综合架构图
+## 附录 A：综合架构图
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -888,7 +566,7 @@ git 对纯追加 section 的 merge 几乎总能自动完成。
               │   Memory Facade     │  ← 统一读取面
               │  · 路由（scope）     │
               │  · 归一化           │
-              │  · 去重             │
+              │  · 去重 + 排序      │
               │  · Graceful Degrade │
               └────┬──────────┬─────┘
                    │          │
@@ -900,7 +578,7 @@ git 对纯追加 section 的 merge 几乎总能自动完成。
     ┌──────▼─────────────────▼──────────────┐
     │           SOURCE OF TRUTH              │
     │                                        │
-    │  project/   ~/<project>/.pensieve/**   │
+    │  project/   <project>/.pensieve/**     │
     │  world/     ~/.abrain/**               │
     │                                        │
     │  (markdown + git, 人类可读, 离线可用)   │
@@ -908,7 +586,8 @@ git 对纯追加 section 的 merge 几乎总能自动完成。
 ```
 
 **关键属性**：
-- 源真层 100% 纯文本 + git，离线可用，人类可编辑，零锁定
+- 源真层 100% 纯文本 + git，离线可用，人类可编辑，零锁定，50 年后依然可读
 - 索引层提供语义搜索增强，不可用时系统降级但不失效
-- Facade 隔离 agent 与存储拓扑
-- scope × lifetime × maturity 三个正交维度独立建模，不互相污染
+- Facade 隔离 agent 与存储拓扑，底层变更不影响上层
+- Scope × Lifetime × Maturity 三个正交维度独立建模，不互相污染
+- 写入路径：agent → md → git commit → 索引自动/定时重建
