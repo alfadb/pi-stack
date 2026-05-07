@@ -420,7 +420,7 @@ async function derivationWrite(eventCandidate, principleCandidate) {
   // Phase 0: 写入 tx marker（在写实际 page 之前）
   // marker 是一个临时 page，记录事务状态
   await gbrain.put({
-    source: "pi-stack",
+    source: "pi-astack",
     slug: `_tx_${txId}`,
     content: {
       status: "pending",
@@ -434,37 +434,37 @@ async function derivationWrite(eventCandidate, principleCandidate) {
   try {
     // Phase 1: 生成两个完整 page（包含 partial derives_from/to 引用 + _tx）
     const eventPage  = buildPage({ ...eventCandidate,  derives_to: `default:${principleSlug}`,   _tx: txId });
-    const princPage  = buildPage({ ...principleCandidate, derives_from: `pi-stack:${eventSlug}`, _tx: txId });
+    const princPage  = buildPage({ ...principleCandidate, derives_from: `pi-astack:${eventSlug}`, _tx: txId });
 
     // Phase 2: 双页 put（允许其中之一失败）
     const [eventOk, princOk] = await Promise.allSettled([
-      gbrain.put({ source: "pi-stack", slug: eventSlug, ...eventPage }),
+      gbrain.put({ source: "pi-astack", slug: eventSlug, ...eventPage }),
       gbrain.put({ source: "default",  slug: principleSlug, ...princPage }),
     ]);
     if (!eventOk || !princOk) throw new DerivationPutError(txId);
 
     // Phase 3: 双重 readback 校验（各自独立 timeout，不因一个失败放弃另一个）
     const [eventReadback, princReadback] = await Promise.allSettled([
-      gbrain.get({ source: "pi-stack", slug: eventSlug }),
+      gbrain.get({ source: "pi-astack", slug: eventSlug }),
       gbrain.get({ source: "default",  slug: principleSlug }),
     ]);
 
     // Phase 4: 验证双向引用完整
     const ok = eventReadback?.derives_to === `default:${principleSlug}`
-            && princReadback?.derives_from === `pi-stack:${eventSlug}`;
+            && princReadback?.derives_from === `pi-astack:${eventSlug}`;
 
     if (!ok) throw new DerivationAtomicityError(txId);
 
     // Phase 5: 成功 → 删除 tx marker → 返回
-    await gbrain.delete("pi-stack", `_tx_${txId}`);
+    await gbrain.delete("pi-astack", `_tx_${txId}`);
     return { eventSlug, principleSlug, txId };
 
   } catch (e) {
     // Phase 6: 任何失败 → 尽力删除双页 + tx marker
     await Promise.allSettled([
-      gbrain.delete("pi-stack", eventSlug),
+      gbrain.delete("pi-astack", eventSlug),
       gbrain.delete("default", principleSlug),
-      gbrain.delete("pi-stack", `_tx_${txId}`),
+      gbrain.delete("pi-astack", `_tx_${txId}`),
     ]);
     throw e;
   }
@@ -473,18 +473,18 @@ async function derivationWrite(eventCandidate, principleCandidate) {
 
 **孤儿检测（sediment 启动时执行）**：
 ```typescript
-// 扫描 pi-stack source 中所有 `_tx_*` page
+// 扫描 pi-astack source 中所有 `_tx_*` page
 // status=pending + startedAt > 10min → 视为失败事务 → 清理
 async function cleanupOrphanedTransactions() {
-  const txMarkers = await gbrain.search({ source: "pi-stack", query: "_tx_", tags: ["_system"] });
+  const txMarkers = await gbrain.search({ source: "pi-astack", query: "_tx_", tags: ["_system"] });
   for (const tx of txMarkers) {
     if (tx.status === "completed") continue;  // 正常完成的已被删除
     if (Date.now() - tx.startedAt < 10 * 60_000) continue;  // 10 分钟内，可能仍在进行
     // 超时 → 孤儿 → 同时删除双页 + tx marker
     await Promise.allSettled([
-      gbrain.delete("pi-stack", tx.eventSlug),
+      gbrain.delete("pi-astack", tx.eventSlug),
       gbrain.delete("default", tx.principleSlug),
-      gbrain.delete("pi-stack", tx.slug),
+      gbrain.delete("pi-astack", tx.slug),
     ]);
     log({ type: "orphan:cleaned", txId: tx.slug, eventSlug: tx.eventSlug, principleSlug: tx.principleSlug });
   }
@@ -517,7 +517,7 @@ step 3: source-router 交叉检查，决定写 / 拒写 / 拆分
 
 | resolver_source | scope=project | scope=cross-project | scope=derivation |
 |---|---|---|---|
-| `pi-stack` 或其他项目 source | ✅ 写 `--source <project>` | ✅ 写 `--source default`¹ | ✅ 拆双写：事件进项目、原则进 default¹ |
+| `pi-astack` 或其他项目 source | ✅ 写 `--source <project>` | ✅ 写 `--source default`¹ | ✅ 拆双写：事件进项目、原则进 default¹ |
 | `default`（未注册仓 fallback） | ⛔ **拒写**，进 pending queue | ✅ 写 `--source default`¹ | ⛔ **整条 pending**（不允许半写） |
 
 ¹ 写 default 要求 confidence ≥ 7 且投票 3/3 全票（详见下面“default 写入门槛”），不达标退化为 scope=project。
@@ -696,11 +696,11 @@ export default function (pi: ExtensionAPI) {
 | voter per-model（`dispatch_agents` 内每个 task） | **10 min** | gpt-5.5 xhigh 长批判实测 249s 是已知最慢；vote prompt 输出 JSON 不是长文，实际 60-180s。3x 余量 |
 | schema-enforcer LLM（生成 page markdown） | **5 min** | 比 voter 简单（填模板），实际 30-120s。2.5x 余量 |
 | gbrain put / get readback | **30 s** | 本地 postgres 几十 ms，远程 RDS 几百 ms，最坏带 retry 几秒。30x 余量但简单可靠 |
-| markdown export（`gbrain export` 子进程） | **2 min** | pi-stack source 30-100 page，cold export 估 30s。4x 余量 |
+| markdown export（`gbrain export` 子进程） | **2 min** | pi-astack source 30-100 page，cold export 估 30s。4x 余量 |
 | 派生写 atomicity | 自然 ≈ 2 × schema-enforcer + 4 × put/get ≈ 〈10 min〉 | 事件页 + 原则页双写双校验 |
 | **总 hard backstop** | **60 min** | worst case 估 30 min × 2 余量；**正常永不触发**，仅作为 backstop 防 timeout bug |
 
-所有子步骤 timeout 数值从官方 pi settings chain 的 `piStack.sediment.timeoutsMs` 读取；`defaults/pi-stack.defaults.json` 仅提供 package-local fallback / 文档示例，不是 pi 自动加载的配置中心。
+所有子步骤 timeout 数值从官方 pi settings chain 的 `piStack.sediment.timeoutsMs` 读取；`defaults/pi-astack.defaults.json` 仅提供 package-local fallback / 文档示例，不是 pi 自动加载的配置中心。
 
 ### 5.3 60 min hard backstop 的心智定位
 
@@ -833,7 +833,7 @@ type SedimentLogEvent =
 ### 7.2 正常流程日志样例
 
 ```jsonl
-{"type":"job:start","ts":"2026-05-05T14:00:00.000Z","jobId":"a1","cwd":"/home/x/.pi","resolverSource":"pi-stack","scope":"project trusted"}
+{"type":"job:start","ts":"2026-05-05T14:00:00.000Z","jobId":"a1","cwd":"/home/x/.pi","resolverSource":"pi-astack","scope":"project trusted"}
 {"type":"voter:prep","ts":"2026-05-05T14:00:00.050Z","jobId":"a1","modelId":"openai/gpt-5.5","contextTokens":48500,"contextTruncated":false}
 {"type":"voter:prep","ts":"2026-05-05T14:00:00.051Z","jobId":"a1","modelId":"anthropic/claude-opus-4-7","contextTokens":48500,"contextTruncated":false}
 {"type":"voter:prep","ts":"2026-05-05T14:00:00.052Z","jobId":"a1","modelId":"deepseek/deepseek-v4-pro","contextTokens":48500,"contextTruncated":false}
@@ -847,10 +847,10 @@ type SedimentLogEvent =
 {"type":"schema:gen","ts":"2026-05-05T14:02:45.020Z","jobId":"a1","slug":"use-gbrain-source-dotfile","tier":"decision","scope":"project","confidence":6}
 {"type":"schema:done","ts":"2026-05-05T14:03:30.000Z","jobId":"a1","slug":"use-gbrain-source-dotfile","durationMs":44980,"usage":{"input":3200,"output":1800}}
 {"type":"secret:scan","ts":"2026-05-05T14:03:30.010Z","jobId":"a1","slug":"use-gbrain-source-dotfile","passed":true}
-{"type":"gbrain:put","ts":"2026-05-05T14:03:30.150Z","jobId":"a1","source":"pi-stack","slug":"use-gbrain-source-dotfile","durationMs":140}
-{"type":"gbrain:get","ts":"2026-05-05T14:03:30.200Z","jobId":"a1","source":"pi-stack","slug":"use-gbrain-source-dotfile","durationMs":45,"fieldsOk":true}
-{"type":"export","ts":"2026-05-05T14:03:35.000Z","jobId":"a1","source":"pi-stack","durationMs":4750,"pageCount":31,"skipped":false}
-{"type":"job:end","ts":"2026-05-05T14:03:35.010Z","jobId":"a1","totalDurationMs":215010,"candidatesConsidered":2,"written":1,"pending":0,"skipped":1,"skipReasons":["already_in_gbrain"],"writtenSlugs":["pi-stack:use-gbrain-source-dotfile"],"voterTools":"[]"}
+{"type":"gbrain:put","ts":"2026-05-05T14:03:30.150Z","jobId":"a1","source":"pi-astack","slug":"use-gbrain-source-dotfile","durationMs":140}
+{"type":"gbrain:get","ts":"2026-05-05T14:03:30.200Z","jobId":"a1","source":"pi-astack","slug":"use-gbrain-source-dotfile","durationMs":45,"fieldsOk":true}
+{"type":"export","ts":"2026-05-05T14:03:35.000Z","jobId":"a1","source":"pi-astack","durationMs":4750,"pageCount":31,"skipped":false}
+{"type":"job:end","ts":"2026-05-05T14:03:35.010Z","jobId":"a1","totalDurationMs":215010,"candidatesConsidered":2,"written":1,"pending":0,"skipped":1,"skipReasons":["already_in_gbrain"],"writtenSlugs":["pi-astack:use-gbrain-source-dotfile"],"voterTools":"[]"}
 ```
 
 ### 7.3 异常日志补充样例
@@ -861,7 +861,7 @@ type SedimentLogEvent =
 {"type":"pending","ts":"2026-05-05T15:00:00.015Z","jobId":"b2","reason":"provider_partial_failure","slug":"some-decision","candidatePreview":"title: Some Decision, tier: decision..."}
 {"type":"voter:prep","ts":"2026-05-05T16:00:00.000Z","jobId":"c3","modelId":"openai/gpt-5.5","contextTokens":165000,"contextTruncated":true,"truncationLevel":2}
 {"type":"schema:fail","ts":"2026-05-05T17:00:00.000Z","jobId":"d4","slug":"bad-page","reason":"readback assert failed: missing field confidence","durationMs":32000}
-{"type":"gbrain:rollback","ts":"2026-05-05T17:00:00.050Z","jobId":"d4","source":"pi-stack","slug":"bad-page","reason":"readback assert failed"}
+{"type":"gbrain:rollback","ts":"2026-05-05T17:00:00.050Z","jobId":"d4","source":"pi-astack","slug":"bad-page","reason":"readback assert failed"}
 {"type":"secret:scan","ts":"2026-05-05T18:00:00.000Z","jobId":"e5","slug":"leaked-key","passed":false,"pattern":"sk-[A-Za-z0-9_-]{20,}"}
 {"type":"pending","ts":"2026-05-05T18:00:00.005Z","jobId":"e5","reason":"secret_scan_hit","slug":"leaked-key","candidatePreview":"[REDACTED - secret scan hit]"}
 {"type":"voter:prep","ts":"2026-05-05T19:00:00.000Z","jobId":"f6","modelId":"openai/gpt-5.5","contextTokens":300000,"contextTruncated":true,"truncationLevel":5}
@@ -919,7 +919,7 @@ grep '"type":"job:end"' ~/.pi/.gbrain-cache/sediment.log | jq '{written, pending
   "pending": 0,
   "skipped": 1,
   "skip_reasons": ["already_in_gbrain"],
-  "written_slugs": ["pi-stack:use-gbrain-source-dotfile"],
+  "written_slugs": ["pi-astack:use-gbrain-source-dotfile"],
   "voting_quorum": "3/3",
   "total_duration_ms": 215010
 }

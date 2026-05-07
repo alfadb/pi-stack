@@ -1,5 +1,5 @@
 /**
- * model-curator extension for pi-stack — whitelist pi models and inject
+ * model-curator extension for pi-astack — whitelist pi models and inject
  * capability hints into the main session system prompt.
  *
  * Ported from pi-model-curator (archived 2026-05-07), adapted to use
@@ -27,14 +27,14 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { Api, Model } from "@mariozechner/pi-ai";
 
-// ── pi-stack settings loader ──────────────────────────────
-// pi-stack uses its own settings file (not pi's settings.json) to keep our
+// ── pi-astack settings loader ──────────────────────────────
+// pi-astack uses its own settings file (not pi's settings.json) to keep our
 // config isolated from pi's official schema. ExtensionContext does not inject
 // settings to extensions, so we read the file directly. Missing/malformed
 // file falls back to DEFAULTS — the extension always works out of the box.
 
 const PI_STACK_SETTINGS_PATH = path.join(
-  os.homedir(), ".pi", "agent", "pi-stack-settings.json",
+  os.homedir(), ".pi", "agent", "pi-astack-settings.json",
 );
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -185,7 +185,7 @@ function buildAvailableModelsBlock(
   if (byProvider.size === 0) return null;
 
   const lines: string[] = [
-    "## Available models (curated by pi-stack/model-curator)",
+    "## Available models (curated by pi-astack/model-curator)",
     "",
     "These are the ONLY chat models currently available. When dispatching " +
       "sub-agents (dispatch_agent/dispatch_agents) or selecting a model for any " +

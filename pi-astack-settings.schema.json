@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://github.com/alfadb/pi-stack/blob/main/pi-stack-settings.schema.json",
-  "title": "pi-stack settings",
-  "description": "Configuration schema for pi-stack extensions. Lives at ~/.pi/agent/pi-stack-settings.json. Each top-level key namespaces one extension; missing sections fall back to that extension's hardcoded DEFAULTS. To enable IDE autocomplete + validation, add \"$schema\": \"./path/to/pi-stack-settings.schema.json\" as the first field in your settings file.",
+  "$id": "https://github.com/alfadb/pi-astack/blob/main/pi-astack-settings.schema.json",
+  "title": "pi-astack settings",
+  "description": "Configuration schema for pi-astack extensions. Lives at ~/.pi/agent/pi-astack-settings.json. Each top-level key namespaces one extension; missing sections fall back to that extension's hardcoded DEFAULTS. To enable IDE autocomplete + validation, add \"$schema\": \"./path/to/pi-astack-settings.schema.json\" as the first field in your settings file.",
   "type": "object",
   "additionalProperties": false,
   "properties": {

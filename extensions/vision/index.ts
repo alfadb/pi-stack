@@ -1,5 +1,5 @@
 /**
- * vision extension for pi-stack — delegate image analysis to the best
+ * vision extension for pi-astack — delegate image analysis to the best
  * available vision-capable model.
  *
  * Ported from pi-multi-agent/tools/vision-core.ts (2026-05-07).
@@ -28,11 +28,11 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import type { Model } from "@mariozechner/pi-ai";
 import { Type } from "typebox";
 
-// ── pi-stack settings loader ──────────────────────────────
-// Read pi-stack's own config file. Missing/malformed → fallback to defaults.
+// ── pi-astack settings loader ──────────────────────────────
+// Read pi-astack's own config file. Missing/malformed → fallback to defaults.
 
 const PI_STACK_SETTINGS_PATH = path.join(
-  os.homedir(), ".pi", "agent", "pi-stack-settings.json",
+  os.homedir(), ".pi", "agent", "pi-astack-settings.json",
 );
 
 function loadPiStackSettings(): Record<string, unknown> {

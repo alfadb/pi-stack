@@ -1,4 +1,4 @@
-# pi-stack
+# pi-astack
 
 > alfadb's personal pi workflow — 专为 pi 打造的个人工作流仓 + 记忆基础设施。
 
@@ -16,15 +16,15 @@
 - 记忆基础设施（gbrain 唯一存储 + sediment 单写 + offline 兜底）
 - 上游 vendor 引用（vendor/）
 
-参考心智模型：**gstack 之于 claude-code 的关系，pi-stack 之于 pi 的关系一样**。作者为自己常用的 harness agent 打造一整套工作流，集成自己认同的 review/qa/security/multi-agent/memory 等能力，不断演进。不是发行版（不为不同环境打包同一软件），不是仓库集合（不是谁都可以拿出一个独立包），是**作者自用 + 作者认可的完整工作流**。
+参考心智模型：**gstack 之于 claude-code 的关系，pi-astack 之于 pi 的关系一样**。作者为自己常用的 harness agent 打造一整套工作流，集成自己认同的 review/qa/security/multi-agent/memory 等能力，不断演进。不是发行版（不为不同环境打包同一软件），不是仓库集合（不是谁都可以拿出一个独立包），是**作者自用 + 作者认可的完整工作流**。
 
 ## 心智速览
 
 | 维度 | 决策 |
 |---|---|
-| 单一记忆基础设施 | gbrain（postgres + pgvector）；**部署由 alfadb 自决**，pi-stack 仅消费 |
+| 单一记忆基础设施 | gbrain（postgres + pgvector）；**部署由 alfadb 自决**，pi-astack 仅消费 |
 | Sediment 双 target（v6.8） | **pensieve target**：`<projectRoot>/.pensieve/short-term/{maxims,decisions,knowledge}/` 项目本地文件系统<br>**gbrain target**：gbrain default source（federated=true，世界级工程原则） |
-| ~/.pi 身份 | pi-stack 开发环境 + 其他项目的 pi 基础环境；sediment 按 cwd 检测 `.pensieve/` 存在 + `gbrain doctor` 可用 独立决定运行 |
+| ~/.pi 身份 | pi-astack 开发环境 + 其他项目的 pi 基础环境；sediment 按 cwd 检测 `.pensieve/` 存在 + `gbrain doctor` 可用 独立决定运行 |
 | 主会话角色 | 只读（`gbrain_search/get/query` + `pensieve-context` extension） |
 | Sediment 角色 | 唯一写入者；v6.8 **双 target 并行**调度 + 独立 checkpoint scheduler；默认模型 deepseek-v4-pro reasoning=high；架构 lift 自验证成熟的 garrytan/pi-sediment |
 | Multi-agent 能力 | `dispatch_agent`/`dispatch_agents` 基础能力；主会话自由组合；sediment 不再使用（单 agent 流水线）；原 4 strategy 降为 cookbook |
@@ -46,50 +46,50 @@
 - 在 `~/.gbrain/config.toml` 配置连接
 - 跑 `gbrain migrate`
 
-挂为 `~/.pi/agent/skills/pi-stack/` submodule，并在官方 pi settings chain（`~/.pi/agent/settings.json` 或项目 `.pi/settings.json`）里用 local package path 加载。改一行立即生效。
+挂为 `~/.pi/agent/skills/pi-astack/` submodule，并在官方 pi settings chain（`~/.pi/agent/settings.json` 或项目 `.pi/settings.json`）里用 local package path 加载。改一行立即生效。
 
-> 注意：`~/.pi/agent/skills/pi-stack/` 是 alfadb dotfiles 的组织路径，不代表 pi-stack 靠 skill discovery 运行；真正加载靠 pi package manifest（`package.json#pi`）+ `packages` settings。
+> 注意：`~/.pi/agent/skills/pi-astack/` 是 alfadb dotfiles 的组织路径，不代表 pi-astack 靠 skill discovery 运行；真正加载靠 pi package manifest（`package.json#pi`）+ `packages` settings。
 
 ```bash
 # 一次性挂载（在 ~/.pi 仓内执行）
 cd ~/.pi
-git submodule add git@github.com:alfadb/pi-stack.git agent/skills/pi-stack
+git submodule add git@github.com:alfadb/pi-astack.git agent/skills/pi-astack
 git submodule update --init --recursive
 
 # ~/.pi/agent/settings.json 一行 local package path:
-#   "packages": ["~/.pi/agent/skills/pi-stack"]
+#   "packages": ["~/.pi/agent/skills/pi-astack"]
 # 运行时配置也走官方 settings chain，例如：
 #   "piStack": { "sediment": { "enabled": true } }
 
-# 首次创建 pi-stack source
-gbrain sources add pi-stack --path ~/.pi --no-federated
+# 首次创建 pi-astack source
+gbrain sources add pi-astack --path ~/.pi --no-federated
 
 # 跨设备同源关键：commit 两份 .gbrain-source dotfile（ADR 0008）
-# 为什么两份：~/.pi 与 pi-stack/ 两种 cwd 起点都要 dotfile walk-up 能命中
-echo pi-stack > ~/.pi/.gbrain-source
-echo pi-stack > ~/.pi/agent/skills/pi-stack/.gbrain-source
+# 为什么两份：~/.pi 与 pi-astack/ 两种 cwd 起点都要 dotfile walk-up 能命中
+echo pi-astack > ~/.pi/.gbrain-source
+echo pi-astack > ~/.pi/agent/skills/pi-astack/.gbrain-source
 ```
 
-**跨设备说明**：.gbrain-source 内容是 source id 字符串 `pi-stack`（不是路径），随 git 同步到所有设备后都解析到同一 source。设备 A `~/.pi` / B `/data/alfadb/.pi` / C `~/dotfiles/pi` 路径不同不影响。`local_path` 是本机便利，每台机首次 `gbrain sources add` 重复注册即可。
+**跨设备说明**：.gbrain-source 内容是 source id 字符串 `pi-astack`（不是路径），随 git 同步到所有设备后都解析到同一 source。设备 A `~/.pi` / B `/data/alfadb/.pi` / C `~/dotfiles/pi` 路径不同不影响。`local_path` 是本机便利，每台机首次 `gbrain sources add` 重复注册即可。
 
 日常开发：
 
 ```bash
-cd ~/.pi/agent/skills/pi-stack
+cd ~/.pi/agent/skills/pi-astack
 $EDITOR extensions/dispatch/index.ts    # 直接改
 git add . && git commit -m "fix: ..."
 git push                                    # 推到 GitHub
 
 cd ~/.pi
-git add agent/skills/pi-stack
-git commit -m "chore: bump pi-stack to <sha>"
+git add agent/skills/pi-astack
+git commit -m "chore: bump pi-astack to <sha>"
 git push
 ```
 
 ### 假想他人安装
 
 ```bash
-pi install git:github.com/alfadb/pi-stack
+pi install git:github.com/alfadb/pi-astack
 ```
 
 仅作展示用途。alfadb 永远走 submodule + local path。
@@ -110,7 +110,7 @@ pi install git:github.com/alfadb/pi-stack
 ### Prompts
 - `commit.md` / `plan.md` / `review.md` / `sync-to-main.md`（4 pipelines，从 pensieve 提取；是否同步落地为 gbrain guide 节点延后到核心链路稳定后）
 - `ship.md`（来自 garrytan/gstack）
-- `dispatch-*.md`（pi-stack 自己）
+- `dispatch-*.md`（pi-astack 自己）
 
 ## 维护节奏
 
@@ -137,10 +137,10 @@ pi install git:github.com/alfadb/pi-stack
 
 ## 沉淀
 
-pi-stack 仓内**不**自带 `.pensieve/`（pensieve 项目已退场，详见 [ADR 0005](./docs/adr/0005-pensieve-deprecated.md)）。
+pi-astack 仓内**不**自带 `.pensieve/`（pensieve 项目已退场，详见 [ADR 0005](./docs/adr/0005-pensieve-deprecated.md)）。
 
 沉淀基础设施 = **gbrain**：
-- 项目记忆 → `source: pi-stack`（federated=false）
+- 项目记忆 → `source: pi-astack`（federated=false）
 - 跨项目准则 → `source: default`（federated=true）
 - 主会话只读，sediment 单写
 - offline 兜底 → ~/.pi/.gbrain-cache/markdown/（gitignored）
@@ -157,7 +157,7 @@ pi-stack 仓内**不**自带 `.pensieve/`（pensieve 项目已退场，详见 [A
 - model-facing tool 输入宽进严出，但保持 strict schema；兼容逻辑放 `n(args)` argument preparation hook
 - 主会话只读必须机制化：deny direct gbrain writes / protected cache writes / unsafe subagent tool escalation
 
-详见 [docs/adr/0001-pi-stack-as-personal-pi-workflow.md](./docs/adr/0001-pi-stack-as-personal-pi-workflow.md) + 后续 ADR 0002-0011。
+详见 [docs/adr/0001-pi-astack-as-personal-pi-workflow.md](./docs/adr/0001-pi-astack-as-personal-pi-workflow.md) + 后续 ADR 0002-0011。
 
 ## License
 

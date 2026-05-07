@@ -1,4 +1,4 @@
-# pi-stack 上游跟踪
+# pi-astack 上游跟踪
 
 > 维护原则: brain maxim `prefer-read-only-vendor-submodules-with-owned-adaptation-layers-over-forking-ext`
 >
@@ -16,7 +16,7 @@
 | 类别 | 含义 | 是否进本表 |
 |---|---|---|
 | **A 类：自有功能** | alfadb 永久 own，不向上游 PR | ❌ 不进本表 |
-| **B 类：vendor 移植参考** | 上游只读引用，pi 端口在 pi-stack 内 | ✅ 进本表（主体） |
+| **B 类：vendor 移植参考** | 上游只读引用，pi 端口在 pi-astack 内 | ✅ 进本表（主体） |
 | **C 类：内部组件迁入** | 曾经独立的 alfadb 自有 npm 包 | ❌ 不进本表（不是上游协作） |
 
 ### A 类：自有功能（不进本表，仅列举）
@@ -24,21 +24,21 @@
 | 组件 | 理由 |
 |---|---|
 | `extensions/retry-stream-eof/` | alfadb 自己的功能，上游对 PR 态度大多直接关闭 |
-| `skills/memory-wand/` | pensieve-wand 改写后是 pi-stack 自有产权 |
+| `skills/memory-wand/` | pensieve-wand 改写后是 pi-astack 自有产权 |
 | `extensions/sediment/` 改造（voter、source-router、schema-enforcer、derivation-handler、pending-queue、audit-logger、markdown-exporter、import-triage） | v6.5 自有设计，含 pensieve 4 象限 + gstack 字段哲学 |
-| `extensions/sediment/prompts/` 全套 rubric（vote-prompt / maxim-rubric / decision-rubric / knowledge-rubric / short-term-rubric / derivation-rubric / do-not-write-rubric / source-routing-policy） | 提取自 pensieve references + ADR 0004/0008 写作，pi-stack 私有 |
+| `extensions/sediment/prompts/` 全套 rubric（vote-prompt / maxim-rubric / decision-rubric / knowledge-rubric / short-term-rubric / derivation-rubric / do-not-write-rubric / source-routing-policy） | 提取自 pensieve references + ADR 0004/0008 写作，pi-astack 私有 |
 | `extensions/multi-agent/` ADR 0009 重构（`dispatch_agent` / `dispatch_agents` 基础能力 + `templates/` cookbook + `multi_dispatch` 兼容层） | v6.5 自有设计 |
 | `extensions/multi-agent/input-compat.ts` + `input-compat.test.ts`（ADR 0009 § 2.5）：双重 JSON 字符串 unwrap + 限定字段类型转换（tools array→CSV / timeoutMs string→number） + 错误消息四要素 | v6.5 自有设计 |
-| `prompts/{commit,plan,review,sync-to-main}.md` | 从 pensieve pipelines 提取后是 pi-stack 私有 |
-| `defaults/pi-stack.defaults.json` | package-local fallback / 文档示例（运行时走官方 pi settings chain） |
+| `prompts/{commit,plan,review,sync-to-main}.md` | 从 pensieve pipelines 提取后是 pi-astack 私有 |
+| `defaults/pi-astack.defaults.json` | package-local fallback / 文档示例（运行时走官方 pi settings chain） |
 | `extensions/gbrain/` 的 markdown fallback 增强 | 自有改造，ADR 0007 |
 
 ### C 类：内部组件迁入（不进本表，仅列举）
 
 | 组件 | 原仓 | 处置 |
 |---|---|---|
-| `extensions/multi-agent/` | `alfadb/pi-multi-agent` | subtree merge，原仓 archive，README 指向 pi-stack |
-| `extensions/sediment/` | `alfadb/pi-sediment` | subtree merge，原仓 archive，README 指向 pi-stack |
+| `extensions/multi-agent/` | `alfadb/pi-multi-agent` | subtree merge，原仓 archive，README 指向 pi-astack |
+| `extensions/sediment/` | `alfadb/pi-sediment` | subtree merge，原仓 archive，README 指向 pi-astack |
 | `extensions/model-curator/` | `~/.pi/agent/skills/pi-model-curator/`（in-tree） | cp 迁入 |
 | `skills/{19 个}/` + `extensions/browse/` + `prompts/ship.md` | `alfadb/pi-gstack` | cp 迁入，原仓 archive |
 | `extensions/gbrain/` | `~/.pi/agent/extensions/gbrain/` | cp 迁入 |
@@ -55,7 +55,7 @@
 
 ### 端口层映射
 
-| pi-stack 路径 | 上游来源 | 形式 | 首次移植日期 |
+| pi-astack 路径 | 上游来源 | 形式 | 首次移植日期 |
 |---|---|---|---|
 | `skills/office-hours/SKILL.md` | `office-hours/SKILL.md` | Skill | 2026-04-30 |
 | `skills/plan-ceo-review/SKILL.md` | `plan-ceo-review/SKILL.md` | Skill | 2026-04-30 |
@@ -104,7 +104,7 @@
 
 ### ~~vendor/pensieve — `kingkongshot/Pensieve`~~
 
-**已废弃**：pensieve 项目作为 pi-stack 组件退场。详见 [ADR 0005](./docs/adr/0005-pensieve-deprecated.md)。
+**已废弃**：pensieve 项目作为 pi-astack 组件退场。详见 [ADR 0005](./docs/adr/0005-pensieve-deprecated.md)。
 
 - 不建立 `vendor/pensieve` submodule
 - 从 ~/.pi/.gitmodules 移除 `agent/skills/pensieve` submodule
@@ -148,13 +148,13 @@
 
 | 实体 | 废弃日期 | 接收者 |
 |---|---|---|
-| `alfadb/pi-gstack` repo | 2026-05-05 | 整体并入 pi-stack（C 类） |
-| `alfadb/pi-multi-agent` repo | 2026-05-05 | subtree merge 入 pi-stack/extensions/multi-agent（C 类） |
-| `alfadb/pi-sediment` repo | 2026-05-05 | subtree merge 入 pi-stack/extensions/sediment（C 类） |
+| `alfadb/pi-gstack` repo | 2026-05-05 | 整体并入 pi-astack（C 类） |
+| `alfadb/pi-multi-agent` repo | 2026-05-05 | subtree merge 入 pi-astack/extensions/multi-agent（C 类） |
+| `alfadb/pi-sediment` repo | 2026-05-05 | subtree merge 入 pi-astack/extensions/sediment（C 类） |
 | `kingkongshot/Pensieve@feature/auto-sediment-hook` 分支 | 2026-05-05 | 删除（ADR 0005） |
 | `kingkongshot/Pensieve@pi` 分支 | 2026-05-05 | 删除（ADR 0005） |
-| `~/.pi/agent/extensions/gbrain/` | 2026-05-05 | pi-stack/extensions/gbrain（C 类） |
-| `~/.pi/agent/extensions/retry-stream-eof.ts` | 2026-05-05 | pi-stack/extensions/retry-stream-eof（C 类迁入 → A 类永久 own） |
-| `~/.pi/agent/skills/pi-model-curator/` | 2026-05-05 | pi-stack/extensions/model-curator（C 类） |
-| `~/.pi/.pensieve/` 数据 | 2026-05-05 | triage + import 到 gbrain `source: pi-stack`，物理目录删除 |
+| `~/.pi/agent/extensions/gbrain/` | 2026-05-05 | pi-astack/extensions/gbrain（C 类） |
+| `~/.pi/agent/extensions/retry-stream-eof.ts` | 2026-05-05 | pi-astack/extensions/retry-stream-eof（C 类迁入 → A 类永久 own） |
+| `~/.pi/agent/skills/pi-model-curator/` | 2026-05-05 | pi-astack/extensions/model-curator（C 类） |
+| `~/.pi/.pensieve/` 数据 | 2026-05-05 | triage + import 到 gbrain `source: pi-astack`，物理目录删除 |
 | `~/.pi/agent/skills/pensieve/` submodule | 2026-05-05 | 从 ~/.pi/.gitmodules 移除（ADR 0005） |

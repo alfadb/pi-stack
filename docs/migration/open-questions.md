@@ -6,22 +6,22 @@
 
 ## ✅ 已拍板
 
-- **沉淀基础设施**: gbrain 唯一存储；项目记忆 = `pi-stack` source（federated=false），跨项目 = `default`（federated=true）
-- **gbrain 部署**: alfadb 自决，pi-stack 不提供安装兜底；只要求 alfadb 提供可用连接（ADR 0007）
-- **~/.pi 双重身份**: pi-stack 开发环境 + 其他项目的 pi 基础环境；source 路由按 ADR 0008
+- **沉淀基础设施**: gbrain 唯一存储；项目记忆 = `pi-astack` source（federated=false），跨项目 = `default`（federated=true）
+- **gbrain 部署**: alfadb 自决，pi-astack 不提供安装兜底；只要求 alfadb 提供可用连接（ADR 0007）
+- **~/.pi 双重身份**: pi-astack 开发环境 + 其他项目的 pi 基础环境；source 路由按 ADR 0008
 - **主会话角色**: 只读（`gbrain_search/get/query`），不写记忆，不引入 intent tool
 - **Sediment 角色**: 唯一写入者；pensieve 4 象限 + gstack 字段双重哲学；单写 / 分离写 / 派生写三策略（ADR 0004）
-- **Pensieve 项目**: 退场，不在 pi-stack 内（ADR 0005）
+- **Pensieve 项目**: 退场，不在 pi-astack 内（ADR 0005）
 - **Multi-agent 定位**: 基础能力 `dispatch_agent` / `dispatch_agents`，主会话自由组合；原 4 strategy 降为 cookbook（ADR 0009）
-- **Source 配置**: 完全跟随 gbrain 官方 resolver；`.gbrain-source` dotfile **必须 commit 进 git**（跨设备同源关键）；两份（~/.pi/.gbrain-source + pi-stack/.gbrain-source）
+- **Source 配置**: 完全跟随 gbrain 官方 resolver；`.gbrain-source` dotfile **必须 commit 进 git**（跨设备同源关键）；两份（~/.pi/.gbrain-source + pi-astack/.gbrain-source）
 - **Default 污染保护**: 项目事件不得写 default（ADR 0004 § 3.3）；未注册仓 + scope=project → pending queue
 - **Default 写入门槛**: confidence ≥ 7 + 3/3 全票（项目 source 仅需 ≥ 4 + 2/3）
 - **临时仓逃生口**: `.gbrain-scratch` marker 跳过全部 sediment 处理
-- **Offline 兜底**: **两件套**（markdown export + read fallback）；gbrain 部署不计在 pi-stack 职责范围内
-- **GitHub 仓**: `git@github.com:alfadb/pi-stack.git`，公开
-- **物理位置**: `~/.pi/agent/skills/pi-stack/`，作为 ~/.pi 的 git submodule
-- **加载方式**: settings.json `packages: ["~/.pi/agent/skills/pi-stack"]`（local path）
-- **方案落盘位置**: pi-stack 仓内（方案即代码）
+- **Offline 兜底**: **两件套**（markdown export + read fallback）；gbrain 部署不计在 pi-astack 职责范围内
+- **GitHub 仓**: `git@github.com:alfadb/pi-astack.git`，公开
+- **物理位置**: `~/.pi/agent/skills/pi-astack/`，作为 ~/.pi 的 git submodule
+- **加载方式**: settings.json `packages: ["~/.pi/agent/skills/pi-astack"]`（local path）
+- **方案落盘位置**: pi-astack 仓内（方案即代码）
 - **上游关系三分类**: A 自有 / B vendor / C 内部迁入
 
 ---
@@ -60,8 +60,8 @@ ADR 已选公开仓。但发现以下需要确认：
 **推荐**: 是。P3-P5 完成后、P5 push 之前加一步"敏感扫描"。
 
 ```bash
-gitleaks detect --source ~/.pi/agent/skills/pi-stack --no-git
-grep -ri "TODO.*personal\|私人\|alfadb.*password\|secret" ~/.pi/agent/skills/pi-stack
+gitleaks detect --source ~/.pi/agent/skills/pi-astack --no-git
+grep -ri "TODO.*personal\|私人\|alfadb.*password\|secret" ~/.pi/agent/skills/pi-astack
 ```
 
 ### Q2. multi-agent 的 prompts 路径

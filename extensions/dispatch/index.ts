@@ -1,5 +1,5 @@
 /**
- * dispatch extension for pi-stack — delegate tasks to sub-agents via subprocess pi.
+ * dispatch extension for pi-astack — delegate tasks to sub-agents via subprocess pi.
  *
  * Self-contained rewrite (2026-05-06, v2). Replaces the in-process completeSimple
  * runner with pi subprocess spawning. Each dispatch = an independent pi instance

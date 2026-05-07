@@ -11,13 +11,13 @@
 ADR 0010 把 v6.5 的三模型投票替换为单 agent + lookup tools，已经端到端跑通。但实测发现 **prompt 与 source 严重脱节**：
 
 - 系统 prompt 明确说"only persist UNIVERSAL cross-project principles, do NOT store project-specific paths/modules"
-- 实际 `gbrainPut("pi-stack", page)` 把所有结果写到了 `pi-stack` source
+- 实际 `gbrainPut("pi-astack", page)` 把所有结果写到了 `pi-astack` source
 
-更严重的：**`pi-stack` source 根本没注册**，gbrain 把无效 `--source pi-stack` 默默忽略，全部写到了 default。`gbrain sources list` 显示只有 default 一个 source 存在，183 页全部混在一起。
+更严重的：**`pi-astack` source 根本没注册**，gbrain 把无效 `--source pi-astack` 默默忽略，全部写到了 default。`gbrain sources list` 显示只有 default 一个 source 存在，183 页全部混在一起。
 
 后果：
-1. **项目级洞察从未沉淀**——模型按 prompt 要求 SKIP 所有项目特定内容，pi-stack 内的真实 fact / decision 完全丢失
-2. **default 库被污染**——已经写进去的 page 里混杂了 `parseAgentEndMessages skips assistant messages` 这种 pi-stack 内部细节，未来任何项目都会拉到这种噪音
+1. **项目级洞察从未沉淀**——模型按 prompt 要求 SKIP 所有项目特定内容，pi-astack 内的真实 fact / decision 完全丢失
+2. **default 库被污染**——已经写进去的 page 里混杂了 `parseAgentEndMessages skips assistant messages` 这种 pi-astack 内部细节，未来任何项目都会拉到这种噪音
 3. **ADR 0008 设计未落地**——双重身份路由的 `.gbrain-source` dotfile 理念有了，但 sediment 写入路径没有用上
 
 ## 决策
@@ -53,14 +53,14 @@ Promise.allSettled([
 
 老的"单 agent 同时判 scope=project|cross-project 然后路由"方案被否决：单模型同时承担"是否值得沉淀 + 这是项目级还是世界级"两个判断，scope 漂移率高（v6.5 voter 实测）。
 
-**双轨设计让判据职责单一**：project-track 不问"这够 cross-project 吗"，world-track 不问"这是 pi-stack 内部细节吗"，各自只关心自己 lane 是否值得记录。同一个 window 在两路模型眼里看出**两层洞察**——同一个 debugging 经历可以同时产出"pi-stack 里 entry 4 跑得最久"（project fact）和"agent_end 处理器必须 defer async"（world principle）。
+**双轨设计让判据职责单一**：project-track 不问"这够 cross-project 吗"，world-track 不问"这是 pi-astack 内部细节吗"，各自只关心自己 lane 是否值得记录。同一个 window 在两路模型眼里看出**两层洞察**——同一个 debugging 经历可以同时产出"pi-astack 里 entry 4 跑得最久"（project fact）和"agent_end 处理器必须 defer async"（world principle）。
 
 #### 2. project-track 的 source 自动解析 + 自动注册
 
 source id 解析优先级：
 
 1. **`.gbrain-source` dotfile**（从 cwd 向上 walk 到 git root 或 `$HOME` 之前）—— ADR 0008 已设计
-2. **`git -C <cwd> config --get remote.origin.url` 推断 slug** —— `git@github.com:alfadb/pi-stack.git → pi-stack`
+2. **`git -C <cwd> config --get remote.origin.url` 推断 slug** —— `git@github.com:alfadb/pi-astack.git → pi-astack`
 3. **拒绝**（不 fallback 到目录名，避免 `~/work/foo` 与 `~/play/foo` 撞名）
 
 不存在 = project-track **整轮 SKIP**（world-track 仍跑）。
@@ -132,7 +132,7 @@ env-var 也分开：
 
 ### 模块变更
 
-新增（pi-stack/extensions/sediment/）：
+新增（pi-astack/extensions/sediment/）：
 - `tracks.ts` (~250 lines) — TrackConfig 接口 + PROJECT/WORLD prompts + buildSystemPrompt
 - `source-resolver.ts` (~150 lines) — dotfile walk-up + git remote slug
 - `source-registry.ts` (~110 lines) — gbrain sources list/add 包装 + ensureSourceRegistered
@@ -145,13 +145,13 @@ env-var 也分开：
 
 ### 配置文件
 
-`defaults/pi-stack.defaults.json` 新加 `piStack.sediment.tracks.{project,world}` 块。`singleAgent` 保留作 baseline 文档但已不再被代码读取（除非用户故意只配 singleAgent，作 backward compat 用）。
+`defaults/pi-astack.defaults.json` 新加 `piStack.sediment.tracks.{project,world}` 块。`singleAgent` 保留作 baseline 文档但已不再被代码读取（除非用户故意只配 singleAgent，作 backward compat 用）。
 
 ### 写入边界
 
 | 场景 | project-track | world-track |
 |---|---|---|
-| 在 pi-stack 仓内 | 写到 `pi-stack` source | 写到 `default` |
+| 在 pi-astack 仓内 | 写到 `pi-astack` source | 写到 `default` |
 | 在有 `.gbrain-source` 的其他仓 | 写到 dotfile 指定 source | 写到 `default` |
 | 在仅有 git remote 的仓 | 自动注册 + 写到 slug source | 写到 `default` |
 | 在 `/tmp/scratch/` 无 git 无 dotfile | **SKIP**（不 fallback） | 写到 `default` |
@@ -159,7 +159,7 @@ env-var 也分开：
 
 ### 已有 default 库的污染如何处理
 
-不强制清理。已写进 default 的 pi-stack-内部 page 留作历史档案——未来这些 page 在 SKIP_DUPLICATE 或 update 时仍可被引用。**新一轮 sediment 跑起来后**，pi-stack 内的项目细节会写到 `pi-stack` source（自动注册），不再继续污染 default。
+不强制清理。已写进 default 的 pi-astack-内部 page 留作历史档案——未来这些 page 在 SKIP_DUPLICATE 或 update 时仍可被引用。**新一轮 sediment 跑起来后**，pi-astack 内的项目细节会写到 `pi-astack` source（自动注册），不再继续污染 default。
 
 如果 alfadb 后续想清理，可以用：
 ```bash

@@ -1,10 +1,10 @@
-# pi-stack 目录布局与所有权
+# pi-astack 目录布局与所有权
 
 > **v6.8 更新提示**（[ADR 0012](./adr/0012-sediment-pensieve-gbrain-dual-target.md)）：`extensions/sediment/` 已重新架构为 `garrytan/pi-sediment` 象限架构。本文档 `extensions/sediment/` 子节下的文件清单已过时（作者记忆中的
 > tracks.ts / source-resolver.ts / source-registry.ts / checkpoint.ts / audit-logger.ts / pending-queue.ts / secret-scanner.ts 都被归档到 `extensions/sediment/.v6.7-archive/`）。实际文件清单请看下面 v6.8 指南。
 
 ```
-alfadb/pi-stack/
+alfadb/pi-astack/
 │
 ├── package.json                       # pi-package manifest
 ├── README.md
@@ -19,7 +19,7 @@ alfadb/pi-stack/
 │   ├── memory-architecture.md         # 架构总览
 │   ├── directory-layout.md            # 本文件
 │   ├── adr/
-│   │   ├── 0001-pi-stack-as-personal-pi-workflow.md
+│   │   ├── 0001-pi-astack-as-personal-pi-workflow.md
 │   │   ├── 0002-gbrain-as-sole-memory-store.md
 │   │   ├── 0003-main-session-read-only.md
 │   │   ├── 0004-sediment-write-strategy.md
@@ -33,7 +33,7 @@ alfadb/pi-stack/
 │       └── open-questions.md          # 待澄清问题
 │
 ├── defaults/
-│   └── pi-stack.defaults.json         # package-local fallback / 文档示例
+│   └── pi-astack.defaults.json         # package-local fallback / 文档示例
 │                                      # 运行时配置走官方 pi settings chain: piStack.*
 │
 ├── vendor/                            # ▼▼▼ READ-ONLY，仅作 diff/参考源 ▼▼▼
@@ -137,14 +137,14 @@ alfadb/pi-stack/
 ## ~/.pi 双重身份说明（ADR 0008）
 
 ~/.pi 同时是：
-- **pi-stack 的开发环境**（alfadb cd 到 pi-stack 子目录改代码）
+- **pi-astack 的开发环境**（alfadb cd 到 pi-astack 子目录改代码）
 - **其他项目的 pi 基础环境**（alfadb cd 到任意项目跑 pi，pi 加载 ~/.pi/agent/settings.json）
 
 source 路由按 ADR 0008 区分：
 
 | cwd 位置 | source |
 |---|---|
-| `~/.pi/` 内（包括 pi-stack 子目录） | `pi-stack` |
+| `~/.pi/` 内（包括 pi-astack 子目录） | `pi-astack` |
 | `~/.pi/` 外且已注册项目 | 该项目 source |
 | `~/.pi/` 外且未注册 git repo | 不注入，sediment fail closed |
 | 非 git repo | 不注入 |
@@ -159,7 +159,7 @@ source 路由按 ADR 0008 区分：
 | `skills/pensieve-wand/` | pensieve 检索助手 | 改名 `skills/memory-wand/`，重写为 gbrain_* 包装 |
 | `prompts/{commit,plan,review,sync-to-main}.md` | 不存在 | **新增**（从 pensieve pipelines 提取，A 类自有） |
 | `extensions/sediment/` | pensieve writer + gbrain target 双写 | **改造**：单写 / 分离写 / 派生写三策略，gbrain 唯一 |
-| `defaults/pi-stack.defaults.json` | 不存在 | **新增**（package-local fallback / 文档示例；运行时走官方 settings chain） |
+| `defaults/pi-astack.defaults.json` | 不存在 | **新增**（package-local fallback / 文档示例；运行时走官方 settings chain） |
 | `docker-compose.yml` | 不存在 | **不提供**（gbrain 部署由 alfadb 自决，ADR 0007） |
 | `extensions/multi-agent/templates/` | 不存在 | **新增**（ADR 0009）4 种 cookbook 模板 |
 | `extensions/multi-agent/input-compat.ts` | 不存在 | **新增**（ADR 0009 § 2.5）JSON 字符串兑底兑底层 |
@@ -185,7 +185,7 @@ source 路由按 ADR 0008 区分：
 | `prompts/{commit,plan,review,sync-to-main}.md` | alfadb（A 类） | ✅ pi.prompts | ✅ |
 | `prompts/ship.md` | alfadb（B 类端口） | ✅ pi.prompts | ✅ |
 | `prompts/multi-*.md` | alfadb（C 类迁入） | ✅ pi.prompts | ✅ |
-| `defaults/pi-stack.defaults.json` | alfadb | ❌（fallback / 文档示例） | ✅ |
+| `defaults/pi-astack.defaults.json` | alfadb | ❌（fallback / 文档示例） | ✅ |
 | `docs/adr/` | alfadb | ❌ | ✅ |
 | `UPSTREAM.md` | alfadb | ❌ | ✅（每次 vendor bump 必更新）|
 
@@ -220,7 +220,7 @@ source 路由按 ADR 0008 区分：
 **严禁的引用关系**:
 1. `extensions/* → vendor/*`（端口层不能依赖 vendor）
 2. `skills/* / prompts/* → 任何代码`（声明式资源）
-3. `vendor/* → 任何 pi-stack 内容`（vendor 是 read-only 上游快照）
+3. `vendor/* → 任何 pi-astack 内容`（vendor 是 read-only 上游快照）
 4. `extensions/sediment → 直接调 postgres`（必须经 gbrain CLI / SDK）
 
 ## 资源类型 vs pi 加载机制对照
@@ -232,6 +232,6 @@ source 路由按 ADR 0008 区分：
 | Prompts | `prompts/` | `package.json` 的 `pi.prompts` 数组扫描，加载 `.md` |
 | Themes | （无） | — |
 | Vendor sources | `vendor/` | **不被 pi 加载**，仅作参考 |
-| 配置 | 官方 settings chain (`~/.pi/agent/settings.json` + `.pi/settings.json`) | 运行时读取 `piStack.*`；`defaults/pi-stack.defaults.json` 仅 fallback/文档示例 |
+| 配置 | 官方 settings chain (`~/.pi/agent/settings.json` + `.pi/settings.json`) | 运行时读取 `piStack.*`；`defaults/pi-astack.defaults.json` 仅 fallback/文档示例 |
 | 内部 prompts（sediment 用） | `extensions/sediment/prompts/` | **不被 pi 加载**，sediment 内部读取 |
 | Multi-agent cookbook | `extensions/multi-agent/templates/` | **不被 pi 加载**（仅考考索引），主会话 promptSnippet 中提示可读 |

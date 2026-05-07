@@ -26,21 +26,21 @@ v3-v6 演化过程发现：pensieve 与 gbrain 两套并存有结构性冲突—
 
 ## 决策
 
-**gbrain 是 pi-stack 唯一记忆存储**。pensieve 项目作为 pi-stack 组件不存在。
+**gbrain 是 pi-astack 唯一记忆存储**。pensieve 项目作为 pi-astack 组件不存在。
 
 ### Source 二分
 
 | Source | federated | 用途 | 写入触发 |
 |---|---|---|---|
-| `pi-stack` | **false** | 项目记忆（事件、具体决策、文件路径、~/.pi 调用链） | sediment 在 ~/.pi 内的 agent_end 触发 |
+| `pi-astack` | **false** | 项目记忆（事件、具体决策、文件路径、~/.pi 调用链） | sediment 在 ~/.pi 内的 agent_end 触发 |
 | `default` | **true** | 跨项目准则（抽象原则、通用 maxim、跨项目模式） | sediment 在任何项目 agent_end 触发 |
 
-`federated=false` 的语义：`pi-stack` source 不参加跨源 search；查询 / 写入 `pi-stack` 必须明确指定 source。交互式 gbrain CLI source 解析完全跟随 gbrain 官方 resolver（优先级链见 ADR 0008）；sediment 写入在 resolver 结果之上增加写入合法性校验与 source trust guard，并最终显式传 `--source <id>`。
+`federated=false` 的语义：`pi-astack` source 不参加跨源 search；查询 / 写入 `pi-astack` 必须明确指定 source。交互式 gbrain CLI source 解析完全跟随 gbrain 官方 resolver（优先级链见 ADR 0008）；sediment 写入在 resolver 结果之上增加写入合法性校验与 source trust guard，并最终显式传 `--source <id>`。
 
 ### 关键约束
 
-1. **pi-stack 仓内不创建 `.pensieve/` 目录**
-2. **~/.pi/.pensieve/ 现有数据迁移**：长期目录全量 dry-run 到临时 source 校验后 import 到 gbrain `source: pi-stack`；62 条 short-term 先 triage 再决定 import / discard / 保留为 short-term tag（详见 ADR 0006、迁移 Slice A/G）
+1. **pi-astack 仓内不创建 `.pensieve/` 目录**
+2. **~/.pi/.pensieve/ 现有数据迁移**：长期目录全量 dry-run 到临时 source 校验后 import 到 gbrain `source: pi-astack`；62 条 short-term 先 triage 再决定 import / discard / 保留为 short-term tag（详见 ADR 0006、迁移 Slice A/G）
 3. **vendor/pensieve 不存在**：pensieve 项目从 .gitmodules 移除，不进 vendor/
 4. **sediment 不再写 pensieve**：迁移完成后下线 pensieve writer 路径
 
@@ -49,7 +49,7 @@ v3-v6 演化过程发现：pensieve 与 gbrain 两套并存有结构性冲突—
 | 项 | v6 原版 | v6.5 当前 |
 |---|---|---|
 | source 路由 | sediment 不传 --source，依赖 gbrain CWD resolver 自动解析 | sediment 必须显式 --source（详见 ADR 0004） |
-| .gbrain-source 配置 | `cd ~/.pi && gbrain sources attach pi-stack`（生成 dotfile） | **必须 commit** 两份 `.gbrain-source`（内容 `pi-stack`）作为跨设备同源主路径；不靠 pi session_start 注入 `GBRAIN_SOURCE` |
+| .gbrain-source 配置 | `cd ~/.pi && gbrain sources attach pi-astack`（生成 dotfile） | **必须 commit** 两份 `.gbrain-source`（内容 `pi-astack`）作为跨设备同源主路径；不靠 pi session_start 注入 `GBRAIN_SOURCE` |
 | schema 强制 | "用 frontmatter.tags 模拟 maxim" | 强制 page_type + tag(must/want/is/how) + status，readback assert（详见 ADR 0004） |
 | offline | 不提 | 配齐两件套：markdown export + read tool fallback；不提供 local docker-compose pgvector（详见 ADR 0007） |
 

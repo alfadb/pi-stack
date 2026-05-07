@@ -1,7 +1,7 @@
 /**
  * input-compat — normalize stringified/coerced arguments before schema validation.
  *
- * Part of pi-stack ADR 0009 § input compatibility contract.
+ * Part of pi-astack ADR 0009 § input compatibility contract.
  * Used as the prepareArguments hook for dispatch_agent / dispatch_agents.
  *
  * Handles:

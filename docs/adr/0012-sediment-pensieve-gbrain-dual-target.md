@@ -4,7 +4,7 @@
 - **Date:** 2026-05-06
 - **Supersedes:** ADR 0005 (pensieve-deprecated), ADR 0011 (two-track via gbrain sources)
 - **Implements:** the proven dual-target sediment architecture from
-  garrytan/pi-sediment, lifted verbatim into pi-stack/extensions/sediment/
+  garrytan/pi-sediment, lifted verbatim into pi-astack/extensions/sediment/
 - **Related:** ADR 0002 (gbrain as sole memory store — REVISED), ADR 0010
   (single-agent with lookup tools — RETAINED), ADR 0008 (pi dotfiles dual-role
   — partially retired: `.gbrain-source` no longer needed in v6.8)
@@ -12,7 +12,7 @@
 ## Context
 
 ADR 0011 (v6.7) proposed a two-track sediment pipeline that wrote
-**project-specific** insights into a `pi-stack` gbrain source and
+**project-specific** insights into a `pi-astack` gbrain source and
 **cross-project** insights into the `default` source, using gbrain's
 multi-source feature for clean isolation.
 
@@ -66,7 +66,7 @@ single-source, that assumption is gone.
 ## Decision
 
 **Revive the proven dual-target sediment architecture from
-garrytan/pi-sediment**, lifted verbatim into `pi-stack/extensions/sediment/`:
+garrytan/pi-sediment**, lifted verbatim into `pi-astack/extensions/sediment/`:
 
 1. **pensieve target** writes to project-local
    `.pensieve/short-term/{maxims,decisions,knowledge}/`. This is filesystem
@@ -81,13 +81,13 @@ garrytan/pi-sediment**, lifted verbatim into `pi-stack/extensions/sediment/`:
    processed), per-target prompts, and per-target model config.
 
 4. **No more `.gbrain-source` dotfile, no source-resolver, no auto-register,
-   no `pi-stack` gbrain source.** Removed as dead infrastructure under v6.7.
+   no `pi-astack` gbrain source.** Removed as dead infrastructure under v6.7.
 
 5. **Future migration path** (when gbrain ships working multi-source):
-   - `gbrain sources add pi-stack --path ~/.pi --no-federated`
+   - `gbrain sources add pi-astack --path ~/.pi --no-federated`
    - `gbrain import .pensieve/maxims/ .pensieve/decisions/ .pensieve/knowledge/
-     --source pi-stack`
-   - flip sediment's `pensieve` target to a `pi-stack-source` target
+     --source pi-astack`
+   - flip sediment's `pensieve` target to a `pi-astack-source` target
    This goes via the upstream's intended import path — not a hack.
 
 ## Architecture inheritance
@@ -160,20 +160,20 @@ context-budget) stays for the same reason.
 
 ## Files retained from v6.7
 
-- `pi-stack/extensions/multi-agent/` — unaffected by this ADR
-- `pi-stack/extensions/gbrain/` — read-only gbrain integration for main
+- `pi-astack/extensions/multi-agent/` — unaffected by this ADR
+- `pi-astack/extensions/gbrain/` — read-only gbrain integration for main
   session; unaffected
 - `agent/extensions/retry-stream-eof.ts` — unaffected
 
 ## Migration steps
 
 1. Delete v6.7 sediment files; copy old `pi-sediment/extensions/pi-sediment/*`
-   into `pi-stack/extensions/sediment/` (DONE 2026-05-06)
+   into `pi-astack/extensions/sediment/` (DONE 2026-05-06)
 2. Clean dirty pages from gbrain `default` source: keep universal principles,
    delete retired internals, move project-architecture page to `.pensieve/`
    (DONE 2026-05-06)
-3. Remove `.gbrain-source` dotfiles + drop `pi-stack` gbrain source (DONE)
-4. Update `defaults/pi-stack.defaults.json` to remove track/source config,
+3. Remove `.gbrain-source` dotfiles + drop `pi-astack` gbrain source (DONE)
+4. Update `defaults/pi-astack.defaults.json` to remove track/source config,
    restore single dual-target structure
 5. Update settings.json to remove `pensieve-context` confusion (still active)
 6. Update `docs/memory-architecture.md`, `docs/directory-layout.md`,
@@ -191,8 +191,8 @@ that v6.7 didn't use, so a backout is clean.
 - [x] Files copied
 - [x] Dirty pages cleaned in default
 - [x] Dotfiles removed
-- [x] pi-stack source removed
-- [ ] defaults/pi-stack.defaults.json updated
+- [x] pi-astack source removed
+- [ ] defaults/pi-astack.defaults.json updated
 - [ ] settings.json reviewed (defaults model already covered by config.ts)
 - [ ] memory-architecture / directory-layout / migration / README updated
 - [ ] ADR 0002 / 0005 / 0011 marked superseded

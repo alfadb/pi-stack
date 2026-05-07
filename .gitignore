@@ -2,20 +2,20 @@ node_modules/
 .DS_Store
 *.log
 
-# Offline 兜底缓存（详见 ADR 0007）。这些只是 ~/.pi 里的兜底位置；pi-stack
+# Offline 兜底缓存（详见 ADR 0007）。这些只是 ~/.pi 里的兜底位置；pi-astack
 # 仓本身不会生成它们，但保险起见也忽略，避免本地误导。
 .gbrain-cache/
 
-# 临时实验仓 marker（详见 ADR 0008）；pi-stack 内一般不出现，兜底
+# 临时实验仓 marker（详见 ADR 0008）；pi-astack 内一般不出现，兜底
 .gbrain-scratch
 
 # 注意：不要忽略 .gbrain-source！
 # 该文件必须 commit 进 git 以保障跨设备同源（详见 ADR 0007 / 0008）。
-# pi-stack 仓内的 .gbrain-source 内容是 pi-stack，被两种 cwd 起点共用。
+# pi-astack 仓内的 .gbrain-source 内容是 pi-astack，被两种 cwd 起点共用。
 
-# pi-stack 所有扩展的产出目录：每个扩展一个子目录
-# （.pi-stack/imagine/ 生图、.pi-stack/sediment/ 日志、.pi-stack/dispatch/ ...）
-.pi-stack/
+# pi-astack 所有扩展的产出目录：每个扩展一个子目录
+# （.pi-astack/imagine/ 生图、.pi-astack/sediment/ 日志、.pi-astack/dispatch/ ...）
+.pi-astack/
 
 # sediment 的 pending queue（如有人在仓内本地起 sediment）
 .sediment-pending.jsonl

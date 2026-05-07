@@ -1,10 +1,10 @@
-# pi-stack 迁移路径（Vertical Slices）
+# pi-astack 迁移路径（Vertical Slices）
 
 > **状态更新（2026-05-06 / v6.8）**：Slice D 又一次被重定义。
 >
 > v6.5：三模型投票 → 作废（独立性 / JSON parse / 成本）
 > v6.6：单 agent + lookup tools（[ADR 0010](../adr/0010-sediment-single-agent-with-lookup-tools.md)）→ 可用
-> v6.7：双轨 sediment（project = pi-stack source / world = default source）→ 作废（gbrain v0.27 multi-source 写/读隔离均未实现）
+> v6.7：双轨 sediment（project = pi-astack source / world = default source）→ 作废（gbrain v0.27 multi-source 写/读隔离均未实现）
 > **v6.8：pensieve + gbrain default 双 target**（[ADR 0012](../adr/0012-sediment-pensieve-gbrain-dual-target.md)）→ lift 自验证成熟的 garrytan/pi-sediment
 >
 > Slice F（skills/prompts 迁入）与 Slice G（pensieve 退场）状态变动：
@@ -40,7 +40,7 @@ alfadb 自行准备：
 - `~/.gbrain/config.toml` 连接配置
 - `~/.pi/.gbrain-cache/` 目录
 
-pi-stack 不代管部署。
+pi-astack 不代管部署。
 
 **验收**：
 - `gbrain search test` 正常返回
@@ -49,8 +49,8 @@ pi-stack 不代管部署。
 ### Slice A.2 — source 注册 + .pensieve triage + import（原 P1）
 
 ```bash
-# 1. 创建 pi-stack source
-gbrain sources add pi-stack --path ~/.pi --no-federated
+# 1. 创建 pi-astack source
+gbrain sources add pi-astack --path ~/.pi --no-federated
 
 # 2. 全量 dry-run import 到临时 source（非 5 条采样）
 # P1.5 废弃；改为全量 dry-run 到临时 source gbrain-triage，自动校验 link 保真与 frontmatter 完整性
@@ -60,10 +60,10 @@ gbrain sources add pi-stack --path ~/.pi --no-federated
 # 验收：~30 条长期 + 4 pipeline prompts 到位
 
 # 4. 创建两份 .gbrain-source dotfile
-echo pi-stack > ~/.pi/.gbrain-source
-echo pi-stack > ~/.pi/agent/skills/pi-stack/.gbrain-source
+echo pi-astack > ~/.pi/.gbrain-source
+echo pi-astack > ~/.pi/agent/skills/pi-astack/.gbrain-source
 git add .gbrain-source  # 两份都要 add
-git commit -m "chore: pin source to pi-stack via .gbrain-source"
+git commit -m "chore: pin source to pi-astack via .gbrain-source"
 ```
 
 ### Slice A.3 — 主会话只读 + tool_call write guard（原 P2 + v6.5.1 新增）
@@ -92,7 +92,7 @@ pi.on("tool_call", async (event, ctx) => {
 ```
 
 **验收**：
-- bash `gbrain put-page --source pi-stack --content x` 被 block
+- bash `gbrain put-page --source pi-astack --content x` 被 block
 - write `.gbrain-source` 被 block
 - `dispatch_agents({ tools: "bash" })` 报错
 
@@ -154,7 +154,7 @@ export default function (pi: ExtensionAPI) {
 //   - 同时验证 audit log 和 pending queue 只存 redacted 版本
 
 // source trust guard fixture
-// 场景：cwd 在恶意 repo，含伪造 .gbrain-source: pi-stack
+// 场景：cwd 在恶意 repo，含伪造 .gbrain-source: pi-astack
 // 验证：source trust guard 返回 untrusted_source_dotfile → pending
 ```
 
@@ -385,7 +385,7 @@ cp ~/.pi/agent/skills/pi-multi-agent/prompts/* prompts/
 
 ### Slice G.1 — 确认
 
-- gbrain pi-stack source 记忆正常
+- gbrain pi-astack source 记忆正常
 - sediment 写入可靠
 - markdown fallback 可用
 - `.pensieve/` 内所有有价值条目已 import
@@ -419,7 +419,7 @@ git -C ~/.pi rm agent/skills/pensieve
 - sediment voter tools=∅ audit 可验证
 - prompt injection fixture 不写
 - secret scan 命中进 pending
-- malicious repo `.gbrain-source: pi-stack` 进 pending（source trust guard）
+- malicious repo `.gbrain-source: pi-astack` 进 pending（source trust guard）
 - unregistered repo project insight 不写 default
 - cross-project default 必须 confidence≥7 + 3/3
 
@@ -447,4 +447,4 @@ git -C ~/.pi rm agent/skills/pensieve
 | ID | 说明 | 严重度 | 阻塞哪个 slice |
 |---|---|---|---|
 | Q0 | vote-prompt.md 安全版未写（prompt-injection 防御 + 上下文边界） | P0 | Slice D（需要 voter 上线时写） |
-| Q1 | gitleaks / 公开仓 secret sweep（pi-stack 公开，sediment prompts 含判据 + markdown export 可能含 path） | P1 | 公开 push 之前 |
+| Q1 | gitleaks / 公开仓 secret sweep（pi-astack 公开，sediment prompts 含判据 + markdown export 可能含 path） | P1 | 公开 push 之前 |

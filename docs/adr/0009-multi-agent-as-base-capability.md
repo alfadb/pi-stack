@@ -3,7 +3,7 @@
 - **状态**: Accepted
 - **日期**: 2026-05-05
 - **决策者**: alfadb
-- **依赖**: ADR 0001（pi-stack 定位）/ ADR 0006（组件合并）
+- **依赖**: ADR 0001（pi-astack 定位）/ ADR 0006（组件合并）
 - **补充说明（2026-05-06）**：本 ADR 下文举例讲"sediment voter 借 dispatch_agents 跑 3 个 model"。**该例子在端到端调试中被证伪**（见 ADR 0010），sediment 已转为单 agent + lookup tools，**不再是 dispatch_agents 的消费者**。dispatch_agent/agents 的基础能力依然保留供主会话使用，设计初衷不变。文中“sediment voter”请作为历史场景读。
 
 ## 背景
@@ -59,7 +59,7 @@ dispatch_agents([{...}, {...}, ...]) // 数组形式
 
 `parallel` / `debate` / `chain` / `ensemble` 不消失，但**降级为模板**：
 
-- 实现位置：`pi-stack/extensions/multi-agent/templates/`
+- 实现位置：`pi-astack/extensions/multi-agent/templates/`
 - 形式：每个 strategy 对应一份 markdown 描述（"何时用、参数怎么填、如何融合结果"）
 - 主会话**参考**这些模板设计自己的调用，而不是被它们限制
 
@@ -356,7 +356,7 @@ node extensions/sediment/test/voter-concurrency.ts
 
 ## 引用
 
-- ADR 0001: pi-stack 定位
+- ADR 0001: pi-astack 定位
 - ADR 0004: sediment 写入策略（§ 5 运行时纪律依赖本 ADR 的真并发保证）
 - ADR 0006: 组件合并清单（pi-multi-agent 迁入 extensions/multi-agent/）
 - pi-multi-agent 现有 API 表面（`multi_dispatch`, `vision`, `imagine`）

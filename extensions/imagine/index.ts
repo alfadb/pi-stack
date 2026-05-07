@@ -1,5 +1,5 @@
 /**
- * imagine extension for pi-stack — AI image generation via OpenAI Responses API.
+ * imagine extension for pi-astack — AI image generation via OpenAI Responses API.
  *
  * Rewritten 2026-05-07 to piggyback on the user's existing openai provider
  * configuration. No model registration, no custom provider, no piStack config
@@ -12,7 +12,7 @@
  * same one your chat models use. If you've pointed openai at a proxy, images
  * go through the same proxy automatically.
  *
- * Output: PNG saved to <cwd>/.pi-stack/imagine/, returned inline (base64) when
+ * Output: PNG saved to <cwd>/.pi-astack/imagine/, returned inline (base64) when
  * the caller's model supports image input.
  */
 
@@ -26,9 +26,9 @@ import { Type } from "typebox";
 // ── Constants ───────────────────────────────────────────────────
 
 /** Persistent output directory under the project root. Each extension owns
- *  its own subdirectory under .pi-stack/ for clean separation. The whole
- *  .pi-stack/ tree should be in the project's .gitignore. */
-const OUTPUT_DIR = path.join(".pi-stack", "imagine");
+ *  its own subdirectory under .pi-astack/ for clean separation. The whole
+ *  .pi-astack/ tree should be in the project's .gitignore. */
+const OUTPUT_DIR = path.join(".pi-astack", "imagine");
 const ALLOWED_SIZES = ["1024x1024", "1792x1024", "1024x1792"] as const;
 const ALLOWED_QUALITIES = ["standard", "hd"] as const;
 const ALLOWED_STYLES = ["vivid", "natural"] as const;
@@ -175,7 +175,7 @@ export default function (pi: ExtensionAPI) {
       "Use imagine when the user asks for image generation, illustration, or visual creation.",
       "Model is always gpt-image-2. Default quality is hd. Default size is 1024x1024.",
       "Uses your existing openai provider API key — no additional configuration needed.",
-      "The tool saves the PNG to .pi-stack/imagine/ and returns it inline when the caller supports images.",
+      "The tool saves the PNG to .pi-astack/imagine/ and returns it inline when the caller supports images.",
     ],
     parameters: Type.Object({
       prompt: Type.String({
