@@ -64,6 +64,35 @@
       }
     },
 
+    "retryAllErrors": {
+      "type": "object",
+      "description": "Retry + multi-model fallback (extensions/retry-all-errors/). Marks every agent error as retryable so pi's built-in 3-attempt exponential backoff fires; once a model exhausts its retries, the extension switches to the next configured fallback model and continues the same conversation. When all fallback models are tried and all fail, the extension stops.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "fallbackModels": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered list of `provider/modelId` strings. After the active model exhausts its retries, the extension picks the first un-tried entry that exists in pi's modelRegistry and has configured auth. Entries missing from the registry or without auth are logged as warnings and skipped. The currently-active model (whatever it is when the error happens) is auto-added to the tried set, so it's safe to include it in the list. Empty list = retry behavior only, no fallback.",
+          "examples": [
+            [
+              "anthropic/claude-opus-4-7",
+              "openai/gpt-5.5",
+              "deepseek/deepseek-v4-pro"
+            ]
+          ]
+        },
+
+        "retriesPerModel": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "How many retries pi will attempt before this extension switches to the next fallback model. Default 3 (matches pi's default retry.maxRetries=3 → 4 total attempts per model: 1 initial + 3 retries). If you've changed pi's retry.maxRetries in settings.json, set this to the same value so fallback triggers exactly when pi gives up.",
+          "default": 3
+        }
+      }
+    },
+
     "vision": {
       "type": "object",
       "description": "Vision tool model selection (extensions/vision/). Auto-selects the strongest vision-capable model from the registry, excluding the caller's own model.",
