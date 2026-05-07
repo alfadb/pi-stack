@@ -1,6 +1,6 @@
 # ADR 0001 — pi-astack 作为 alfadb 为 pi 打造的个人工作流仓
 
-- **状态**: Accepted
+- **状态**: Accepted。**记忆基础设施部分已过时**——gbrain 唯一存储被 [memory-architecture.md](../memory-architecture.md) 取代（2026-05-07），改为纯 markdown+git 架构。项目定位、vendor+端口层模式、使用即开发工作流、硬纪律均不变。
 - **日期**: 2026-05-05
 - **决策者**: alfadb（唯一作者）
 
@@ -58,11 +58,15 @@ alfadb 是 **pi-astack 的唯一作者，也是唯一使用者**：
 - `pi install git:github.com/alfadb/pi-astack` 仅作为"假想他人安装"的备用入口
 - 所有提交都在 pi-astack submodule 内做，~/.pi 仓只追踪 submodule 指针 SHA
 
-### 记忆基础设施（v6.5 心智）
+### 记忆基础设施（v6.5 → v6.8 → v7 心智演进）
+
+> **⚠️ 过时信息**：以下段落描述 v6.5-v6.8 的 gbrain 记忆基础设施，已被 [memory-architecture.md](../memory-architecture.md)（2026-05-07）取代。当前架构：markdown+git 唯一 source of truth；项目级走 `<project>/.pensieve/`；世界级走 `~/.abrain/`；sediment 单写；主会话只读（`memory_search/get/list/neighbors`）。详见 memory-architecture.md。
+
+要点（历史记录）：
 
 详见 ADR 0002（gbrain 唯一记忆存储）、ADR 0003（主会话只读）、ADR 0004（sediment 写入策略）、ADR 0005（pensieve 退场）、ADR 0007（offline 降级）、ADR 0008（~/.pi 双重身份路由）、ADR 0009（multi-agent 自由化）。
 
-要点：
+要点（历史记录，已被 memory-architecture.md 取代）：
 - 记忆基础设施 = gbrain（postgres + pgvector）唯一承载；gbrain 部署由 alfadb 自决，pi-astack 不提供安装兜底
 - 项目记忆 → gbrain `source: pi-astack`（federated=false）
 - 跨项目准则 → gbrain `source: default`（federated=true）

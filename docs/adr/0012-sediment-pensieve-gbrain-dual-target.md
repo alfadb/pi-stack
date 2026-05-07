@@ -1,8 +1,9 @@
 # ADR 0012: sediment reverts to pensieve+gbrain dual-target after gbrain multi-source isolation proves unimplemented
 
-- **Status:** accepted
-- **Date:** 2026-05-06
+- **Status:** **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）— 本 ADR 的 pensieve+gbrain 双 target 被 memory-architecture.md 整体取代。新架构转向纯 markdown+git：项目级走 `<project>/.pensieve/`（md+git），世界级走 `~/.abrain/`（独立 git repo）。gbrain 被完全去除（memory-architecture.md 决策 2）。
+- **Date:** 2026-05-06 (accepted), 2026-05-07 (superseded)
 - **Supersedes:** ADR 0005 (pensieve-deprecated), ADR 0011 (two-track via gbrain sources)
+- **Superseded by:** [memory-architecture.md](../memory-architecture.md) § 2 决策 2 + 附录 B.2
 - **Implements:** the proven dual-target sediment architecture from
   garrytan/pi-sediment, lifted verbatim into pi-astack/extensions/sediment/
 - **Related:** ADR 0002 (gbrain as sole memory store — REVISED), ADR 0010

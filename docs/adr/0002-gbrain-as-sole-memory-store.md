@@ -1,6 +1,7 @@
 # ADR 0002 — gbrain 作为唯一记忆存储
 
-- **状态**: **Superseded by ADR 0012**（2026-05-06）— gbrain v0.27 multi-source 写入与检索均未实现，sediment 回退到 pensieve（项目级文件系统）+ gbrain default（世界级）的双 target 架构。本 ADR 的核心论据（gbrain 能承担项目级 + 世界级双层职责）被实证证伪。
+- **状态**: **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）— gbrain 被整体替换为纯 markdown+git 架构。项目级走 `<project>/.pensieve/`，世界级走 `~/.abrain/`。gbrain 的 timeline/图谱方法论被借鉴到 markdown 格式中（决策 5）。
+- **历史链**：原被 ADR 0012 取代 → ADR 0012 被 memory-architecture.md 附录 B.2 宣布取代。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
 - **依赖**: ADR 0001（项目定位）

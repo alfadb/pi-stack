@@ -1,10 +1,10 @@
 # ADR 0003 — 主会话只读，sediment 单写
 
-- **状态**: Accepted
+- **状态**: Accepted。**Guard 实现已过时**（2026-05-07）— memory-architecture.md §6.1 定义了新的读工具 `memory_search/get/list/neighbors` 替代 `gbrain_search/get/query`。Guard 的拦截目标从 gbrain CLI/bash 变为 memory write tools（仅 sediment 可见）。读写分离核心原则不变。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
-- **依赖**: ADR 0002（gbrain 唯一记忆存储）
-- **后续**: ADR 0004（sediment 写入策略）
+- **依赖**: ADR 0002（superseded by memory-architecture.md）/ ADR 0004（sediment 写入）
+- **后续**: [memory-architecture.md](../memory-architecture.md) §6（新 tool 接口），§8（读写分离与 sediment 行为）
 
 ## 背景
 
@@ -22,7 +22,9 @@ brain maxim `give-main-agents-read-only-knowledge-tools-delegate-all-writes-to-a
 
 v6.5.1 修订："只读"不能只靠"不注册 gbrain_put tool"这种 omission，必须有机制性 guard。主会话仍拥有 `bash` / `edit` / `write` / `dispatch_agents` 等通用能力，若不拦截，会绕过 sediment、voter、source-router、schema-enforcer、readback、pending queue 与 audit log。
 
-### 主会话工具集与强制 guard
+### 主会话工具集与强制 guard（历史实现，已被 memory-architecture.md §6 替代）
+
+> **⚠️ 过时**：以下 guard 实现基于 gbrain CLI/bash 拦截。新架构中读写分离由 tool 注册控制（memory-architecture.md §8.1）：主 session 仅注册 `memory_search/get/list/neighbors`，sediment 独享 `memory_write/update/deprecate/promote/relate`。不再需要 bash 命令字符串解析来拦截写入。
 
 | 类别 | Tools / 机制 | 说明 |
 |---|---|---|

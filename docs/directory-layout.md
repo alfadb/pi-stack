@@ -1,7 +1,11 @@
 # pi-astack 目录布局与所有权
 
-> **v6.8 更新提示**（[ADR 0012](./adr/0012-sediment-pensieve-gbrain-dual-target.md)）：`extensions/sediment/` 已重新架构为 `garrytan/pi-sediment` 象限架构。本文档 `extensions/sediment/` 子节下的文件清单已过时（作者记忆中的
-> tracks.ts / source-resolver.ts / source-registry.ts / checkpoint.ts / audit-logger.ts / pending-queue.ts / secret-scanner.ts 都被归档到 `extensions/sediment/.v6.7-archive/`）。实际文件清单请看下面 v6.8 指南。
+> **v7 更新提示**（[memory-architecture.md](./memory-architecture.md)）：记忆基础设施从 gbrain (postgres+pgvector) 整
+> 体替换为纯 markdown+git。`extensions/sediment/` 不再依赖 gbrain CLI；写入目标为 `<project>/.pensieve/`
+> 和 `~/.abrain/` 的 markdown 文件。`.gbrain-source` / `.gbrain-cache/` / `.gbrain-scratch` 等 dotfile
+> 全部作废。`extensions/gbrain/` 被 `extensions/memory/` 替代（`memory_search/get/list/neighbors`）。
+>
+> 历史归档：`extensions/sediment/.v6.7-archive/`（双轨 source routing）、`extensions/sediment/.v6.5-archive/`（三模型投票）。
 
 ```
 alfadb/pi-astack/
@@ -12,25 +16,26 @@ alfadb/pi-astack/
 ├── LICENSE                            # MIT
 ├── .gitignore
 ├── .gitmodules                        # vendor/gstack only
-│                                      # （不包含 docker-compose.yml：详见 ADR 0007，
-│                                       gbrain 部署由 alfadb 自决）
 │
 ├── docs/
-│   ├── memory-architecture.md         # 架构总览
+│   ├── memory-architecture.md         # 权威设计规范（v7 记忆架构）
 │   ├── directory-layout.md            # 本文件
 │   ├── adr/
 │   │   ├── 0001-pi-astack-as-personal-pi-workflow.md
-│   │   ├── 0002-gbrain-as-sole-memory-store.md
-│   │   ├── 0003-main-session-read-only.md
-│   │   ├── 0004-sediment-write-strategy.md
-│   │   ├── 0005-pensieve-deprecated.md
+│   │   ├── 0002-gbrain-as-sole-memory-store.md          # superseded by memory-architecture.md
+│   │   ├── 0003-main-session-read-only.md                # 原则保留，guard 实现过时
+│   │   ├── 0004-sediment-write-strategy.md               # superseded by ADR 0010
+│   │   ├── 0005-pensieve-deprecated.md                   # superseded by memory-architecture.md
 │   │   ├── 0006-component-consolidation.md
-│   │   ├── 0007-offline-degraded-mode.md
-│   │   ├── 0008-pi-dotfiles-dual-role.md
-│   │   └── 0009-multi-agent-as-base-capability.md
+│   │   ├── 0007-offline-degraded-mode.md                 # 前提被 memory-architecture.md 改变
+│   │   ├── 0008-pi-dotfiles-dual-role.md                 # .gbrain-source 作废
+│   │   ├── 0009-multi-agent-as-base-capability.md
+│   │   ├── 0010-sediment-single-agent-with-lookup-tools.md # 内核保留，tools 过时
+│   │   ├── 0011-sediment-two-track-pipeline.md           # superseded by memory-architecture.md
+│   │   └── 0012-sediment-pensieve-gbrain-dual-target.md  # superseded by memory-architecture.md
 │   └── migration/
-│       ├── steps.md                   # 7 阶段迁移路径
-│       └── open-questions.md          # 待澄清问题
+│       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6
+│       └── open-questions.md          # 适配新架构的待澄清问题
 │
 ├── defaults/
 │   └── pi-astack.defaults.json         # package-local fallback / 文档示例
@@ -38,63 +43,54 @@ alfadb/pi-astack/
 │
 ├── vendor/                            # ▼▼▼ READ-ONLY，仅作 diff/参考源 ▼▼▼
 │   └── gstack/                        # submodule → garrytan/gstack@bf65487
-│                                      # （没有 vendor/pensieve，详见 ADR 0005）
 │
 ├── extensions/                        # ▼▼▼ pi 行为扩展，alfadb own ▼▼▼
 │   ├── multi-agent/                   # subtree from alfadb/pi-multi-agent + ADR 0009 重构
 │   │   ├── package.json
-│   │   ├── index.ts                   # pi.n() registered tool: dispatch_agent / dispatch_agents (新)
+│   │   ├── index.ts                   # pi.n() registered tool: dispatch_agent / dispatch_agents
 │   │   │                              #              + multi_dispatch (兼容)
 │   │   │                              #              + vision + imagine
 │   │   ├── runner.ts
 │   │   ├── subagent-tools.ts
-│   │   ├── input-compat.ts            # n(args) argument preparation hook 输入兑底层 (ADR 0009 § 2.5)
-│   │   │                              # 保持 strict parameters schema；不使用 Type.Any 绕过
-│   │   │                              # JSON 字符串 ↔ 对象/数组（双重 unwrap）
-│   │   │                              # array → CSV / 数字字符串 → number
-│   │   ├── input-compat.test.ts       # 兑底层单测（纯函数，必跑）
-│   │   ├── templates/                 # 主会话参考的调用模式 cookbook (ADR 0009)
-│   │   │   ├── parallel.md            # 独立并行 cookbook
-│   │   │   ├── debate.md              # 多轮辩论 cookbook
-│   │   │   ├── chain.md               # 串行接力 cookbook
-│   │   │   └── ensemble.md            # 投票综合 cookbook
+│   │   ├── input-compat.ts            # n(args) argument preparation hook (ADR 0009 § 2.5)
+│   │   ├── input-compat.test.ts       # 兑底层单测
+│   │   ├── templates/                 # 调用模式 cookbook
+│   │   │   ├── parallel.md
+│   │   │   ├── debate.md
+│   │   │   ├── chain.md
+│   │   │   └── ensemble.md
 │   │   └── tools/
-│   │       ├── vision-core.ts         # vision tool 实现（pi-multi-agent 自带）
-│   │       ├── imagine-core.ts        # imagine tool 实现（pi-multi-agent 自带）
+│   │       ├── vision-core.ts
+│   │       ├── imagine-core.ts
 │   │       └── ...
-│   ├── sediment/                      # v6.6 单 agent + lookup tools 沉淀（ADR 0010 替代原 v6.5 多 voter 方案 ADR 0004）
+│   ├── sediment/                      # v7 单 agent + markdown 写入（memory-architecture.md §8）
 │   │   ├── package.json
 │   │   ├── index.ts                   # agent_end 监听 + setTimeout(0) 异步派发
 │   │   ├── config.ts                  # 三级 fallback：env → settings.json → defaults
-│   │   ├── checkpoint.ts              # ~/.gbrain-cache/sediment-checkpoint.json 增量 window
-│   │   ├── entry-text.ts              # entryToText / contentToText / buildWindowText
-│   │   ├── gbrain-agent.ts            # ADR 0010: 单 agent loop + markdown 终结符 parser
 │   │   ├── agent-loop.ts              # multi-turn LLM with tool use
-│   │   ├── lookup-tools.ts            # gbrain_search / gbrain_get（只读，代替 quorum dedupe）
-│   │   ├── source-router.ts           # ADR 0008: 官方 resolver + source trust guard + 显式 --source
-│   │   ├── secret-scanner.ts          # pre-LLM redact + post-LLM rescan
-│   │   ├── marker-scanner.ts          # 注入 marker 检测（dogfooding bypass 中，待恢复）
-│   │   ├── gbrain-writer.ts           # gbrainPut / gbrainGet / gbrainExport / gbrainDelete
-│   │   ├── commands.ts                # /memory-pending /memory-source /memory-log-level
-│   │   ├── markdown-exporter.ts       # ADR 0007: 定期 export 到 ~/.pi/.gbrain-cache/
-│   │   ├── pending-queue.ts           # parse_failure / write 失败 / secret hit 兜底队列
-│   │   ├── audit-logger.ts            # 写入 ~/.pi/.gbrain-cache/sediment.log
-│   │   ├── .v6.5-archive/             # v6.5 走不通的模块归档（voter / classifier / context-budget）
-│   │   └── prompts/                   # 废弃：v6.6 system prompt 直接在 gbrain-agent.ts 里，不再拆文件
-│   │                                  # 其 rubric 合并进单 GBRAIN_AGENT_PROMPT（避免 v6.5 模板拼接脆弱性）
+│   │   ├── sediment-agent.ts          # 单 agent loop + markdown 终结符 parser
+│   │   ├── lookup-tools.ts            # memory_search / memory_get（只读，去 pensieve/grep）
+│   │   ├── markdown-writer.ts         # 原子写入 .pensieve/ 或 ~/.abrain/（tmp → rename）
+│   │   ├── graph-builder.ts           # graph.json 增量构建（best-effort）
+│   │   ├── lint.ts                    # 10 条 Lint 规则（T1-T10）
+│   │   ├── commands.ts                # /memory-pending /memory-doctor 等 slash commands
+│   │   ├── .v6.7-archive/             # v6.7 双轨 source routing 模块归档
+│   │   └── .v6.5-archive/             # v6.5 三模型投票模块归档
+│   ├── memory/                        # v7 主会话只读工具（替代旧 extensions/gbrain/）
+│   │   ├── package.json
+│   │   ├── index.ts                   # pi.n() registered: memory_search/get/list/neighbors
+│   │   └── facade.ts                  # Memory Facade: 路由、RRF 融合、project boost、排序
 │   ├── model-curator/                 # cp from agent/skills/pi-model-curator
 │   │   ├── package.json
 │   │   ├── index.ts
 │   │   └── catalog.json
-│   ├── gbrain/                        # cp from agent/extensions/gbrain + M6 fallback
-│   │   └── index.ts                   # pi.n() registered tool: gbrain_search / get / query
 │   ├── browse/                        # from pi-gstack/extensions/browse
 │   │   └── ...
-│   └── retry-stream-eof/              # from agent/extensions/retry-stream-eof.ts
+│   └── model-fallback/                # from agent/extensions/retry-stream-eof.ts（改名升级）
 │       └── index.ts                   # 自有功能，永久 own，不向上游 PR
 │
 ├── skills/                            # ▼▼▼ pi 技能，alfadb own ▼▼▼
-│   ├── memory-wand/                   # 改名重写自 pensieve-wand，gbrain_* tool 包装
+│   ├── memory-wand/                   # 改名重写自 pensieve-wand，memory_* tool 包装
 │   │   └── SKILL.md
 │   ├── autoplan/                      # 19 个来自 garrytan/gstack
 │   │   └── SKILL.md
@@ -126,44 +122,31 @@ alfadb/pi-astack/
 │   └── benchmark/
 │
 └── prompts/                           # ▼▼▼ pi 提示模板，alfadb own ▼▼▼
-    ├── commit.md                      # 从 pensieve pipeline.run-when-committing.md 提取
-    ├── plan.md                        # 从 pensieve pipeline.run-when-planning.md 提取
-    ├── review.md                      # 从 pensieve pipeline.run-when-reviewing-code.md 提取
-    ├── sync-to-main.md                # 从 pensieve pipeline.run-when-syncing-to-main.md 提取
+    ├── commit.md                      # 从 pensieve pipeline 提取
+    ├── plan.md
+    ├── review.md
+    ├── sync-to-main.md
     ├── ship.md                        # from garrytan/gstack
     └── multi-*.md                     # from alfadb/pi-multi-agent/prompts
 ```
 
-## ~/.pi 双重身份说明（ADR 0008）
+## 关键变化（v7 vs v6.8）
 
-~/.pi 同时是：
-- **pi-astack 的开发环境**（alfadb cd 到 pi-astack 子目录改代码）
-- **其他项目的 pi 基础环境**（alfadb cd 到任意项目跑 pi，pi 加载 ~/.pi/agent/settings.json）
-
-source 路由按 ADR 0008 区分：
-
-| cwd 位置 | source |
-|---|---|
-| `~/.pi/` 内（包括 pi-astack 子目录） | `pi-astack` |
-| `~/.pi/` 外且已注册项目 | 该项目 source |
-| `~/.pi/` 外且未注册 git repo | 不注入，sediment fail closed |
-| 非 git repo | 不注入 |
-
-## 关键变化（vs v1 方案）
-
-| 项 | v1 方案 | v6.5 方案 |
+| 项 | v6.8（ADR 0012） | v7（memory-architecture.md） |
 |---|---|---|
-| `runtime/pensieve/` | 完整 own pensieve 运行时 | **删除**（pensieve 项目退场） |
-| `vendor/pensieve/` | submodule pin to kingkongshot/Pensieve@main | **删除**（ADR 0005） |
-| `extensions/pensieve-context/` | pensieve project memory adapter | **删除** |
-| `skills/pensieve-wand/` | pensieve 检索助手 | 改名 `skills/memory-wand/`，重写为 gbrain_* 包装 |
-| `prompts/{commit,plan,review,sync-to-main}.md` | 不存在 | **新增**（从 pensieve pipelines 提取，A 类自有） |
-| `extensions/sediment/` | pensieve writer + gbrain target 双写 | **改造**：单写 / 分离写 / 派生写三策略，gbrain 唯一 |
-| `defaults/pi-astack.defaults.json` | 不存在 | **新增**（package-local fallback / 文档示例；运行时走官方 settings chain） |
-| `docker-compose.yml` | 不存在 | **不提供**（gbrain 部署由 alfadb 自决，ADR 0007） |
-| `extensions/multi-agent/templates/` | 不存在 | **新增**（ADR 0009）4 种 cookbook 模板 |
-| `extensions/multi-agent/input-compat.ts` | 不存在 | **新增**（ADR 0009 § 2.5）JSON 字符串兑底兑底层 |
-| `docs/adr/` | 1 ADR | **9 ADR**（v6.5 体系） |
+| 记忆存储 | gbrain default + `.pensieve/` 双 target | 纯 markdown+git（`.pensieve/` + `~/.abrain/`） |
+| 世界级存储 | gbrain default source | `~/.abrain/` 独立 git repo |
+| 读工具 | `gbrain_search/get/query` | `memory_search/get/list/neighbors` |
+| 写工具 | `gbrain put` via CLI | `memory_write/update/deprecate/promote/relate` |
+| extensions/gbrain/ | 主会话 read tool + markdown fallback | → `extensions/memory/`（Facade 模式） |
+| extensions/sediment/ | 双 target（pensieve writer + gbrain agent） | 统一 markdown writer + graph builder |
+| .gbrain-source dotfile | 两份，commit 进 git | **删除**（作废） |
+| .gbrain-cache/ | markdown export 兜底 | **删除**（git 本身就是 source of truth） |
+| 条目格式 | gbrain page type + tags | frontmatter v1 + compiled truth + `## Timeline` |
+| 知识模型 | pensieve 4 象限 | 7 种 kind + confidence + lifetime |
+| graph 索引 | 无 | graph.json（派生，gitignored） |
+| Lint 规则 | 无 | 10 条确定性规则（T1-T10） |
+| Health 评分 | 无 | 5 指标腐烂避免评分 |
 
 ## 所有权与依赖矩阵
 
@@ -173,21 +156,21 @@ source 路由按 ADR 0008 区分：
 | `extensions/multi-agent/` | alfadb（C 类迁入） | ✅ pi.extensions | ✅ |
 | `extensions/sediment/` | alfadb（C 类迁入 + A 类改造） | ✅ pi.extensions | ✅ |
 | `extensions/sediment/prompts/` | alfadb（A 类） | ❌ 主会话不见 | ✅ |
+| `extensions/memory/` | alfadb（v7 新建） | ✅ pi.extensions | ✅ |
 | `extensions/model-curator/` | alfadb（C 类迁入） | ✅ pi.extensions | ✅ |
-| `extensions/gbrain/` | alfadb（C 类迁入 + A 类改造） | ✅ pi.extensions | ✅ |
 | `extensions/browse/` | alfadb（C 类迁入） | ✅ pi.extensions | ✅ |
-| `extensions/multi-agent/input-compat.ts` | alfadb（A 类自有，ADR 0009 § 2.5）| 被三个入口 handler import | ✅ |
-| `extensions/multi-agent/input-compat.test.ts` | alfadb（单测）| 仅 CI 跳运 | ✅ |
-| `extensions/multi-agent/templates/*` | alfadb（供主会话参考） | ✅ 被主会话 promptSnippet 指向读 | ✅ |
-| `extensions/retry-stream-eof/` | alfadb（A 类永久 own） | ✅ pi.extensions | ✅ |
+| `extensions/multi-agent/input-compat.ts` | alfadb（A 类自有） | 被 handler import | ✅ |
+| `extensions/multi-agent/templates/*` | alfadb（供主会话参考） | ✅ promptSnippet 指向 | ✅ |
+| `extensions/model-fallback/` | alfadb（A 类永久 own） | ✅ pi.extensions | ✅ |
 | `skills/memory-wand/` | alfadb（A 类） | ✅ pi.skills | ✅ |
 | `skills/{19 个}/` | alfadb（B 类端口） | ✅ pi.skills | ✅ |
 | `prompts/{commit,plan,review,sync-to-main}.md` | alfadb（A 类） | ✅ pi.prompts | ✅ |
 | `prompts/ship.md` | alfadb（B 类端口） | ✅ pi.prompts | ✅ |
 | `prompts/multi-*.md` | alfadb（C 类迁入） | ✅ pi.prompts | ✅ |
 | `defaults/pi-astack.defaults.json` | alfadb | ❌（fallback / 文档示例） | ✅ |
+| `docs/memory-architecture.md` | alfadb（权威设计规范） | ❌ | ✅ |
 | `docs/adr/` | alfadb | ❌ | ✅ |
-| `UPSTREAM.md` | alfadb | ❌ | ✅（每次 vendor bump 必更新）|
+| `UPSTREAM.md` | alfadb | ❌ | ✅（每次 vendor bump 必更新） |
 
 ## 单向依赖图
 
@@ -203,25 +186,20 @@ source 路由按 ADR 0008 区分：
         │
         │ 写入 / 读取
         ▼
-   gbrain (postgres + pgvector)
-        ↑
-        │ markdown export 兜底
+   markdown + git (source of truth)
+   ├── <project>/.pensieve/     (项目级)
+   └── ~/.abrain/               (世界级)
         │
-   ~/.pi/.gbrain-cache/  (gitignored)
-        ↑
-        │ read fallback (gbrain unavailable)
-        │
-   extensions/gbrain/  (主会话 read tool)
-
-
-   vendor/gstack/  ← 仅 docs/adr 与 UPSTREAM.md 引用
+        │ 派生索引
+        ▼
+   .pensieve/.index/graph.json   (gitignored, 可重建)
+   ~/.abrain/.state/index/graph.json
 ```
 
 **严禁的引用关系**:
 1. `extensions/* → vendor/*`（端口层不能依赖 vendor）
 2. `skills/* / prompts/* → 任何代码`（声明式资源）
 3. `vendor/* → 任何 pi-astack 内容`（vendor 是 read-only 上游快照）
-4. `extensions/sediment → 直接调 postgres`（必须经 gbrain CLI / SDK）
 
 ## 资源类型 vs pi 加载机制对照
 
@@ -232,6 +210,6 @@ source 路由按 ADR 0008 区分：
 | Prompts | `prompts/` | `package.json` 的 `pi.prompts` 数组扫描，加载 `.md` |
 | Themes | （无） | — |
 | Vendor sources | `vendor/` | **不被 pi 加载**，仅作参考 |
-| 配置 | 官方 settings chain (`~/.pi/agent/settings.json` + `.pi/settings.json`) | 运行时读取 `piStack.*`；`defaults/pi-astack.defaults.json` 仅 fallback/文档示例 |
+| 配置 | 官方 settings chain | 运行时读取 `piStack.*`；`defaults/` 仅 fallback/文档示例 |
 | 内部 prompts（sediment 用） | `extensions/sediment/prompts/` | **不被 pi 加载**，sediment 内部读取 |
-| Multi-agent cookbook | `extensions/multi-agent/templates/` | **不被 pi 加载**（仅考考索引），主会话 promptSnippet 中提示可读 |
+| Multi-agent cookbook | `extensions/multi-agent/templates/` | 主会话 promptSnippet 中提示可读 |

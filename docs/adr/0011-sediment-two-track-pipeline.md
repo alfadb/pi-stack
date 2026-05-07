@@ -1,6 +1,7 @@
 # ADR 0011 — sediment 双轨沉淀（项目级 + 世界级）
 
-- **状态**: **Superseded by ADR 0012**（2026-05-06）— 本 ADR 假设 gbrain `sources` 可用于写入 + 检索隔离，但 v0.27 实验发现 put/sync/searchKeyword/searchVector/listPages 都不传也不过滤 source_id。双轨架构被同日退回 pensieve+gbrain 双 target 架构。
+- **状态**: **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）— 本 ADR 的 gbrain 双轨在 gbrain v0.27 无法实现 → 被 ADR 0012 取代 → ADR 0012 被 memory-architecture.md 整体取代。新架构回到纯 markdown+git，不再使用 gbrain sources。双轨语义被 Facade 模式（project boost + world 混合排序）和 promotion gates 替代。
+- **历史链**：ADR 0011 → ADR 0012 → memory-architecture.md
 - **日期**: 2026-05-06
 - **决策者**: alfadb
 - **替代关系**: 在 ADR 0010（v6.6 单 agent）基础上扩展，不否定其单 agent + lookup tools 内核

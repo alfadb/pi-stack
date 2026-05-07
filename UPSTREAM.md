@@ -23,15 +23,15 @@
 
 | 组件 | 理由 |
 |---|---|
-| `extensions/retry-stream-eof/` | alfadb 自己的功能，上游对 PR 态度大多直接关闭 |
+| `extensions/model-fallback/` | alfadb 自己的功能，上游对 PR 态度大多直接关闭 |
 | `skills/memory-wand/` | pensieve-wand 改写后是 pi-astack 自有产权 |
-| `extensions/sediment/` 改造（voter、source-router、schema-enforcer、derivation-handler、pending-queue、audit-logger、markdown-exporter、import-triage） | v6.5 自有设计，含 pensieve 4 象限 + gstack 字段哲学 |
-| `extensions/sediment/prompts/` 全套 rubric（vote-prompt / maxim-rubric / decision-rubric / knowledge-rubric / short-term-rubric / derivation-rubric / do-not-write-rubric / source-routing-policy） | 提取自 pensieve references + ADR 0004/0008 写作，pi-astack 私有 |
-| `extensions/multi-agent/` ADR 0009 重构（`dispatch_agent` / `dispatch_agents` 基础能力 + `templates/` cookbook + `multi_dispatch` 兼容层） | v6.5 自有设计 |
-| `extensions/multi-agent/input-compat.ts` + `input-compat.test.ts`（ADR 0009 § 2.5）：双重 JSON 字符串 unwrap + 限定字段类型转换（tools array→CSV / timeoutMs string→number） + 错误消息四要素 | v6.5 自有设计 |
+| `extensions/memory/` | v7 新建，Facade 模式封装 `memory_search/get/list/neighbors`（替代旧 `extensions/gbrain/`） |
+| `extensions/sediment/` 改造（markdown writer、graph builder、lint、doctor） | v7 自有设计，基于 memory-architecture.md |
+| `extensions/sediment/prompts/` 全套 rubric | pi-astack 私有 |
+| `extensions/multi-agent/` ADR 0009 重构 | v6.5 自有设计 |
+| `extensions/multi-agent/input-compat.ts` + `input-compat.test.ts` | v6.5 自有设计 |
 | `prompts/{commit,plan,review,sync-to-main}.md` | 从 pensieve pipelines 提取后是 pi-astack 私有 |
 | `defaults/pi-astack.defaults.json` | package-local fallback / 文档示例（运行时走官方 pi settings chain） |
-| `extensions/gbrain/` 的 markdown fallback 增强 | 自有改造，ADR 0007 |
 
 ### C 类：内部组件迁入（不进本表，仅列举）
 
@@ -95,7 +95,7 @@
 | 路径 | 描述 | 日期 |
 |---|---|---|
 | `skills/cso/SKILL.md` Phases 5,11,12 | 增强（不在上游） | 2026-05-01 |
-| 全部 19 skill + ship.md gbrain 集成 | Brain Context Load (gbrain_search/gbrain_get) 注入 | 2026-05-02 |
+| 全部 19 skill + ship.md memory 集成 | Brain Context Load (memory_search/memory_get) 注入 | 2026-05-02 → 2026-05-07 更新 |
 | `prompts/ship.md` step numbering / path refs | review feedback 修复 | 2026-05-01 |
 
 ---
@@ -111,7 +111,7 @@
 - alfadb 在 pensieve 上游身份明牌（self-demote 或找替补 user-maintainer）
 - 4 个 pipelines 提取为 `prompts/*.md`
 - 写入规范进入 `extensions/sediment/prompts/`（主会话不可见）
-- pensieve-wand skill 改写为 `skills/memory-wand/`（gbrain 包装，A 类自有）
+- pensieve-wand skill 改写为 `skills/memory-wand/`（memory_* tool 包装，A 类自有）
 
 ---
 
@@ -146,15 +146,18 @@
 
 ## 已废弃实体（仅作历史参考）
 
-| 实体 | 废弃日期 | 接收者 |
+| 实体 | 废弃日期 | 接收者/原因 |
 |---|---|---|
+| **gbrain 记忆基础设施** | 2026-05-07 | 整体替换为纯 markdown+git（[memory-architecture.md](./docs/memory-architecture.md) 决策 2） |
+| `~/.pi/.gbrain-source` / `.gbrain-cache/` / `.gbrain-scratch` | 2026-05-07 | 作废（不再依赖 gbrain） |
+| `extensions/gbrain/` | 2026-05-07 | → `extensions/memory/`（`memory_*` tools 替代 `gbrain_*` tools） |
 | `alfadb/pi-gstack` repo | 2026-05-05 | 整体并入 pi-astack（C 类） |
 | `alfadb/pi-multi-agent` repo | 2026-05-05 | subtree merge 入 pi-astack/extensions/multi-agent（C 类） |
 | `alfadb/pi-sediment` repo | 2026-05-05 | subtree merge 入 pi-astack/extensions/sediment（C 类） |
 | `kingkongshot/Pensieve@feature/auto-sediment-hook` 分支 | 2026-05-05 | 删除（ADR 0005） |
 | `kingkongshot/Pensieve@pi` 分支 | 2026-05-05 | 删除（ADR 0005） |
-| `~/.pi/agent/extensions/gbrain/` | 2026-05-05 | pi-astack/extensions/gbrain（C 类） |
-| `~/.pi/agent/extensions/retry-stream-eof.ts` | 2026-05-05 | pi-astack/extensions/retry-stream-eof（C 类迁入 → A 类永久 own） |
+| `~/.pi/agent/extensions/gbrain/` | 2026-05-05 | pi-astack/extensions/gbrain（C 类）→ 2026-05-07 作废 |
+| `~/.pi/agent/extensions/retry-stream-eof.ts` | 2026-05-05 | pi-astack/extensions/model-fallback（C 类迁入 → A 类永久 own） |
 | `~/.pi/agent/skills/pi-model-curator/` | 2026-05-05 | pi-astack/extensions/model-curator（C 类） |
-| `~/.pi/.pensieve/` 数据 | 2026-05-05 | triage + import 到 gbrain `source: pi-astack`，物理目录删除 |
+| `~/.pi/.pensieve/` 数据（旧格式） | 2026-05-07 | 通过 `pi memory migrate` 迁移为新格式（frontmatter v1 + Timeline） |
 | `~/.pi/agent/skills/pensieve/` submodule | 2026-05-05 | 从 ~/.pi/.gitmodules 移除（ADR 0005） |

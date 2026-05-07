@@ -1,7 +1,7 @@
 # ADR 0005 — pensieve 项目作为 pi-astack 组件退场
 
-- **状态**: **Superseded by ADR 0012**（2026-05-06）— 本 ADR 的前提是 “gbrain 可以接管 pensieve 的项目级职责”，被 gbrain v0.27 multi-source 未实现证伪。
-  pensieve target 被复活，sediment 回到“.pensieve/ 项目级 + gbrain default 世界级”双 target 。
+- **状态**: **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）— `.pensieve/` 被复活为项目级 markdown+git 存储（非文件系统 target，而是 source of truth）。本 ADR 的前提 "gbrain 可以接管 pensieve 的项目级职责" 不再成立，因为 gbrain 本身已被整体替换为纯 markdown+git 架构（memory-architecture.md 决策 2）。
+- **历史链**：原被 ADR 0012 取代（pensieve 作为 sediment 文件系统 target 复活）→ ADR 0012 被 memory-architecture.md 附录 B.2 宣布取代。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
 - **依赖**: ADR 0002（gbrain 唯一记忆存存储）

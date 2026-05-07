@@ -1,6 +1,6 @@
 # ADR 0006 — 组件合并清单
 
-- **状态**: Accepted
+- **状态**: Accepted。**sediment/gbrain 相关描述已过时**（2026-05-07）— 组件合并清单中的 gbrain/cache/pending queue 等描述基于旧架构。新架构（[memory-architecture.md](../memory-architecture.md)）下 sediment 组件需重新设计，但扩展/skills/prompts 的归并清单不变。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
 - **依赖**: ADR 0001（项目定位）/ 0002（gbrain）/ 0005（pensieve 退场）
