@@ -1,8 +1,12 @@
 # Pi 知识管理架构设计
 
-> 基于 2026-05-06 用户原始架构想法，通过五轮 T0 深度讨论 + 完备性审查 + qmd 集成方案 + 三模型最终评审逐步细化而成。
+> 基于 2026-05-06 用户原始架构想法，通过五轮 T0 深度讨论 + 完备性审查 + qmd 集成方案 + 两轮最终评审逐步细化而成。
 > 讨论与审查参与者：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro
-> 最终评审（2026-05-07）：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro — 三模型一致 CONDITIONAL → 修订后 PASS
+> 最终评审（2026-05-07）：两轮三模型双盲审查 CONDITIONAL → 修订后 PASS
+
+**读者前提**：本文档假设读者了解 pi 的基本概念——pi 是一个 TypeScript TUI 编码 agent 框架，通过 `extension` 机制注册工具和生命周期钩子（`activate()`/`agent_end`），配置分布在 `<project>/.pi/agent/settings.json`（运行偏好）和 `<project>/.pensieve/config.yml`（项目知识配置）。pi 是长生命周期进程，主 session 和 dispatch 子进程通过工具与 LLM 交互，sediment sidecar 是 pi 的后台写入扩展。
+
+**文档角色**：本文档是 Pi 知识管理系统的 **权威设计规范**——定义了数据模型、存储拓扑、工具接口、sediment 行为、演化机制。所有实施以此文档为准。
 
 ---
 
@@ -220,6 +224,37 @@ body_links:                        # 正文 [[slug]] wikilink 默认关系
   references:      referenced_by
 ```
 
+**`schemas/relations.yaml`**（git tracked，关系类型注册表）：
+
+```yaml
+# 定义所有合法的 relation type 及其属性
+relations:
+  relates_to:
+    symmetric: true
+    description: "通用关联"
+  derives_from:
+    symmetric: false
+    reverse: derived_into
+    description: "派生自"
+  superseded_by:
+    symmetric: false
+    reverse: supersedes
+    description: "被替代"
+  applied_in:
+    symmetric: false
+    reverse: cited_by
+    description: "应用在"
+  contested_with:
+    symmetric: true
+    description: "与...冲突"
+  references:
+    symmetric: false
+    reverse: referenced_by
+    description: "正文 wikilink 引用"
+```
+
+sediment 写入 relation 时校验 type 必须存在于该 registry。graph.json 构建时从此文件读取合法的 edge type 列表。
+
 ### 4.6 默会知识管道
 
 ```
@@ -251,19 +286,22 @@ project/                                .pensieve/.index/
     ├── staging/                          └── fulltext.db (optional)
     ├── archive/
     ├── _index.md                       .pensieve/.state/
-    └── schemas/relations.yaml            ├── health-report.md
-                                          ├── lint-report.md
-world/                                    ├── sediment-events.jsonl
-  ~/.abrain/                              ├── locks/
-    ├── config.yml                        └── nudge-history.json
-    ├── maxims/
-    ├── patterns/                       ~/.abrain/.state/
-    ├── anti-patterns/                    ├── health-report.md
-    ├── facts/                            ├── lint-report.md
-    ├── staging/                          ├── sediment-events.jsonl
-    ├── archive/                          └── locks/
-    ├── _index.md
-    └── schemas/relations.yaml
+    └── schemas/                          ├── health-report.md
+          └── relations.yaml              ├── lint-report.md
+                                          ├── sediment-events.jsonl
+world/                                    ├── locks/
+  ~/.abrain/                              │   └── sediment.lock
+    ├── config.yml                        ├── nudge-history.json
+    ├── maxims/                           └── migration-report.md
+    ├── patterns/
+    ├── anti-patterns/                  ~/.abrain/.state/
+    ├── facts/                            ├── health-report.md
+    ├── staging/                          ├── lint-report.md
+    ├── archive/                          ├── sediment-events.jsonl
+    ├── _index.md                         ├── pending-world-intents.jsonl
+    └── schemas/                          ├── locks/
+          └── relations.yaml              │   └── sediment.lock
+                                          └── known-projects.json
 ```
 
 ### 5.3 `memory_search` 算法规格
@@ -356,20 +394,63 @@ interface MemoryBackend {
 | 会话结束 | 安全脚本：`pull --rebase --autostash && push` |
 | 冲突 | 不自动解决，pending 等人工 |
 
+**跨 project 注册**：`~/.abrain/.state/known-projects.json` 记录所有已知 project：
+
+```json
+[
+  {
+    "project_id": "pi-global",
+    "pensieve_path": "/home/worker/.pi/.pensieve",
+    "last_seen": "2026-05-07T14:30:00Z",
+    "slug_count": 23
+  }
+]
+```
+
+sediment 启动时自动注册当前 project（upsert by project_id）。Gate 2 跨实例验证时从此文件获取 ≥2 个 project。project_id 从 `<project>/.pensieve/config.yml` 的 `project.id` 字段读取，缺失时 fallback 为 `path.basename(projectRoot)`。
+
 ### 5.6 Graph 派生索引（决策 5）
 
 `graph.json` 从 markdown 确定性构建（post-commit hook 增量重建，缺失时当场 grep）：
 
 ```json
 {
-  "built_at": "...", "git_head": "abc123",
-  "nodes": { "<slug>": { "scope": "...", "kind": "...", "status": "...", "title": "..." } },
+  "built_at": "2026-05-08T14:30:00Z",
+  "git_head": "abc123",
+  "stale": false,
+  "nodes": {
+    "<slug>": {
+      "title": "...",
+      "scope": "project|world",
+      "kind": "maxim|decision|pattern|anti-pattern|fact|preference",
+      "status": "active|provisional|contested|deprecated|superseded|archived",
+      "confidence": 7,
+      "in_degree": 3,
+      "out_degree": 1
+    }
+  },
   "edges": [
-    { "from": "a", "to": "b", "type": "relates_to", "source": "frontmatter" }
+    {
+      "from": "<slug>",
+      "to": "<slug>",
+      "type": "relates_to|derives_from|superseded_by|applied_in|references|contested_with",
+      "source": "frontmatter|body_wikilink"
+    }
   ],
-  "stats": { "node_count": 320, "edge_count": 614, "orphans": [...], "dead_links": [...] }
+  "stats": {
+    "node_count": 320,
+    "edge_count": 614,
+    "orphans": ["<slug>"],
+    "dead_links": [{"from": "<slug>", "to": "<missing-slug>", "type": "relates_to"}]
+  }
 }
 ```
+
+**Edge type 来源**：`frontmatter` 边的合法 type 来自 `schemas/relations.yaml` 注册表。`body_wikilink` 边 type 固定为 `references`。graph.json 构建时过滤不在注册表中的 type → warning。
+
+**Stale 标记**：`stale: true` 表示 graph.json 不反映当前 git HEAD（sediment 写后 index 失败，或手动编辑了 markdown）。任意读工具首次访问 graph.json 时检测 `git_head ≠ HEAD` → 触发 lazy rebuild。
+
+**增量更新**：sediment 写入单条目后，仅更新该条目的 node + 出入边，不重建全量 graph。增量更新异常（如边冲突）→ 设置 `stale: true`，下次读触发全量 rebuild。
 
 CLI 命令（全部只读，写操作由 sediment 代理）：
 
@@ -527,7 +608,7 @@ P 引用了具体文件路径 / 模块名 / API 名？
 | Lock 获取超时（>5s） | 退化为只读 + 入队 pending queue（`.state/locks/pending.jsonl`），下次 session 重试 |
 | 磁盘满 / 权限错误 | 记录错误到 sediment-events.jsonl，通知主 session（ui.notify） |
 | 写入中途崩溃 | tmp 文件残留，下次启动时清理 `.tmp-*` 文件；graph.json 从 markdown 全量重建 |
-| ABRAIN_ROOT 未设置 | WorldStore 空返回；写入 world 的 attempt 记录到 `.state/pending-world-intents.jsonl`，等 ABRAIN 可用后重放或人工确认。不自动改 scope |
+| ABRAIN_ROOT 未设置 | WorldStore 空返回；写入 world 的 attempt 记录到 `.state/pending-world-intents.jsonl`（格式：`{"ts","session_id","slug","kind","confidence","title","reason"}`），等 ABRAIN 可用后 sediment 重放或人工确认。不自动改 scope |
 | `.index/` 与 markdown 不一致 | 查询时检测 `git_head` ≠ HEAD → lazy rebuild（允许读路径写 gitignored 派生索引）。canonical markdown 的读写分离不适用于 `.index/` 派生层 |
 | 脱敏规则误伤 | 拒绝写入（fail-closed），人工通过直接编辑 markdown 恢复 |
 
@@ -559,8 +640,21 @@ P 引用了具体文件路径 / 模块名 / API 名？
 project knowledge (status: active)
     ↓
 Gate 1: 去上下文化检查
-  → sediment 重写 compiled_truth，去掉项目名、路径、技术栈
-  → 存储：检出条目的 compiled_truth 副本，对照 schemas/decontextualized-check.md 规则
+  → sediment 重写 compiled_truth，去掉项目名、路径、技术栈，保留成立边界和技术前提
+  → 对照 `.pensieve/schemas/decontextualized-check.md` 规则检查（Phase 3+）：
+```yaml
+# schemas/decontextualized-check.md（项目级，git tracked）
+# 定义 promotion 时需移除的模式
+rules:
+  - pattern: "<project_root>/"
+    replace: "$PROJECT/"
+  - pattern: "\\b(pnpm|npm|yarn|bun)\\b"
+    action: warn  # 提醒检查是否为技术栈特化
+  - pattern: "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b"
+    replace: "[IP]"
+  - pattern: "\\b[A-Z][a-z]+Name\\b"  # 驼峰客户名
+    action: reject  # 拒绝 promotion，需人工去标识
+```
     ↓
 Gate 2: 跨实例验证
   → 同一 insight 在 ≥2 个独立 project 的 `.pensieve/` 中被 sediment 引用或写入过
