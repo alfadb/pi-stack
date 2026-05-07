@@ -1,307 +1,670 @@
-# pi-stack 记忆架构总览
+# Pi 知识管理架构设计
 
-> **状态：本文档主体描述的是 v6.5→v6.7 的演化（单轨 → 双 voter → 单 agent → 双轨 gbrain source）。
-> 从 v6.8 起（[ADR 0012](./adr/0012-sediment-pensieve-gbrain-dual-target.md)），sediment 回退到 **pensieve（`.pensieve/` 项目本地文件系统）+ gbrain default（世界级原则）双 target** 架构。
-> 废弃项：Source 二分 (pi-stack source 已删除)、`.gbrain-source` dotfile、source-resolver、auto-register、双轨 (project source + world source)。
-> 原因：gbrain v0.27 multi-source 写入与检索隔离均未实现（put/sync 不传 source_id；searchKeyword/Vector/listPages 不过滤 source_id）。上游修复后会重新迁移（`gbrain import .pensieve/ --source pi-stack`）。
->
-> 以下内容保留作为设计演化记录，不是当前状态。当前架构以 ADR 0012 + `extensions/sediment/index.ts` 为准。
+> 基于 2026-05-06 用户原始架构想法 + Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro 三方深度讨论综合而成。
 
-> 本文档是 ADR 0002-0004、0007、0008、0009、0012 的合并视图。如有冲突以 ADR 为准。
+## 0. 核心原则
 
-## 一图
+1. **读写分离**：只有 sediment sidecar 可以写持久知识。主 session、dispatch 子进程、所有其他 LLM 调用路径只能读。
+2. **读接口统一**：对 LLM 暴露的查询工具不区分项目级/世界级——区分是噪音。
+3. **写入显式 scoped**：只有 sidecar 的写入工具需要区分目标层级。
+4. **存储后端可插拔**：project 用 markdown + git，world 用 gbrain。Facade 确保切换后端不改工具接口。
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       pi (harness)                          │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │ 主会话 (read-only)                                    │  │
-│  │   gbrain_search / get / query        ← read           │  │
-│  │   skills/* (autoplan, qa, review, memory-wand, ...)   │  │
-│  │   prompts/* (commit, plan, review, sync-to-main)      │  │
-│  │   multi-agent: dispatch_agent / dispatch_agents       │  │
-│  │                vision / imagine                       │  │
-│  │                multi_dispatch (兼容)                  │  │
-│  │   model-curator (capability snapshot 注入)            │  │
-│  │   retry-stream-eof (错误重试)                         │  │
-│  └────────────────────────┬──────────────────────────────┘  │
-│                           │ agent_end 完整上下文             │
-│                           ▼                                  │
-│  ┌───────────────────────────────────────────────────────┐  │
-│  │ pi-sediment (sidecar, 唯一写入者) — v6.6 单 agent 流水线 │  │
-│  │   ├─ checkpoint (~/.gbrain-cache/sediment-checkpoint.json)│  │
-│  │   │   ↑ lastProcessedEntryId, 增量 window              │  │
-│  │   ├─ entry-text + buildRunWindow (≤200K chars)         │  │
-│  │   ├─ secret-scanner (pre-LLM redact)                   │  │
-│  │   ├─ gbrain-agent (单 agent loop, 默认 deepseek-v4-pro)│  │
-│  │   │   ├─ system: 沉淀 rubric + markdown 终结符规范    │  │
-│  │   │   ├─ tools: gbrain_search, gbrain_get (只读)      │  │
-│  │   │   └─ output: SKIP / SKIP_DUPLICATE / ## GBRAIN    │  │
-│  │   ├─ markdown 解析（regex header + __CONTENT__ body） │  │
-│  │   ├─ secret-scanner (post-LLM rescan)                 │  │
-│  │   ├─ source-router (~/.pi 双重身份, ADR 0008)         │  │
-│  │   ├─ pending-queue (parse_failure / write 失败兜底)   │  │
-│  │   ├─ audit-logger (sediment.log + dispatch.log)       │  │
-│  │   └─ markdown-exporter (offline 兜底)                 │  │
-│  └────────────────────────┬──────────────────────────────┘  │
-└──────────────────────────┼──────────────────────────────────┘
-                            │ explicit --source <id>
-                            ▼
-              ┌─────────────────────────────────┐
-              │ gbrain (alfadb 自决部署)        │
-              │   source: pi-stack (no-fed)     │ ← 项目记忆
-              │   source: default (federated)   │ ← 跨项目准则
-              │                                 │
-              │   导出（sediment 触发，定期）    │
-              │   ↓                             │
-              │ ~/.pi/.gbrain-cache/markdown/   │ ← offline 兜底
-              │   ├─ pi-stack/                  │
-              │   └─ default/                   │
-              │   (gitignored)                  │
-              └─────────────────────────────────┘
-```
+---
 
-## 三层心智
+## 1. 三层知识模型
 
-### 第 1 层：存储层（gbrain，alfadb 自决部署）
+### 1.1 层级定义
 
-唯一记忆存储 = gbrain（postgres + pgvector）。
+| 层 | 生命周期 | 存储 | 写入者 | 示例 |
+|---|---|---|---|---|
+| **Session** | 当前会话 | 内存 scratchpad | 主 agent（零摩擦） | "已验证 foo.ts 调用链安全，别再查"、"B 方案已排除" |
+| **Project** | 项目存活期 | Markdown + git（`.pensieve/`） | sediment sidecar | ADR 决策、模块边界、测试规范、部署约束 |
+| **World** | 跨项目持久 | gbrain | sediment sidecar（with gates） | dispatch 并行陷阱、tmux 主 pane 不关、argv/@file 选择 |
 
-**关键**：pi-stack **不**提供 gbrain 安装兜底。alfadb 自行准备 gbrain CLI + postgres + pgvector 实例 + `~/.gbrain/config.toml` 连接配置。详见 ADR 0007。
+**Session 层关键设计**：
+- 主 agent 可以直接写 session scratchpad，不需要走 voter/sidecar。
+- Session 结束自动蒸发（或保留 3 轮 activity 作为 sticky note）。
+- 与 project/world 完全分离的写入路径——session 层的随意性不污染持久层。
 
-**Source 二分**：
-- `pi-stack`（federated=**false**）：项目记忆（事件、具体决策、文件路径、~/.pi 调用链）
-- `default`（federated=**true**）：跨项目准则（抽象原则、通用 maxim、跨项目模式）
+### 1.2 不需要的层级
 
-**federated=false 的语义**：`pi-stack` source 不参加跨源 search；查询 / 写入 `pi-stack` 必须明确指定 source。交互式 gbrain CLI source 解析完全跟随 gbrain 官方 resolver（优先级链见 ADR 0008）；sediment 写入在 resolver 结果之上增加写入合法性校验与 source trust guard，并最终显式传 `--source <id>`。
+- **团队/组织层**：当前是单用户 agent，不需要身份模型。如有需要，通过 git 共享 `.pensieve/` 即可。
+- **用户偏好层**：可以放在 world 层作为特殊 type（`type: preference`），不需要独立物理层。
 
-详见 [ADR 0002](./adr/0002-gbrain-as-sole-memory-store.md) 与 [ADR 0007](./adr/0007-offline-degraded-mode.md)。
+---
 
-### 第 2 层：访问层（主会话只读）
+## 2. 二维 Schema（scope × kind）
 
-主会话**只读**记忆，**不写**记忆。
+"项目级 / 世界级"是一维 scope。知识条目还需要第二维 **kind**。
 
-**Read tools**（`extensions/gbrain/index.ts`）：
-- `gbrain_search(query, source?)` — 跨源 search（federated）+ 显式 source 查询
-- `gbrain_get(slug, source?)` — 按 slug 取 page
-- `gbrain_query(natural-language)` — 高级语义查询
+### 2.1 Schema 定义
 
-**Markdown fallback**：gbrain 不可用时降级到 grep `~/.pi/.gbrain-cache/markdown/`，返回 `_degraded: true` 标志。
+```typescript
+interface KnowledgeEntry {
+  // 主键
+  slug: string;          // e.g. "world:dispatch-parallel-trap"
 
-主会话**没有**任何写记忆的 tool。**且**通过 `tool_call` guard 阻断 bash/generic file tools 的 gbrain 写入绕道（详见 ADR 0003 v6.5.1 修订）。子代理默认无工具，不能通过 `dispatch_agents` capability escalation。
+  // 二维分类
+  scope: 'session' | 'project' | 'world';
+  kind:  'maxim' | 'decision' | 'anti-pattern' | 'pattern' | 'fact' | 'preference' | 'smell';
 
-用户说"记下这条"时 sediment 从 agent_end 完整上下文识别。若要求立刻确认，主会话应指向 `/memory-pending list` 或 sediment.log，而不是承诺"我已经记住"。
+  // 生命周期
+  status: 'provisional' | 'active' | 'contested' | 'deprecated' | 'superseded' | 'archived';
+  confidence: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
 
-详见 [ADR 0003](./adr/0003-main-session-read-only.md)。
+  // 内容
+  title: string;
+  summary: string;       // ≤200 tokens，用于 search snippet
+  body: string;          // 完整内容
+  trigger_phrases: string[];   // 被动回忆触发词
 
-### 第 3 层：写入层（sediment 唯一写入者）
+  // 演化
+  superseded_by?: string;
+  relates_to?: string[];
+  derives_from?: string[];
 
-sediment 是 pi 的 sidecar agent，监听 `agent_end` event。**当前走 v6.6 单 agent + lookup tools 写入策略**（详见 ADR 0010，替代 v6.5 多 voter 投票方案 ADR 0004）。
+  // 来源
+  provenance: {
+    session_id: string;
+    project_source: string;
+    model: string;
+    created_at: string;
+    updated_at: string;
+    last_verified_at?: string;
+  };
 
-#### 3.1 单 agent + lookup tools（ADR 0010）
+  // 边界
+  applies_to_versions?: string;    // e.g. "pi >= 6.5, node >= 20"
+  boundaries?: string;             // 什么时候不适用
 
-```
-agent_end → ctx.sessionManager.getBranch() → 完整 1700+ entries
-  ↓
-buildRunWindow(branch, since=lastProcessedEntryId)  ← checkpoint 增量
-  ↓
-单 agent loop：
-  ├─ model: deepseek/deepseek-v4-pro (默认) | claude-opus-4-7 (可选)
-  ├─ reasoning: high
-  ├─ tools: gbrain_search / gbrain_get  ← 主动查重，代替 quorum dedupe
-  └─ output: 4 个终结符之一
-        SKIP                    → 无沉淀价值
-        SKIP_DUPLICATE: <slug>  → 现有页已覆盖
-        ## GBRAIN mode=update   → 在已有页上追加 timeline
-        ## GBRAIN mode=new      → 写新页
+  // 安全
+  visibility: 'private' | 'project' | 'world';
+  contains_sensitive: boolean;
+
+  // 证据
+  evidence_count: number;
+  evidence_sessions: string[];
+}
 ```
 
-**为什么不多模型投票了**（详 ADR 0010）：
+### 2.2 kind 详细定义
 
-| 问题 | v6.5 多 voter | v6.6 单 agent |
+| kind | 权威性 | 说明 | 例子 |
+|---|---|---|---|
+| **maxim** | MUST | 硬约束，不可违反 | "tmux 中永不关主 pane" |
+| **decision** | WANT | 时效性约束，标注失效条件 | "当前项目用 pnpm，不用 npm" |
+| **anti-pattern** | WARN | 已知陷阱，复用价值最高 | "dispatch_agents 表面并行可能实际串行" |
+| **pattern** | SUGGEST | 经过验证的良好模式 | "用 @file 传 long prompt" |
+| **fact** | IS | 事实陈述 | "pi 的 _emitExtensionEvent 透传引用" |
+| **preference** | PREFER | 用户/项目偏好 | "用户喜欢中文回复" |
+| **smell** | MAYBE | 刚浮现的模式，confidence < 5 | "这个错误信息 smells like 权限问题" |
+
+### 2.3 写入分流规则
+
+| scope | kind 支持 | 写入路径 |
 |---|---|---|
-| 独立性假设 | 三 voter 共享 prompt 同向漂移（实测为真） | 不假装独立，靠 lookup tools 真实查重 |
-| JSON 输出 | typescript 包裹 / prose 前言 / 截断 → 100% parse error | markdown 终结符，regex 提取，0 parse error |
-| dedupe | quorum 事后联合（盲投票） | agent 主动 `gbrain_search` + `gbrain_get` |
-| 成本 | 3× model × 全历史 ≈ 1M tokens/轮 | 1× model × 增量 window |
+| session | preference, fact | 主 agent 直接写 scratchpad |
+| project | maxim, decision, anti-pattern, pattern, fact, preference | sediment project lane |
+| world | maxim, anti-pattern, pattern, fact | sediment world lane（with gates） |
 
-**安全性保留**：pre-LLM secret scan / marker scanner / lookup tools 只读 / post-LLM secret rescan / pending queue / scratch repo skip 全部从 v6.5 保留。丢掉的只是：饱含二次注入面的 schema-enforcer（v6.6 不再需要）、quorum 聚合、多模型 dispatch。
+---
 
-**Checkpoint** 机制 (`~/.pi/.gbrain-cache/sediment-checkpoint.json`)：仅在 SKIP / SKIP_DUPLICATE / write success 后推进 `lastProcessedEntryId`。下轮只看新增 entries，充分复用 prefix cache。遭遇 compaction 删除 checkpoint entry 时降级为 head-only。
+## 3. 默会知识管道
 
-#### 3.2 三种合法写入策略
+### 3.1 核心洞察
 
-同一轮 agent_end 可触发多次写入，但**永远不允许同一洞察被两个 page 完全重复存储**。
+Polanyi 的"默会知识"不是"不可说"，而是"不能**完全**说"。每次外化都会产生新的默会背景。架构上要承认：**库里存的永远是 tacit knowledge 的投影，不是本体。**
 
-- **单写**：一条洞察 → 一个 source → 一个 page
-- **分离写**：一轮 N 条独立洞察 → N 个 page，各自 source 不同
-- **派生写**：同一条洞察的两个抽象层次（事件 + 原则）→ 通过 frontmatter `derives_from` / `derives_to` 双向字段关联（不靠 [[link]]）
+### 3.2 三级管道
 
-#### 3.3 不写沉淀的判据（重要）
+```
+smell (staging)  ──验证──→  pattern (project)  ──promotion gates──→  maxim (world)
+    ↓                            ↓                                    ↓
+confidence < 5              confidence 5-7                       confidence 8-10
+project scope only          project scope                       world scope
+trigger_phrases 粗粒度       trigger_phrases 结构化              trigger_phrases 精确
+```
 
-否则 gbrain 变成 LLM 流水账。以下任一条件命中**就不写**：
+### 3.3 何时可以入库 vs 何时保留为默会
 
-1. **重述对话本身**："我们今天聊了 X" → 不写
-2. **无新颖度**：内容已存在于 gbrain（dedupe miss）或在用户已读文档中
-3. **置信度 < 4**：纯猜想没有任何证据支撑
-4. **过窄**：只对此刻的临时上下文有用，再不会被检索
-5. **可推导**：从 maxim 推一步就能得到，没必要单独存
+| 可以写 | staging 中等待 | 永远不写（保持默会） |
+|---|---|---|
+| "当 X 出现时，做 Y" | "X smell like Y" | 从 200 行 diff 中 2 秒定位 bug 的注意力机制 |
+| "argv 传 long prompt 用 @file" | "这个 PR 的 shape 不对" | 知道什么时候停止调查、该动手试 |
+| "tmux 永不关主 pane" | "感觉这个架构会 brittle" | 判断"该重构还是该加 if"的嗅觉 |
 
-sediment 在每次 agent_end 必须能回答"为什么不写"，记录到审计日志。
-
-详见 [ADR 0004](./adr/0004-sediment-write-strategy.md)。
-
-## Schema 强制（M4，pensieve 4 象限 + gstack 字段融合）
-
-每个 page frontmatter 必填：
+### 3.4 Smell Entry 格式
 
 ```yaml
+slug: smell:permission-smell-pattern
+kind: smell
+scope: project
+confidence: 3
+status: provisional
+title: "错误信息含 EACCES 时的排查嗅觉"
+summary: >
+  当看到一个 EACCES 错误但路径显然正确时，
+  smell 的方向依次是：父目录权限 → SELinux → container uid mapping
+trigger: "EACCES 错误 + 路径看似正确"
+boundaries: "标准 Linux 环境，不适用于 Windows ACL"
+provenance:
+  session_id: "session-xxx"
+  model: "claude-opus-4-7"
+```
+
 ---
-slug: <unique-within-source>
-page_type: <concept|architecture|guide|code|...>     # gbrain 13 类
-tier: <maxim|decision|knowledge|short-term>          # pensieve 4 象限
-tags: [<one-of-must-want-is-how>, ...]
-status: <active|draft|superseded>
-confidence: <1-10>                                    # gstack
-source: <observed|documented|tested|derived>          # gstack
-evidence_files: [<file-paths>]                        # gstack
-created: <YYYY-MM-DD>
-updated: <YYYY-MM-DD>
-derives_from: <source>:<slug>?    # 派生写：原则页指向事件页
-derives_to: <source>:<slug>?      # 派生写：事件页指向原则页
-supersedes: <slug>?
-superseded_by: <slug>?
+
+## 4. Memory 工具接口
+
+### 4.1 暴露给 LLM 的工具（读）
+
+```
+memory_search(query: string, filters?: { scope?, kind?, status? })
+  → SearchResult[] {
+      slug, title, summary, score,
+      scope, kind, confidence, status,
+      source: 'md-grep' | 'gbrain-hybrid',
+      related_slugs: string[]
+    }
+
+memory_get(slug: string, options?: { include_related?: boolean })
+  → KnowledgeEntry (完整内容 + 关联条目摘要)
+
+memory_list(filters: { scope?, kind?, status?, limit?, cursor? })
+  → { entries: EntryMeta[], next_cursor? }
+  // LLM 很少用，主要用于浏览和调试
+
+memory_relate(from_slug: string, to_slug: string, relation: string)
+  → void
+  // 声明关系，不写内容。sidecar 后续处理物理写入
+```
+
+### 4.2 暴露给 sediment 的工具（写）
+
+```
+memory_write(entry: Omit<KnowledgeEntry, 'provenance'>)
+  → { slug: string, status: 'created' | 'merged' | 'rejected', reason?: string }
+
+memory_update(slug: string, patch: Partial<KnowledgeEntry>)
+  → void
+
+memory_deprecate(slug: string, reason: string, superseded_by?: string)
+  → void
+
+memory_merge(source_slugs: string[], target_slug: string)
+  → void
+
+memory_promote(slug: string, target_scope: 'world')
+  → { slug: string, promoted: boolean, gates_passed: string[] }
+```
+
+### 4.3 LLM 不暴露的参数
+
+- `scope`（在 search 中隐式处理：默认两层都搜，当前 project 加权）
+- 底层后端详情（`source` 字段只影响排序，不由 LLM 控制）
+- 写入相关工具
+
 ---
+
+## 5. 存储架构
+
+### 5.1 Facade 模式（不用统一 Interface）
+
+```
+                        LLM Tools
+                  memory_search | memory_get | memory_list
+                              │
+                        Memory Facade
+                    (路由、归并、排序、去重、脱敏、权限)
+                     /                    \
+            ProjectStore               WorldStore
+    (markdown + ripgrep +         (gbrain: vector + keyword
+     optional embed cache)               + graph)
 ```
 
-| `tier` | `tags` 含 | pensieve 对应 | 含义 |
-|---|---|---|---|
-| `maxim` | `must` | maxim | 跨项目硬规则 |
-| `decision` | `want` | decision | 项目长期决策 |
-| `knowledge` | `is` | knowledge | 事实记录 |
-| `short-term` | `short-term` | short-term | 7 天暂存 |
+### 5.2 为什么不统一 Interface
 
-**Readback assert** 流程：
-1. 投票通过 → 生成 page
-2. 调 `gbrain put`
-3. 调 `gbrain get` 读回
-4. 校验所有强制字段 + tier ↔ tag 对应 + confidence/source 合法 + 派生写对侧字段
-5. 失败 → `gbrain delete` 回滚 → 进 pending queue
-
-## 显式 source（M3）
-
-sediment 写入**必须** `--source <id>`，**禁止**依赖 gbrain CWD resolver。详见 ADR 0008。
-
-## Source 配置（完全跟随 gbrain 官方 resolver，ADR 0008）
-
-pi-stack **不**重复实现 source 路由，完全依赖 gbrain v0.18 官方 resolver 优先级链：
-
-| 优先级 | 来源 | pi-stack 用法 |
+| 能力 | Markdown | gbrain |
 |---|---|---|
-| 1 | `--source <id>` flag | sediment 内部写入显式传 |
-| 2 | `GBRAIN_SOURCE` env | CI / 一次性脚本临时覆盖 |
-| 3 | **`.gbrain-source` dotfile (walk-up)** | **alfadb commit 进 git，跨设备同源** |
-| 4 | `local_path` 注册 | 本机便利 |
-| 5/6 | brain default / seeded `default` | 兜底 |
+| grep 精确搜索 | ✅ 强 | ⚠️ 中 |
+| 语义搜索 | ❌ 弱（需额外 embed） | ✅ 强 |
+| graph 遍历 | ❌ 弱 | ✅ 强 |
+| git 版本化 | ✅ 原生 | ❌ 弱 |
+| 人类直接编辑 | ✅ 强 | ⚠️ 取决于实现 |
+| 离线读取 | ✅ 强 | ❌ 弱 |
 
-### 跨设备同源关键：dotfile commit
+统一接口会按最小公约数砍掉两边长处。Facade 让各后端保留全部能力。
 
-`.gbrain-source` 内容是 source id 字符串（如 `pi-stack`），跨设备可移植；`local_path` 是绝对路径，跨设备失效。alfadb 可能同一 pi-stack 在不同设备路径不同（`~/.pi` / `/data/alfadb/.pi` / `~/dotfiles/pi`），dotfile 是唯一随 git 同步的同源机制。
+### 5.3 搜索结果归并
 
-两份必须 commit：
+```typescript
+// Facade 中的 search 逻辑
+async function search(query: string, context: SessionContext): Promise<SearchResult[]> {
+  // 并发查询两边
+  const [mdResults, gbrainResults] = await Promise.all([
+    projectStore.search(query),
+    worldStore.search(query),
+  ]);
+
+  // 统一格式化
+  const allResults = [
+    ...mdResults.map(r => ({ ...r, source: 'md-grep' })),
+    ...gbrainResults.map(r => ({ ...r, source: 'gbrain-hybrid' })),
+  ];
+
+  // 排序（当前 project → world 加权，引用热度加权，confidence 加权）
+  const scored = allResults.map(r => ({
+    ...r,
+    finalScore: r.score
+      * (r.scope === 'project' ? context.projectBoost : 1)
+      * Math.log(1 + r.citationCount)
+      * (r.confidence / 10),
+  }));
+
+  return scored
+    .filter(r => r.status !== 'archived')
+    .sort((a, b) => b.finalScore - a.finalScore)
+    .slice(0, 20);  // 截断，LLM 从 metadata + snippet 中选择 hydrate
+}
 ```
-~/.pi/.gbrain-source                              ← 内容: pi-stack
-~/.pi/agent/skills/pi-stack/.gbrain-source        ← 内容: pi-stack
+
+### 5.4 项目级 Markdown 布局
+
+```text
+.pensieve/
+├── maxims/                    # 项目级 maxims
+│   └── never-close-main-tmux-pane.md
+├── decisions/                 # ADR 式决策
+│   └── 2026-05-06-use-pnpm.md
+├── knowledge/                 # 事实、pattern、anti-pattern
+│   └── foo-module-call-chain.md
+├── staging/                   # smell / provisional entries
+│   └── permission-smell-pattern.md
+├── _index.md                  # 自动生成的 catalogue
+└── _state.md                  # 元数据
 ```
 
-两份内容相同，覆盖 cwd 落在 ~/.pi 或独立 clone pi-stack 的两种起点。
+条目文件格式：
 
-### Default 写入合法性校验（关键约束）
+```markdown
+---
+slug: project:never-close-main-tmux-pane
+scope: project
+kind: maxim
+status: active
+confidence: 10
+trigger_phrases: [tmux, kill-pane, close-window, detach]
+boundaries: "适用于 tmux 环境，不适用于 screen/zellij"
+created_at: 2026-05-01T12:00:00Z
+updated_at: 2026-05-06T08:30:00Z
+last_verified_at: 2026-05-06T08:30:00Z
+model: claude-opus-4-7
+session_id: sess-abc123
+project_source: pi-global
+superseded_by:
+relates_to: [world:tmux-escape-time-250ms]
+derives_from:
+evidence_count: 5
+evidence_sessions: [sess-abc123, sess-def456, sess-ghi789]
+---
 
-resolver 落到 `default`（未注册仓 fallback）不意味着 sediment 可以写。sediment agent 输出的 page tier/scope 进一步决定：
+# 永不关闭 tmux 主 pane
 
-| resolver | scope=project | scope=cross-project | scope=derivation |
+## Principle
+
+pi 在 tmux 中运行时，运行 pi 的 pane（主 pane）绝对不能通过
+kill-pane / kill-window 关闭。
+
+## Action
+
+- 所有 `tmux kill-pane` / `tmux kill-window` 操作前必须检查目标
+- 拆分 pane / new-window 后立即 `select-pane` 切回主 pane
+- 关闭其他 pane 时确保主 pane 不在目标列表中
+
+## Boundaries
+
+- 主 pane 的定义：运行 `pi` 进程的那个 pane
+- 不适用于：非 tmux 环境、screen、zellij
+- 例外：pi 进程已主动退出时
+
+## Evidence
+
+- sess-abc123: 误关主 pane 导致 session 丢失
+- sess-def456: split-window 后忘记 select-pane，日志写入错误 pane
+- sess-ghi789: kill-window 误杀主 pane（5 次确认后）
+```
+
+---
+
+## 6. 注入策略
+
+### 6.1 三层注入
+
+| 注入位置 | 内容 | Token 预算 | 更新频率 |
 |---|---|---|---|
-| 项目 source | ✅ 写项目 | ✅ 写 default¹ | ✅ 拆双写¹ |
-| `default`（未注册仓） | ⛔ **拒写**，pending | ✅ 写 default¹ | ⛔ **整条 pending** |
+| **System Prompt (T1)** | 当前 project 的顶级 maxims（≤5 条）+ 导航卡 | ≤2K tokens | 每 session 启动 |
+| **Tool Retrieval (T2)** | 按需 search → get hydrate | ≤6K tokens per turn | 按需 |
+| **Passive Nudge (T3)** | trigger phrase 匹配推送 | ≤300 tokens per turn | 每轮 agent_end |
 
-¹ default 写入门槛：confidence ≥ 7 + 3/3 全票（项目写入仅需 ≥ 4 + 2/3）
-
-该约束保证 default source（federated=true）永远只是高价值跨项目准则，federated search 不会被某项目具体事件污染。详见 ADR 0004 § 3。
-
-### .gbrain-scratch marker
-
-临时实验仓 `touch .gbrain-scratch` → sediment 在 agent_end **完全跳过**该仓写入决策。
-
-### .gitignore 修订
+### 6.2 导航卡（注入到 system prompt 最末尾）
 
 ```
-.gbrain-cache/         # markdown export 输出
-.gbrain-scratch        # 临时仓 marker
-# 不加 .gbrain-source —— 该文件必须 commit
+## Memory
+You have access to persistent project and world knowledge:
+- memory_search "query" — find relevant entries
+- memory_get "slug" — read full entry
+- memory_list — browse entries
+- memory_relate — connect entries
+
+Current project memory: 12 maxims, 8 decisions, 31 knowledge entries
+Use memory_search before changing architecture or when encountering errors.
 ```
 
-### `defaults/pi-stack.defaults.json` 字段的辅助用途
+### 6.3 被动回忆（Passive Nudge）
 
-```json
-{ "piStack": { "memory": { "projectSource": "pi-stack" } } }
+每条 world knowledge 带 `trigger_phrases` 字段。sidecar 在 `agent_end` 后的 pipeline 中检测 agent 本轮发言是否命中任何 trigger phrase，命中则注入该条目的 summary 到下一轮的 T3 nudge。
+
+```typescript
+// sidecar 中的 passive recall 逻辑
+function matchPassiveRecall(agentMessages: string[], knowledge: KnowledgeEntry[]): Nudge[] {
+  const nudges: Nudge[] = [];
+  const agentText = agentMessages.join(' ').toLowerCase();
+
+  for (const entry of knowledge) {
+    if (entry.status === 'archived' || entry.status === 'deprecated') continue;
+    for (const phrase of entry.trigger_phrases) {
+      if (agentText.includes(phrase.toLowerCase())) {
+        nudges.push({
+          slug: entry.slug,
+          title: entry.title,
+          summary: entry.summary,
+          confidence: entry.confidence,
+          trigger: phrase,
+        });
+        break;
+      }
+    }
+  }
+
+  return nudges.slice(0, 3);  // 最多 3 条
+}
 ```
 
-`defaults/pi-stack.defaults.json` **不被 pi 自动加载**。它只提供 package-local fallback / 文档示例。运行时配置必须从官方 pi settings chain 读取。
+### 6.4 Context Budget 硬约束
 
-该字段**不**用于路由（路由交给 gbrain resolver + ADR 0008 source trust guard）。仅二项辅助：
-1. 初始化提示：no dotfile 时提示 alfadb 创建
-2. pending review UX：resolver 返 default 但 sediment agent 判定 scope=project 时，提示 alfadb 该仓 source id 应该是什么
+```
+T1 (system prompt)     ≤ 2,000 tokens
+T2 (tool retrieval)    ≤ 6,000 tokens per turn
+T3 (passive nudge)     ≤ 300 tokens per turn
+──────────────────────────────────────
+Total memory overhead  ≤ 8,300 tokens
 
-## Offline 两件套（ADR 0007）
+超过 8K tokens 后，额外知识从零收益变为负收益
+（挤占 LLM 对当前任务的注意力）
+```
 
-**pi-stack 不提供 gbrain 安装兜底**——alfadb 自行准备 gbrain CLI + postgres + pgvector + 在 `~/.gbrain/config.toml` 配置连接。
+---
 
-offline（gbrain 本身挂了 / 跨设备 / 数据可见性场景）由以下两件套兜底：
+## 7. 读写分离
 
-1. **markdown export** — sediment 在每次 agent_end 后顺手 `gbrain export`，输出到 `~/.pi/.gbrain-cache/markdown/{pi-stack,default}/`
-2. **read tool fallback** — `extensions/gbrain/` 在 gbrain 不可用时降级 grep markdown，返回 `_degraded: true`
+### 7.1 规则
 
-两件**必须配齐**。
+| 角色 | 读 | 写 session | 写 project | 写 world |
+|---|---|---|---|---|
+| 主 session agent | ✅ | ✅ | ❌ | ❌ |
+| dispatch 子进程 | ✅ | ❌ | ❌ | ❌ |
+| sediment sidecar | ✅ | ❌ | ✅ | ✅ (with gates) |
+| 用户（`/skill:pensieve self-improve`） | ✅ | ❌ | 触发 intent | 触发 intent |
 
-## 安全与完整性 guard（v6.5.1 新增）
+### 7.2 主 session 的"意图通道"
 
-- **双重 secret scan**：(a) **pre-LLM redact**——发送到外部 provider 之前纯本地扫描+隐去；(b) **post-LLM rescan**——agent 输出的 page 在 `gbrain put` 前再扫一次。命中整条 pending。
-- **Voter prompt-injection 防御**：vote prompt 的 `agent_end` 上下文用 `<UNTRUSTED_AGENT_END_CONTEXT>` 包住，明确标注为 data 不是 instructions。注入 signal marker 命中卡 vote。
-- **主会话写入绕道拦截**：`tool_call` guard 阻断 bash/generic file tools 对 gbrain CLI、`.gbrain-source`、`~/.pi/.gbrain-cache/` 的写入。
-- **子代理默认 deny-all**：`dispatch_agent(s)` 默认 tools=∅。sediment agent 只能用 lookup tools (`gbrain_search`/`gbrain_get`)，写入 audit log。
-- **Source trust guard**：background write 前验证 resolver 结果来自可信路径，防第三方仓伪造 `.gbrain-source`。
+主 agent 不能写持久知识，但可以通过 `memory_relate` 声明关系，或表达"这条值得记"的意图：
 
-详见 ADR 0003（v6.5.1 修订）/ ADR 0004 § 一 / ADR 0008 § source trust guard / ADR 0009 § 子代理安全边界。
+```
+memory_relate("project:foo-decision", "world:dispatch-parallel-trap", "derives_from")
+```
 
-## 审计与可追溯
+这产生一个结构化 intent，sidecar 在 turn end 读取并决定是否写入。
 
-每次 agent_end 后 sediment 产出一行 JSON 日志（写了什么 / 没写什么 / 为何不写 / 投票结果），写入 `~/.pi/.gbrain-cache/sediment.log`（gitignored）。alfadb 可随时查阅。
+### 7.3 单写入者保证
 
-## 与 v6 原版的差异
+多个 pi 进程可能同时有 sediment 在跑。必须用 file lock 保证单写入者：
 
-| 项 | v6 原版 | v6.5 当前 |
-|---|---|---|
-| 主会话写记忆 intent tool | `memory_remember/refine/promote` | **删除** |
-| 双写定义 | "项目事件 + 跨项目准则双写互链" | **三策略**：单写 / 分离写 / 派生写（frontmatter 关联，禁止重复写） |
-| source resolver | 依赖 CWD 自动解析 | **完全跟随 gbrain 官方 resolver**，sediment 写入显式 `--source`；resolver 之上加 default 写入合法性校验 |
-| .gbrain-source dotfile | 用 vs 不用反复 | **必须用且 commit 进 git**（跨设备同源关键） |
-| Default 污染防护 | 不提 | **项目事件永远不得写 default**，未注册仓 + scope=project → pending |
-| Default 写入门槛 | 不提 | **confidence ≥ 7 + 3/3 全票** |
-| schema 约束 | "用 frontmatter.tags 模拟" | **强制 tier + tags + status + confidence + source + readback assert，pensieve 4 象限 + gstack 字段融合** |
-| offline | 不提 | **两件套（gbrain 部署 alfadb 自决）** |
-| sediment 判断哲学 | "安静不写就好" | **完整继承 pensieve 4 象限判据 + gstack confidence/source + 不写判据** |
-| multi-agent 调用 | "借 multi_dispatch ensemble" | **v6.5 dispatch_agents quorum → v6.6 单 agent loop**（ADR 0010 替代） |
+```typescript
+// sediment 启动时
+async function acquireWriteLock(): Promise<boolean> {
+  const lockFile = path.join(lockDir, 'sediment.lock');
+  try {
+    // O_CREAT | O_EXCL → 原子 create
+    fs.writeFileSync(lockFile, String(process.pid), { flag: 'wx' });
+    return true;
+  } catch (e) {
+    if (e.code === 'EEXIST') {
+      // 已有其他 sediment 实例持有锁
+      return false;
+    }
+    throw e;
+  }
+}
 
-## 引用
+// 抢锁失败 → 退化为只读 + 入队 pending queue
+if (!(await acquireWriteLock())) {
+  mode = 'readonly';
+  enqueueInsights(insights);  // 等下次拿到锁再写
+}
+```
 
-- ADR 0002: gbrain 作为唯一记忆存储
-- ADR 0003: 主会话只读
-- ADR 0004: sediment 写入策略
-- ADR 0007: Offline 降级模式与 gbrain 部署边界
-- ADR 0008: ~/.pi 双重身份与 source 路由
-- ADR 0009: multi-agent 作为基础能力
-- pensieve references（提取为 sediment 内部 rubric）
-- gstack learnings.jsonl schema
-- brain maxim: `give-main-agents-read-only-knowledge-tools-delegate-all-writes-to-a-sidecar`
-- v6 双 T0 批判: gpt-5.5-xhigh + claude-opus-4-7-xhigh 独立结论收敛
+### 7.4 写入路由（fail-closed）
+
+不能靠 cwd 推断目标项目。写入由 harness 显式注入：
+
+```typescript
+// sediment 收到 agent_end 时的 context
+interface WriteContext {
+  project_source: string;      // e.g. "pi-global"
+  project_root: string;        // e.g. "/home/worker/.pi"
+  user_id: string;
+  session_id: string;
+  allowed_scopes: ('project' | 'world')[];
+}
+```
+
+无法确定 target project 时 → **不写，记录 warning**。错写比漏写危险。
+
+---
+
+## 8. 演化机制
+
+### 8.1 Promotion（Project → World）
+
+```
+project knowledge
+    ↓
+Gate 1: 去上下文化检查
+  → 去掉项目名、路径、技术栈后，是否仍然成立？
+    ↓
+Gate 2: 跨实例验证
+  → 是否至少 2 个独立 project/session 中出现？
+    ↓
+Gate 3: 反例检查
+  → 什么时候不适用？是否存在已知反例？
+    ↓
+Gate 4: 冷却期
+  → 是否已经至少 3 天？（消除近因偏差）
+    ↓
+Gate 5: 冲突检查
+  → 是否已有相反或更精确的 world 知识？
+    ↓
+promoted → world scope, confidence ≥ 7, status: active
+```
+
+### 8.2 Deprecation
+
+```
+触发条件（任一）:
+  - 被新证据推翻（平台升级后旧规则不再成立）
+  - 命中频率连续 6 个月为 0
+  - 与新条目冲突且新条目证据更强
+  - 用户显式标记 obsolete
+
+操作:
+  status → 'deprecated'
+  superseded_by → 新条目 slug（如有）
+  retains body, provenance（保留历史，可查"为什么以前这么做"）
+```
+
+### 8.3 Specialization
+
+不是降级，而是加约束条件：
+
+```
+world:avoid-argv-long-prompt
+    → specialization →
+world:avoid-argv-long-prompt (pi-spawn-mode)
+    boundaries: "仅适用于 spawn 传参，REST API/HTTP POST 无此问题"
+```
+
+### 8.4 版本化
+
+不要 semver 版本化。用 git 免费获得完整版本历史。知识条目只需：
+
+- `superseded_by`：取代链
+- `updated_at` / `last_verified_at`：时间戳
+- `applies_to_versions`：版本约束（如 "pi >= 6.5"）
+- git blame：细粒度 diff
+
+---
+
+## 9. 治理
+
+### 9.1 冲突管理
+
+两条规则互相矛盾时：
+
+```
+不要急着删一条。
+→ 两条都标 status: contested
+→ 互相 link（relates_to）
+→ 在 body 顶部加 conflict notice
+→ LLM 检索到时看到冲突 → 它自行判断
+```
+
+冲突本身就是有价值的信息。
+
+### 9.2 引用热度排序
+
+搜索结果排序不只靠文本相关性：
+
+```
+finalScore = textScore
+  × projectBoost（当前 project 加分）
+  × log(1 + citationCount)（被多少条目引用）
+  × (confidence / 10)
+  × recencyDecay（最近更新的加分，但权重低于热度）
+```
+
+### 9.3 安全脱敏
+
+sediment 写入前必须过脱敏层：
+
+| 模式 | 处理 |
+|---|---|
+| 像 credential 的字符串 | 替换为 `[REDACTED]` |
+| IP 地址 / 内部 hostname | 替换为 `[HOST]` |
+| 绝对路径含用户 home | 替换为 `$HOME/...` |
+| API key / token | 整条 knowledge 拒绝写入 |
+
+脱敏在 capture 阶段做，不事后 redact。
+
+### 9.4 Unsafe Failures
+
+```
+sidecar 看到如下内容 → 完全拒绝写入：
+- 可解析为 credential 的字符串
+- 客户数据
+- prompt injection payload
+- 非公开的内部 URL
+```
+
+### 9.5 检索评估
+
+长期需要指标：
+
+| 指标 | 含义 |
+|---|---|
+| precision@k | top-K 结果中相关比例 |
+| recall@k | 应召回的知识实际被召回的比例 |
+| deprecated-hit rate | LLM 使用的知识中有多少是已废弃的 |
+| duplicate rate | 搜索结果中重复/近似条目的比例 |
+| wrong-scope write rate | project 知识被误写入 world 的频率 |
+| time-to-retrieve | 从 search 到 get hydrate 的延迟 |
+
+---
+
+## 10. 索引与目录（Index / Catalogue）
+
+### 10.1 问题
+
+> "你不会 search 你不知道存在的东西"
+
+如果 agent 不知道 `dispatch-parallel-trap` 这条知识存在，它永远不会主动 search "dispatch 并行"。
+
+### 10.2 解决：自动生成的 Catalogue
+
+sediment 每次写入后增量重建 `_index.md`：
+
+```markdown
+# Project Knowledge Index
+
+## Maxims (3)
+- [永不关闭 tmux 主 pane](maxims/never-close-main-tmux-pane.md) — 运行 pi 的 pane 绝对不能 kill
+- [主 session 只读不写](maxims/main-session-read-only.md) — 只有 sidecar 可以持持久化
+- [文件操作用 edit 不用 write 覆盖](maxims/edit-not-write.md) — 小改动避免全文覆盖
+
+## Decisions (5)
+- [2026-05-01 gbrain 作为唯一记忆存储](decisions/2026-05-01-gbrain-as-sole-memory-store.md)
+- [2026-05-02 sediment 双轨管道](decisions/2026-05-02-sediment-two-track-pipeline.md)
+
+## Anti-Patterns (4)
+- [dispatch_agents 串行陷阱](knowledge/dispatch-parallel-trap.md)
+- [argv 传 long prompt](knowledge/argv-long-prompt.md)
+
+## Patterns (3)
+...
+
+## Facts (6)
+...
+```
+
+System prompt 中 include 这个文件。≤500 tokens 的开销换回"agent 知道该搜什么"的能力。
+
+---
+
+## 11. 实现路线图
+
+### Phase 1：Project 层落地（当前 pensieve 的升级）
+
+1. Markdown 条目格式标准化（统一 frontmatter schema）
+2. `memory_search/get/list` 工具实现（grep-based，仅 project 层）
+3. Auto-generated `_index.md` catalogue
+4. Sediment 双轨管道（project lane + world lane）
+
+### Phase 2：World 层接入
+
+1. gbrain `memory_search` hybrid 后端
+2. `memory_get` 跨 store dispatch
+3. World knowledge trigger_phrases + passive nudge
+4. Promotion gates（project → world）
+
+### Phase 3：治理与评估
+
+1. 冲突检测与 contested 状态
+2. 引用热度排序
+3. 安全脱敏 pipeline
+4. 检索评估指标采集
+
+### Phase 4：Session 层（可选）
+
+1. Session scratchpad API
+2. Intent 通道（memory_relate）
+3. Cross-session 分析 pass
