@@ -591,3 +591,127 @@ sediment 写入前过 redactor pipeline：
 - Facade 隔离 agent 与存储拓扑，底层变更不影响上层
 - Scope × Lifetime × Maturity 三个正交维度独立建模，不互相污染
 - 写入路径：agent → md → git commit → 索引自动/定时重建
+
+---
+
+## 附录 B：与 Karpathy LLM Wiki 方法论的对比分析
+
+> 基于 2026-05-06 第三轮 T0 深度讨论。参与者：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro
+
+### B.1 核心方法论概述
+
+Andrej Karpathy 提出了 LLM Wiki 知识管理方法论，核心类比是**编译器模型**：
+
+- **Source code** = 原始资料（论文、文章、笔记、网页剪藏）
+- **Compiler** = LLM
+- **Executable** = 结构化的 interlinked markdown wiki
+
+四个阶段循环：
+1. **Ingest**：原始资料收集到 `raw/` 文件夹
+2. **Compile**：LLM 增量编译 raw → wiki（index 文件、概念文章、交叉引用）
+3. **Query & Enhance**：查询 wiki，每次交互反哺系统
+4. **Lint & Maintain**：LLM 健康检查——断链、矛盾、建议合并、补缺口
+
+关键主张：
+- 不做传统 RAG，不做向量数据库——在个人知识库规模（~100 篇）下，index 文件 + LLM 上下文窗口足够
+- LLM 是维护者，人类几乎不手动编辑 wiki
+- "编译真相"优于"每次重新推导"
+- 未来方向：用 wiki 生成合成训练数据 fine-tune 个性化模型
+
+### B.2 与当前架构的契合度
+
+| Karpathy 核心理念 | 我们的等价设计 | 对齐程度 |
+|---|---|---|
+| Markdown = executable（LLM 编译产物） | Markdown = source of truth，派生索引可重建 | 🔒 完全一致 |
+| LLM 是维护者，人类不手动编辑 | Sediment sidecar 是唯一持久写入者，主会话只读 | 🔒 完全一致 |
+| 编译真相优于重推导 | maxims/decisions 预编译，不每次从 raw 推导 | 🔒 完全一致 |
+| 不做传统 RAG / 向量数据库 | 向量索引是可选的派生层，默认 grep + index 文件 | 🟢 高度一致 |
+| 四阶段循环 | agent_end → sediment 评估写入 | 🟡 有 compile，缺 lint |
+| 每次查询反哺 | 主会话只读不写，查询-应用关联丢失 | 🔴 缺失 |
+
+### B.3 引入的修改
+
+基于 Karpathy 方法论，对 §10 治理和 §11 路线图做以下补充：
+
+#### B.3.1 Lint & Maintain 阶段（`sediment-lint`）
+
+增加定期健康检查任务（cron 或手动触发），sediment sidecar 的第二个角色：
+
+- **断链检测**：所有 `[[wikilink]]` 和 logical ID 引用有效性检查
+- **重复检测**：LLM 比对相似条目，建议合并
+- **过期提醒**：TTL expired / decisions 失效条件触发的 review prompt
+- **缺口分析**：近期高频查询但无对应知识的概念列表
+- **scope 污染检测**：world 条目中出现项目私有路径、repo 名
+
+输出 lint report 到 `.state/lint-report.md`，只建议不自动修改。
+
+#### B.3.2 查询反哺闭环
+
+sediment 在 agent_end 处理中增加**知识应用追踪**：
+
+- 检测本 session 中是否检索并**实际应用**了知识条目
+- 若被应用 → 在原条目的 evidence timeline 追加 `applied_in` 记录
+- 形成"知识因为被使用而增值"的增长飞轮
+- 不修改 canonical 内容本身，只追加 usage edge
+
+这弥补了"查询结果不被保留、知识-应用关联在会话结束后丢失"的架构缺口。
+
+#### B.3.3 Raw Sources 层
+
+渐进式引入 `raw/` 目录：
+
+```
+.pensieve/raw/          # 用户 /ingest 的原始资料
+~/.abrain/raw/          # 跨项目原始资料
+```
+
+- 编译后的知识条目通过 `derives_from` / `sources` frontmatter 字段链接回 raw
+- 不把所有对话都存为 raw（避免日志膨胀）
+- 只有用户明确标记为持久化的源材料进入 raw/
+
+#### B.3.4 Index 文件自动生成
+
+sediment 自动维护每个 scope 的 `_index.md`：
+
+- 综述段落（知识库的高层摘要）
+- 按 kind 分类的 TOC
+- 核心概念摘要（每个概念 1-2 句，带链接）
+- 作为 T1 system prompt 注入的主要载体（替代 grep 裸搜）
+
+### B.4 qmd 的定位
+
+qmd（github.com/tobi/qmd）是一个本地 markdown 搜索引擎：
+- BM25 全文 + 向量语义 + LLM rerank，全部本地运行（node-llama-cpp + GGUF）
+- 支持 MCP 协议，已有 **pi-qmd 扩展**（github.com/hjanuschka/pi-qmd）
+
+**qmd 在 Facade 模式下的定位**：
+
+```
+                    Memory Facade
+                    /     |      \
+                   /      |       \
+            qmd 后端   gbrain    ripgrep fallback
+         (BM25+Vec+    (keyword+  (纯 grep)
+          LLM Rerank)   graph)
+```
+
+| qmd 能替代的 | qmd 不能替代的 |
+|---|---|
+| 本地 markdown 的 BM25/向量/rerank 搜索 | Facade 的 scope 路由与结果归并 |
+| 零云依赖的语义搜索能力 | gbrain 的图查询（callers/callees、实体关系） |
+| 当前"无 embedding API"困境的直接解决方案 | sediment 写入路径与 promotion gates |
+| | 跨机器同步与长期 world 知识持久化 |
+
+**建议**：pi-qmd 作为 Facade 下的可选本地搜索后端接入，与 gbrain 平行。qmd 解决"本地语义搜索"，gbrain 解决"图查询 + 跨机器同步"。
+
+### B.5 向量索引定位调整
+
+Karpathy 的"个人规模不需要向量数据库"论点验证了我们的已有决策：
+
+- **Pensieve 层（项目范围）**：不做向量索引。`_index.md` + grep + LLM 上下文窗口足够
+- **gbrain 层（世界范围）**：向量搜索降为可选加速层，非核心依赖
+  - 新用户默认不启用 pgvector
+  - 文档标注"在 2,000 条目以下通常不需要向量索引"
+  - 无 pgvector 时 FTS + 图遍历 + grep fallback 完整可用
+
+**关键转变**：不说"我们需要向量索引"，而说"我们需要可重建的检索层，向量索引是其中一个可选组件"。
