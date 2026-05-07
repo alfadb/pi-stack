@@ -1,0 +1,89 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/alfadb/pi-stack/blob/main/pi-stack-settings.schema.json",
+  "title": "pi-stack settings",
+  "description": "Configuration schema for pi-stack extensions. Lives at ~/.pi/agent/pi-stack-settings.json. Each top-level key namespaces one extension; missing sections fall back to that extension's hardcoded DEFAULTS. To enable IDE autocomplete + validation, add \"$schema\": \"./path/to/pi-stack-settings.schema.json\" as the first field in your settings file.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL to this schema file. Used by IDEs for validation and autocomplete; ignored at runtime."
+    },
+    "_comment": {
+      "type": "string",
+      "description": "Free-form comment field. JSON has no native comments; use this (or any underscore-prefixed key) for inline documentation."
+    },
+
+    "modelCurator": {
+      "type": "object",
+      "description": "Whitelist + capability hints for chat models. The curator filters pi-ai's hundreds of built-in model definitions to a curated keep-list per provider, then injects a markdown capability table into the main session system prompt on every turn.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "providers": {
+          "type": "object",
+          "description": "Keep-list per provider. Keys are provider names (anthropic, openai, deepseek, ...); values are arrays of model IDs to retain. All other models in that provider are removed from the registry. Providers not listed here are left untouched.",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Model IDs to keep for this provider"
+          },
+          "examples": [
+            {
+              "anthropic": ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
+              "openai": ["gpt-5.5", "gpt-5.4-mini"],
+              "deepseek": ["deepseek-v4-pro"]
+            }
+          ]
+        },
+
+        "hints": {
+          "type": "object",
+          "description": "One-line capability hints shown next to each chat model in the system prompt table. Keys are 'provider/modelId'. Style: present tense, max ~15 words, name a concrete strength so the LLM can reason about role fit.",
+          "additionalProperties": { "type": "string" },
+          "examples": [
+            {
+              "anthropic/claude-opus-4-7": "Strongest reasoning; security audits, architecture critique. Highest cost.",
+              "openai/gpt-5.5": "Strong general-purpose reasoning + coding. Image input."
+            }
+          ]
+        },
+
+        "imageGen": {
+          "type": "object",
+          "description": "Image generation models. NOT registered as pi Models (they can't do chat) — listed in a separate 'Image generation' section of the system prompt as informational hints only. Keys are model IDs (no provider prefix).",
+          "additionalProperties": { "type": "string" },
+          "examples": [
+            {
+              "gpt-image-2": "Latest OpenAI image generation model. Call `imagine(prompt: \"...\", size?, quality?, style?)` to generate images."
+            }
+          ]
+        }
+      }
+    },
+
+    "vision": {
+      "type": "object",
+      "description": "Vision tool model selection (extensions/vision/). Auto-selects the strongest vision-capable model from the registry, excluding the caller's own model.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "modelPreferences": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered preference list, most-preferred first. Each entry is 'provider/idSubstring' — substring match on model id (case-insensitive, version-suffix-tolerant). Models matching earlier entries win; unmatched models still participate, ordered by cost.input descending as a rough capability proxy.",
+          "examples": [
+            [
+              "openai/gpt-5.5",
+              "anthropic/claude-sonnet-4-6",
+              "anthropic/claude-opus-4-7"
+            ]
+          ]
+        }
+      }
+    }
+  }
+}

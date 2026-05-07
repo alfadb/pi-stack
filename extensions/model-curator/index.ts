@@ -1,0 +1,320 @@
+/**
+ * model-curator extension for pi-stack — whitelist pi models and inject
+ * capability hints into the main session system prompt.
+ *
+ * Ported from pi-model-curator (archived 2026-05-07), adapted to use
+ * pi.registerProvider() (ExtensionAPI-level) instead of the lower-level
+ * ModelRegistry.registerProvider().
+ *
+ * Two responsibilities:
+ *
+ * 1. **Whitelist registry**: pi-ai ships hundreds of model definitions.
+ *    We filter to a curated keep-list per provider and re-register them
+ *    via pi.registerProvider(), which replaces the provider's model set
+ *    entirely. Credentials are resolved from the EXISTING provider config
+ *    via modelRegistry.getApiKeyAndHeaders() — no models.json reading,
+ *    no hardcoded env var names.
+ *
+ * 2. **Capability advertisement**: before every main-session turn,
+ *    before_agent_start injects a markdown table into the system prompt.
+ *
+ * Override via piStack.modelCurator in settings.json (providers, hints).
+ */
+
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { Api, Model } from "@mariozechner/pi-ai";
+
+// ── pi-stack settings loader ──────────────────────────────
+// pi-stack uses its own settings file (not pi's settings.json) to keep our
+// config isolated from pi's official schema. ExtensionContext does not inject
+// settings to extensions, so we read the file directly. Missing/malformed
+// file falls back to DEFAULTS — the extension always works out of the box.
+
+const PI_STACK_SETTINGS_PATH = path.join(
+  os.homedir(), ".pi", "agent", "pi-stack-settings.json",
+);
+
+function loadPiStackSettings(): Record<string, unknown> {
+  try {
+    return JSON.parse(fs.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+
+// ── Default keep-list + capability hints ────────────────────────
+
+interface CuratorDefaults {
+  providers: Record<string, readonly string[]>;
+  hints: Record<string, string>;
+  imageGen: Record<string, string>;
+}
+
+const DEFAULTS: CuratorDefaults = {
+  providers: {
+    anthropic: [
+      "claude-opus-4-7", "claude-opus-4-6",
+      "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5",
+    ],
+    openai: [
+      "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex",
+    ],
+    deepseek: [
+      "deepseek-v4-pro", "deepseek-v4-flash",
+    ],
+  },
+
+  hints: {
+    "anthropic/claude-opus-4-7":
+      "Strongest reasoning; security audits, architecture critique. Highest cost.",
+    "anthropic/claude-opus-4-6":
+      "Previous-gen opus; close to 4-7 quality at lower cost.",
+    "anthropic/claude-sonnet-4-6":
+      "Mid-tier, fast, cheap. Design review, refactor proposals.",
+    "anthropic/claude-sonnet-4-5":
+      "Previous-gen sonnet; slightly older training cutoff.",
+    "anthropic/claude-haiku-4-5":
+      "Fastest + cheapest. Quick classification, short summaries.",
+    "openai/gpt-5.5":
+      "Strong general-purpose reasoning + coding. Architecture, planning. Image input.",
+    "openai/gpt-5.4":
+      "Previous-gen 5.x; cheaper fallback or second voice in ensemble.",
+    "openai/gpt-5.4-mini":
+      "Small + fast. High-volume classification, regex extraction.",
+    "openai/gpt-5.3-codex":
+      "Codex-tuned for code generation/edits; weaker on prose reasoning.",
+    "deepseek/deepseek-v4-pro":
+      "Strong structured analysis, huge context. Diff review, dependency audit. Cheapest top-tier.",
+    "deepseek/deepseek-v4-flash":
+      "Fast + very cheap. High-volume eval or when v4-pro is rate-limited.",
+  },
+
+  imageGen: {
+    "gpt-image-2":
+      "Latest OpenAI image generation model. Call `imagine(prompt: \"...\", size?, quality?, style?)` to generate images.",
+  },
+};
+
+// ── Config resolution ───────────────────────────────────────────
+
+function resolveConfig(): CuratorDefaults {
+  const settings = loadPiStackSettings();
+  const cfg = (settings.modelCurator as Record<string, unknown>) ?? {};
+  return {
+    providers: (cfg.providers as CuratorDefaults["providers"]) ?? DEFAULTS.providers,
+    hints: (cfg.hints as CuratorDefaults["hints"]) ?? DEFAULTS.hints,
+    imageGen: (cfg.imageGen as CuratorDefaults["imageGen"]) ?? DEFAULTS.imageGen,
+  };
+}
+
+// ── Helpers ─────────────────────────────────────────────────────
+
+function modelToProviderConfig(m: Model<Api>) {
+  return {
+    id: m.id, name: m.name, api: m.api, baseUrl: m.baseUrl,
+    reasoning: m.reasoning, thinkingLevelMap: m.thinkingLevelMap,
+    input: m.input, cost: m.cost, contextWindow: m.contextWindow,
+    maxTokens: m.maxTokens, headers: m.headers, compat: m.compat,
+  };
+}
+
+async function applyWhitelist(
+  pi: ExtensionAPI,
+  providerName: string,
+  keepIds: readonly string[],
+  allBuiltin: Model<Api>[],
+  reg: {
+    getApiKeyAndHeaders(m: Model<Api>): Promise<{
+      ok: boolean; apiKey?: string; headers?: Record<string, string>;
+    }>;
+  },
+): Promise<{ kept: number; missing: string[] }> {
+  const missing: string[] = [];
+  const found: Model<Api>[] = [];
+
+  for (const id of keepIds) {
+    const m = allBuiltin.find((x) => x.provider === providerName && x.id === id);
+    if (m) found.push(m);
+    else missing.push(id);
+  }
+
+  if (found.length === 0) return { kept: 0, missing };
+
+  const baseUrl = found[0].baseUrl;
+  const api = found[0].api;
+
+  // Resolve the actual API key from the existing provider config
+  // via pi's own auth system — no models.json reading, no env var guessing.
+  const auth = await reg.getApiKeyAndHeaders(found[0]);
+  if (!auth.ok || !auth.apiKey) return { kept: 0, missing: ["(auth failed)"] };
+
+  pi.registerProvider(providerName, {
+    baseUrl,
+    api,
+    apiKey: auth.apiKey,
+    models: found.map(modelToProviderConfig),
+  });
+
+  return { kept: found.length, missing };
+}
+
+// ── Capability snapshot builder ─────────────────────────────────
+
+const INJECT_MARKER = "<!-- pi-model-curator: capability snapshot -->";
+
+function buildAvailableModelsBlock(
+  reg: { getAvailable(): Model<Api>[]; getAll(): Model<Api>[] },
+  hints: Record<string, string>,
+  imageGen?: Record<string, string>,
+): string | null {
+  const all = reg.getAvailable ? reg.getAvailable() : reg.getAll();
+  if (!all || all.length === 0) return null;
+
+  const byProvider = new Map<string, Array<{ m: Model<Api>; hint: string }>>();
+  for (const m of all) {
+    const key = `${m.provider}/${m.id}`;
+    const hint = hints[key];
+    if (!hint) continue;
+    const arr = byProvider.get(m.provider) ?? [];
+    arr.push({ m, hint });
+    byProvider.set(m.provider, arr);
+  }
+  if (byProvider.size === 0) return null;
+
+  const lines: string[] = [
+    "## Available models (curated by pi-stack/model-curator)",
+    "",
+    "These are the ONLY chat models currently available. When dispatching " +
+      "sub-agents (dispatch_agent/dispatch_agents) or selecting a model for any " +
+      "task, choose from this list based on role fit. Diversity across " +
+      "providers usually beats stacking the same family.",
+    "",
+  ];
+
+  const providerOrder = ["anthropic", "openai", "deepseek"];
+  const sorted = [
+    ...providerOrder.filter((p) => byProvider.has(p)),
+    ...[...byProvider.keys()].filter((p) => !providerOrder.includes(p)),
+  ];
+
+  for (const prov of sorted) {
+    const entries = byProvider.get(prov)!;
+    lines.push(`### ${prov}`);
+    lines.push("");
+    lines.push("| model | reasoning | image-in | $/1M in | hint |");
+    lines.push("|---|---|---|---|---|");
+
+    entries.sort((a, b) => {
+      const rA = a.m.reasoning ? 1 : 0;
+      const rB = b.m.reasoning ? 1 : 0;
+      if (rA !== rB) return rB - rA;
+      return (b.m.cost?.input ?? 0) - (a.m.cost?.input ?? 0);
+    });
+
+    for (const { m, hint } of entries) {
+      const reasoning = m.reasoning ? "✓" : "—";
+      const imageIn = Array.isArray(m.input) && m.input.includes("image") ? "✓" : "—";
+      const costIn = typeof m.cost?.input === "number" && m.cost.input > 0
+        ? `$${m.cost.input.toFixed(2)}` : "—";
+      lines.push(
+        `| \`${prov}/${m.id}\` | ${reasoning} | ${imageIn} | ${costIn} | ${hint} |`,
+      );
+    }
+    lines.push("");
+  }
+
+  lines.push(
+    "**Selection guidance.** When choosing models: (1) prefer DIFFERENT " +
+      "providers across roles to diversify reasoning failure modes; (2) match " +
+      "capability to need — don't pay for opus on one-line classification; " +
+      "(3) for vision tasks, pick a model with `image-in: ✓`; (4) the curator " +
+      "has already removed obsolete models, so any name in the table above is " +
+      "safe to dispatch.",
+  );
+
+  if (imageGen && Object.keys(imageGen).length > 0) {
+    lines.push("");
+    lines.push("### Image generation");
+    lines.push("");
+    lines.push("| model | hint |");
+    lines.push("|---|---|");
+    for (const [modelId, hint] of Object.entries(imageGen)) {
+      lines.push(`| \`${modelId}\` | ${hint} |`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+// ── Extension entry ─────────────────────────────────────────────
+
+export default function (pi: ExtensionAPI) {
+  pi.on("session_start", async (_event, ctx) => {
+    const reg = ctx.modelRegistry;
+    if (!reg) return;
+
+    const cfg = resolveConfig();
+    const allBuiltin = reg.getAll();
+    const report: string[] = [];
+    let totalKept = 0;
+    let totalMissing = 0;
+
+    for (const [providerName, keepIds] of Object.entries(cfg.providers)) {
+      const { kept, missing } = await applyWhitelist(
+        pi, providerName, keepIds, allBuiltin, reg,
+      );
+
+      totalKept += kept;
+      totalMissing += missing.length;
+
+      if (missing.length > 0) {
+        report.push(
+          `[model-curator] WARN ${providerName}: missing from built-in: ${missing.join(", ")}`,
+        );
+      }
+      if (kept === 0) {
+        report.push(
+          `[model-curator] SKIP ${providerName}: no kept models found — leaving as-is`,
+        );
+      } else {
+        report.push(
+          `[model-curator] OK   ${providerName}: kept ${kept}/${keepIds.length} models`,
+        );
+      }
+    }
+
+    if (ctx.hasUI) {
+      try {
+        const status = totalMissing > 0
+          ? `📋 curated (${totalKept}✓ ${totalMissing}!)`
+          : `📋 curated (${totalKept} models)`;
+        ctx.ui.setStatus("model-curator", status);
+      } catch { /* ignore */ }
+    }
+
+    for (const line of report) {
+      if (line.includes("WARN") || line.includes("FAIL") || line.includes("SKIP")) {
+        console.error(line);
+      }
+    }
+  });
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    const reg = ctx.modelRegistry;
+    if (!reg) return undefined;
+
+    const current = event.systemPrompt ?? "";
+    if (current.includes(INJECT_MARKER)) return undefined;
+
+    const cfg = resolveConfig();
+    const block = buildAvailableModelsBlock(reg, cfg.hints, cfg.imageGen);
+    if (!block) return undefined;
+
+    return {
+      systemPrompt: current + "\n\n" + INJECT_MARKER + "\n" + block + "\n",
+    };
+  });
+}
