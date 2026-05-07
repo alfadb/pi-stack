@@ -39,9 +39,14 @@
  *     所以我们在加前缀后还可以 setTimeout 把 fallback 排到 pi give-up
  *     结束之后；fallback 模型上不加前缀时 pi 直接跳过 retry 分支，
  *     setTimeout 也能干净落地。
- *   • initialRetries 默认 3，对齐 pi 默认 retry.maxRetries=3。改了 pi
- *     全局 retry 设置应当同步本字段，不然初始模型的 "give-up" 节点会
- *     和 pi 错位。pi 没暴露 retry settings 给扩展，所以做不到自动同步。
+ *   • initialRetries 必须 与 pi 的 settings.json#retry.maxRetries 保持一致。
+ *     pi 未暴露 retry settings 给扩展，所以依赖用户手动对齐。默认
+ *     DEFAULT_INITIAL_RETRIES = 3 对齐 pi 未改动时的默认值。推荐的
+ *     claude-code parity 配置：
+ *        pi settings.json:           retry.maxRetries=9, retry.baseDelayMs=1000
+ *        pi-astack-settings.json:    retryAllErrors.initialRetries=9
+ *     这让初始模型拿到 10 次尝试 (1+9)，延迟 1s/2s/4s/.../256s，最差
+ *     情况每轮等 ~8.5 分钟才 fallback，与 claude-code 默认行为一致。
  *   • 子进程 pi (dispatch spawn) 同样生效：pi-astack 通过
  *     package.json#pi.extensions: ["./extensions"] 给所有 pi 实例加载。
  *
@@ -73,7 +78,13 @@ const CANARY_LOG_DIR = path.join(os.homedir(), ".pi-extensions");
 const CANARY_LOG_PATH = path.join(CANARY_LOG_DIR, "retry-stream-eof.log");
 const CANARY_LOG_MAX_BYTES = 512 * 1024;
 
-/** Matches pi's default maxRetries=3. Override via retryAllErrors.initialRetries. */
+/**
+ * Matches pi's *out-of-the-box* default maxRetries=3 — chosen so the extension
+ * doesn't misbehave on a bare pi install. For claude-code parity (10 attempts,
+ * 1s/2s/4s/.../256s) set both:
+ *   - pi settings.json#retry.maxRetries = 9, retry.baseDelayMs = 1000
+ *   - pi-astack-settings.json#retryAllErrors.initialRetries = 9
+ */
 const DEFAULT_INITIAL_RETRIES = 3;
 
 /** Delay after pi's give-up logic before we switch model + trigger continuation. */

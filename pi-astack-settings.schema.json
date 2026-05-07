@@ -87,7 +87,7 @@
         "initialRetries": {
           "type": "integer",
           "minimum": 1,
-          "description": "How many retries pi will attempt **on the initial model** before this extension switches to the first fallback. Default 3 (matches pi's default retry.maxRetries=3 → 4 total attempts on initial model: 1 initial + 3 retries). Fallback models always get exactly 1 attempt regardless of this setting — any error on a fallback switches immediately to the next one. If you've changed pi's retry.maxRetries in settings.json, set this to the same value so the give-up node aligns with pi's.",
+          "description": "How many retries pi will attempt **on the initial model** before this extension switches to the first fallback. **Must match pi's settings.json#retry.maxRetries** — the extension's give-up node aligns to pi's, and a mismatch will either skip fallback (if this is too low and pi keeps retrying) or fire fallback before pi's retries are done (if this is too high; pi already gave up but extension is still waiting). Recommended claude-code-parity values: pi.retry.maxRetries=9, pi.retry.baseDelayMs=1000, initialRetries=9 → 10 total attempts on initial model with delays 1s,2s,4s,8s,16s,32s,64s,128s,256s (worst case ~8.5min per turn). Fallback models always get exactly 1 attempt regardless of this setting — any error on a fallback switches immediately to the next one.",
           "default": 3
         }
       }

@@ -101,7 +101,7 @@ pi install git:github.com/alfadb/pi-astack
 - `sediment/` — 后台沉淀代理（gbrain 唯一写入者，v6.7 双轨 project+world，ADR 0011）
 - `model-curator/` — 模型能力快照与选择建议
 - `gbrain/` — 主会话记忆 read tool（`gbrain_search/get/query`），含 markdown fallback
-- `retry-all-errors/` — 错误重试 + 非对称多模型 fallback：初始模型错误时走 pi 内建 3 次指数退避重试，耗尽后按 `retryAllErrors.fallbackModels` 切下一个；fallback 模型上任何错误都**不**重试、直接切下一个；列表里全失败才停。（旧名 retry-stream-eof；**自有功能，不向上游 PR**）
+- `retry-all-errors/` — 错误重试 + 非对称多模型 fallback：初始模型走 pi 内建指数退避重试（默认 alfadb 配置：claude-code parity，1+9=10 次尝试，1s/2s/4s/…/256s），耗尽后按 `retryAllErrors.fallbackModels` 切下一个；fallback 模型上任何错误都**不**重试、直接切下一个；列表全失败才停。`initialRetries` 需与 pi `settings.json#retry.maxRetries` 同步。（旧名 retry-stream-eof；**自有功能，不向上游 PR**）
 
 ### Skills（pi 技能）
 - `memory-wand/` — 记忆库查询助手（`gbrain_*` tool 包装）
