@@ -8,8 +8,9 @@
  *
  *   A. 初始模型（用户起手用的那个）：错误时给 pi 内建 retry 一个机会
  *      —— errorMessage 前缀 "connection lost — " 命中 pi 的
- *      _isRetryableError，走指数退避重试。默认 3 次重试 (initialRetries)
- *      用完后 pi 自动放弃，本扩展立即切到下一个 fallback 模型。
+ *      _isRetryableError，走指数退避重试。重试次数遵循 pi 自有配置
+ *      (retry.maxRetries)，扩展自动从 pi settings.json 读取；用完后
+ *      pi 自动放弃，本扩展立即切到下一个 fallback 模型。
  *
  *   B. Fallback 模型（切换后用的）：任何错误都直接切下一个
  *      —— **不**加前缀，pi 看到的是 non-retryable error，不重试；
@@ -18,7 +19,7 @@
  *
  *   两种角色都通过同一段代码实现：
  *      - 维护 isOnFallback 标志；
- *      - 错误阈值：初始模型 = initialRetries + 1（默认 4 = 1 + 3）；
+ *      - 错误阈值：初始模型 = pi.settings.json#retry.maxRetries + 1（自动读取）；
  *        fallback 模型 = 1（错一次就切）；
  *      - 用 setTimeout(100ms) 把 setModel + sendMessage 排到 pi 当前
  *        agent_end 处理完之后，避免和 pi 的 retry teardown 冲突；
@@ -40,14 +41,11 @@
  *     所以我们在加前缀后还可以 setTimeout 把 fallback 排到 pi give-up
  *     结束之后；fallback 模型上不加前缀时 pi 直接跳过 retry 分支，
  *     setTimeout 也能干净落地。
- *   • initialRetries 必须 与 pi 的 settings.json#retry.maxRetries 保持一致。
- *     pi 未暴露 retry settings 给扩展，所以依赖用户手动对齐。默认
- *     DEFAULT_INITIAL_RETRIES = 3 对齐 pi 未改动时的默认值。推荐的
- *     claude-code parity 配置：
- *        pi settings.json:           retry.maxRetries=9, retry.baseDelayMs=1000
- *        pi-astack-settings.json:    modelFallback.initialRetries=9
- *     这让初始模型拿到 10 次尝试 (1+9)，延迟 1s/2s/4s/.../256s，最差
- *     情况每轮等 ~8.5 分钟才 fallback，与 claude-code 默认行为一致。
+ *   • 扩展自动读取 ~/.pi/agent/settings.json#retry.maxRetries 来确定
+ *     pi 的 give-up 节点，无需用户额外配置。若文件缺失或未设此字段，
+ *     回退到 pi 默认值 3。推荐 claude-code parity 时在 pi settings.json
+ *     中设 retry.maxRetries=9 + retry.baseDelayMs=1000，扩展自动对齐。
+ *     这让初始模型拿到 10 次尝试 (1+9)，延迟 1s/2s/4s/.../256s。
  *   • 子进程 pi (dispatch spawn) 同样生效：pi-astack 通过
  *     package.json#pi.extensions: ["./extensions"] 给所有 pi 实例加载。
  *
@@ -56,7 +54,8 @@
  *   重试）→ 2026-05 加多模型 fallback（每模型同等重试）→ 2026-05 改成
  *   "初始 N 次 + fallback 各 1 次"的非对称 policy + claude-code parity
  *   delay 调度 → 2026-05 重命名为 model-fallback（凸显主要价值：fallback
- *   链；retry 现在只是 pi 内建能力的代理）。
+ *   链；retry 现在只是 pi 内建能力的代理）→ 2026-05 消除配置重复：
+ *   扩展改为自动读取 pi settings.json#retry.maxRetries。
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -76,18 +75,35 @@ const PI_STACK_SETTINGS_PATH = path.join(
 	"pi-astack-settings.json",
 );
 
+/** Pi's global settings file — read to auto-detect retry.maxRetries. */
+const PI_SETTINGS_PATH = path.join(
+	os.homedir(),
+	".pi",
+	"agent",
+	"settings.json",
+);
+
+/** Fallback when pi settings.json is missing or has no retry.maxRetries. */
+const PI_DEFAULT_MAX_RETRIES = 3;
+
+function loadPiMaxRetries(): number {
+	try {
+		const raw = JSON.parse(
+			fs.readFileSync(PI_SETTINGS_PATH, "utf-8"),
+		) as Record<string, unknown>;
+		const retry = raw.retry as Record<string, unknown> | undefined;
+		if (retry && typeof retry.maxRetries === "number" && retry.maxRetries > 0) {
+			return Math.floor(retry.maxRetries);
+		}
+	} catch {
+		/* missing/invalid file — use default */
+	}
+	return PI_DEFAULT_MAX_RETRIES;
+}
+
 const CANARY_LOG_DIR = path.join(os.homedir(), ".pi-extensions");
 const CANARY_LOG_PATH = path.join(CANARY_LOG_DIR, "model-fallback.log");
 const CANARY_LOG_MAX_BYTES = 512 * 1024;
-
-/**
- * Matches pi's *out-of-the-box* default maxRetries=3 — chosen so the extension
- * doesn't misbehave on a bare pi install. For claude-code parity (10 attempts,
- * 1s/2s/4s/.../256s) set both:
- *   - pi settings.json#retry.maxRetries = 9, retry.baseDelayMs = 1000
- *   - pi-astack-settings.json#modelFallback.initialRetries = 9
- */
-const DEFAULT_INITIAL_RETRIES = 3;
 
 /** Delay after pi's give-up logic before we switch model + trigger continuation. */
 const FALLBACK_TRIGGER_DELAY_MS = 100;
@@ -96,8 +112,6 @@ const FALLBACK_TRIGGER_DELAY_MS = 100;
 
 interface ModelFallbackConfig {
 	fallbackModels: string[];
-	/** Pi auto-retry count granted to the **initial** model only. Fallback models always get 1 attempt. */
-	initialRetries: number;
 }
 
 function loadConfig(): ModelFallbackConfig {
@@ -111,13 +125,9 @@ function loadConfig(): ModelFallbackConfig {
 				(x): x is string => typeof x === "string" && x.includes("/"),
 			)
 			: [];
-		const initialRetries =
-			typeof cfg.initialRetries === "number" && cfg.initialRetries > 0
-				? Math.floor(cfg.initialRetries)
-				: DEFAULT_INITIAL_RETRIES;
-		return { fallbackModels, initialRetries };
+		return { fallbackModels };
 	} catch {
-		return { fallbackModels: [], initialRetries: DEFAULT_INITIAL_RETRIES };
+		return { fallbackModels: [] };
 	}
 }
 
@@ -154,8 +164,10 @@ function parseEntry(entry: string): { provider: string; id: string } | undefined
 
 export default function (pi: ExtensionAPI) {
 	const config = loadConfig();
-	// Initial model: 1 + initialRetries attempts before we switch (= pi's give-up node).
-	const initialErrorThreshold = config.initialRetries + 1;
+	// Auto-detect pi's retry budget so we always align the give-up node.
+	const piMaxRetries = loadPiMaxRetries();
+	// Initial model: 1 + piMaxRetries attempts before we switch (= pi's give-up node).
+	const initialErrorThreshold = piMaxRetries + 1;
 	// Fallback models: any error → switch immediately.
 	const fallbackErrorThreshold = 1;
 
@@ -213,7 +225,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Policy:
 		//   - Initial model: prefix → pi auto-retries; we switch only after pi exhausts
-		//     its retries (consecutiveErrors >= initialRetries + 1 = pi's give-up node).
+		//     its retries (consecutiveErrors >= piMaxRetries + 1 = pi's give-up node).
 		//   - Fallback model: do NOT prefix → pi sees non-retryable error and skips its
 		//     retry branch; we switch on the very first error (threshold = 1).
 		const threshold = isOnFallback ? fallbackErrorThreshold : initialErrorThreshold;
@@ -329,7 +341,7 @@ export default function (pi: ExtensionAPI) {
 				// (see pi-coding-agent/dist/core/messages.js convertToLlm), so the new
 				// model gets explicit context that we just switched.
 				const priorAttempts = becameFallback
-					? `${initialErrorThreshold} attempts (1 initial + ${config.initialRetries} retries)`
+					? `${initialErrorThreshold} attempts (1 initial + ${piMaxRetries} retries)`
 					: `1 attempt (no retries on fallback models)`;
 				pi.sendMessage(
 					{
