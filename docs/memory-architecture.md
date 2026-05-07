@@ -682,3 +682,233 @@ System prompt 中 include 这个文件。≤500 tokens 的开销换回"agent 知
 1. Session scratchpad API
 2. Intent 通道（memory_relate）
 3. Cross-session 分析 pass
+
+---
+
+## 补充分析（用户追加问题，2026-05-06）
+
+> 基于 Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro 三方二次讨论。
+
+### 问题 A：short-term 概念是否还有用？
+
+**结论：short-term 不应作为 scope 的第四层，应降级为任意持久层上的 lifetime 属性。**
+
+#### 为什么不是 scope 层？
+
+用 2×2 正交矩阵验证：
+
+| scope \ lifetime | permanent | ephemeral (short-term) |
+|---|---|---|
+| **Session** | ❌ 矛盾（session 蒸发） | ✅ 会话内临时上下文 |
+| **Project** | ✅ 项目长期决策 | ✅ 分支实验决策、本周优先级 |
+| **World** | ✅ 经过验证的通用 maxim | ✅ 未经验证的 staging 候选 |
+
+六个有效象限，四个已有实际用例。如果硬把 short-term 当 scope 层（Session/ShortTerm/Project/World），会丢失"world 级的临时暂存"这个真实需求。
+
+#### 推荐方案
+
+```yaml
+scope: session | project | world
+lifetime:
+  kind: permanent | ttl | event | review
+  expires_at: 2026-05-14          # kind=ttl 时
+  expire_on: branch_merged:feat/x # kind=event 时（如"分支合入后失效"）
+  review_after: 2026-05-10        # kind=review 时（如"到期复查"）
+```
+
+- 默认 `lifetime.kind: permanent`，绝大多数条目零负担
+- 只有真正临时的条目显式声明 lifetime
+- Event-driven expiry（`expire_on: branch_merged`）通常比固定 7 天更准确
+- Session scope 的 lifetime 强制为 `session`（write-path validator 保证）
+
+#### 世界级是否需要短期？
+
+**需要，且这是最关键的场景。** 首次踩坑的洞察只在一个项目验证过，直接写进 `world/maxims/` 会污染世界知识库。应写入 `world/staging/`（scope: world, status: staging, lifetime: ephemeral, ttl: 90d），等第二个项目验证后 promote 为 permanent。
+
+#### GC 策略
+
+- GC 是独立 pipeline，不挑 scope，按 frontmatter 的 lifetime 字段扫描
+- 过期条目不直接删除，移入 `archive/` 目录，保留失效原因
+- 提前 1 天提醒："以下条目即将过期，是否有值得保留的？"
+
+---
+
+### 问题 B：gbrain 是否真的有必要？
+
+**结论：gbrain 不应作为 world 级知识的主存储。正确架构是 markdown + git = source of truth，向量/图索引 = 可重建的派生层。gbrain 的理想角色是索引构建 pipeline 中的一个组件。**
+
+#### 核心原则
+
+> **知识管理系统应选择最长半衰期的格式作为 source of truth，所有性能结构（向量索引、全文搜索、图边）都作为可重建的派生制品。索引是 view，文本是 table。永远不要让索引成为 source of truth。**
+
+#### 方案 C：md SoT + 派生索引（推荐）
+
+```
+源真层（source of truth）              派生索引层（可重建）
+─────────────────────────          ───────────────────────
+~/.abrain/**/*.md                  .gitignore'd:
+  ├── maxims/                        ├── .index/vectors.db
+  ├── patterns/                      ├── .index/fulltext.db
+  ├── anti-patterns/                 └── .index/graph.db
+  ├── facts/
+  └── staging/
+│                                  │
+│  每次 commit 后触发 hook        │
+│  或定时 rebuild                │
+└──────────────────────────────────┘
+      写入路径: agent → md → git commit
+      读取路径: agent → facade → [向量搜索 + grep 回退]
+```
+
+#### 关键约束
+
+1. **必须先有 rebuild 脚本，再构建索引。** 从干净 checkout 可完全重建。这是"索引是派生品"的契约证明。
+2. **graceful degradation 是设计保证，不是容错补丁。** 向量索引不可用时 fallback 到 `rg`，结果标注 `degraded: true, missing_backends: ["vector"]`。
+3. **索引重建时间应在秒到分钟级。** 数百到数千条 entry，embedding 生成 + 索引构建不应超过 2-3 分钟。
+4. **embedding 模型优先本地**（bge-small / nomic-embed-text，CPU 可跑），避免引入新的云依赖。
+
+#### gbrain 的重新定位
+
+- 不废弃 gbrain。让它从"主存储"降级为"可重建的派生索引层"
+- 如果 gbrain 已经存在并工作，让它就是方案 C 里的 indexer
+- 但要明确：SoT 是 `~/.abrain/*.md`，gbrain 的 DB 是从 md 导入的派生表，可以 drop & rebuild
+- 这样 gbrain 的"独立服务"问题被降级为"可选加速器"——挂了不影响阅读和编辑知识
+
+---
+
+### 问题 C：~/.abrain 的可行性
+
+**结论：方案合理且推荐。~/.abrain 作为独立 git repo，通过 `ABRAIN_ROOT` 环境变量引用。**
+
+#### 目录结构
+
+```
+~/.abrain/
+├── maxims/              # 通用原则、启发式规则
+├── patterns/            # 可复用的解决方案模式
+├── anti-patterns/       # 应避免的做法
+├── facts/               # 事实性知识
+├── staging/             # 未经验证的暂存洞察
+├── archive/             # 过期/废弃条目的归档
+├── schemas/             # frontmatter schema 定义
+├── _index.md            # 自动生成的目录索引
+└── .state/              # gitignored：索引、锁、pending queue
+    ├── index/
+    ├── locks/
+    └── pending.jsonl
+```
+
+#### ~/.abrain vs ~/.pi/.pensieve/ 的边界
+
+| 维度 | `.pensieve/` (project) | `~/.abrain/` (world) |
+|------|------------------------|---------------------|
+| scope | 本项目特定 | 跨项目通用 |
+| 判断标准 | 离开当前 repo 不成立 | 换完全不同的项目仍然成立 |
+| 示例 | "本项目用 pnpm，不用 npm" | "argv 传 long prompt 一律用 @file" |
+| 示例 | "`src/foo.ts` 的设计原因是 X" | "scope 和 lifetime 应建模为正交维度" |
+
+**写入决策树**：
+
+```
+sediment 拿到新洞察 P：
+
+P 引用了具体文件路径 / 模块名 / API 名？
+├─ 是 → 写 ~/<project>/.pensieve/
+└─ 否 → P 在 ≥2 个不同领域的项目验证过？
+        ├─ 是 → 写 ~/.abrain/{maxims|patterns|anti-patterns}/
+        └─ 否 → 写 ~/.abrain/staging/，等第二次命中再 promote
+```
+
+辅助规则：
+- pensieve 条目可以引用 abrain 条目（"本项目应用了 abrain:model-orthogonal-concerns"）
+- abrain 条目不应引用 pensieve 条目（通用不该依赖具体）
+- 引用一律用 logical id（`abrain:model-orthogonal-concerns`），不用 filesystem path
+
+#### 引用机制
+
+**推荐：环境变量 `ABRAIN_ROOT`**（默认 `~/.abrain`）
+
+| 方案 | 判断 |
+|------|------|
+| 环境变量 `ABRAIN_ROOT` | ✅ 零耦合，不同机器可不同路径，测试可指 fixture |
+| git submodule | ❌ 把 abrain 的 commit 钉到 pi，每次写都会让 pi 出现 dirty submodule pointer |
+| symlink | ❌ git 跨平台处理不一致，backup/clone 时容易悬空 |
+
+```typescript
+// memory-facade.ts
+const ABRAIN_ROOT = process.env.ABRAIN_ROOT ?? path.join(os.homedir(), '.abrain');
+const PENSIEVE_ROOT = path.join(projectRoot, '.pensieve');
+```
+
+- 主进程从不见到物理路径
+- abrain 不存在时 facade 检测到目录缺失，只走 pensieve，发回 `degraded: missing_abrain`
+- 测试时 `ABRAIN_ROOT=/tmp/test-abrain pi run ...`
+
+#### 跨机器同步
+
+`~/.abrain` 是独立 private git repo：
+
+| 时机 | 动作 |
+|---|---|
+| 机器启动 / session 开始 | `git pull --rebase --autostash` |
+| sediment 写完一条 | `git add . && git commit`（**不 auto push**）|
+| 会话结束 | 安全脚本：`pull --rebase --autostash && push` |
+| 冲突 | 不自动解决，pending 等人工。timeline 段 append-only 自然减少冲突 |
+
+**冲突缓解**（每条 md 内加 append-only timeline 段）：
+
+```markdown
+## Timeline
+- 2026-05-07 | machine-A | First captured during pi memory design
+- 2026-05-09 | machine-B | Validated in another OAuth refactor
+- 2026-05-10 | machine-A | Boundary refined: not applicable to async contexts
+```
+
+git 对纯追加 section 的 merge 几乎总能自动完成。
+
+#### 潜在陷阱
+
+1. **world 污染**：单项目经验过早写成世界原则。缓解：promotion gate（≥2 项目验证 + 反例检查 + 冷却期 + 冲突检查）
+2. **隐私泄漏**：项目路径、客户名、token 进入 abrain。缓解：sediment 写入前过 redactor pipeline
+3. **索引陈旧**：md 更新后向量索引落后。缓解：索引记录 git commit，stale 时降级到 grep
+4. **命名空间重叠**：`~/.abrain` 与 `~/.pi` 完全独立，无文件系统耦合
+5. **多人场景**：abrain 是个人世界知识库，团队场景另建 org/team layer，不要把团队需求塞进个人 abrain
+
+---
+
+## 综合架构图
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Agent / LLM                       │
+│          memory_search()  │  memory_get()            │
+└────────────────────────┬────────────────────────────┘
+                         │
+              ┌──────────▼──────────┐
+              │   Memory Facade     │  ← 统一读取面
+              │  · 路由（scope）     │
+              │  · 归一化           │
+              │  · 去重             │
+              │  · Graceful Degrade │
+              └────┬──────────┬─────┘
+                   │          │
+    ┌──────────────▼──┐  ┌───▼──────────────┐
+    │  grep backend   │  │  vector backend  │  ← 可重建派生索引
+    │  (rg over md)    │  │  (embedding idx) │
+    └──────┬──────────┘  └───┬──────────────┘
+           │                 │
+    ┌──────▼─────────────────▼──────────────┐
+    │           SOURCE OF TRUTH              │
+    │                                        │
+    │  project/   ~/<project>/.pensieve/**   │
+    │  world/     ~/.abrain/**               │
+    │                                        │
+    │  (markdown + git, 人类可读, 离线可用)   │
+    └────────────────────────────────────────┘
+```
+
+**关键属性**：
+- 源真层 100% 纯文本 + git，离线可用，人类可编辑，零锁定
+- 索引层提供语义搜索增强，不可用时系统降级但不失效
+- Facade 隔离 agent 与存储拓扑
+- scope × lifetime × maturity 三个正交维度独立建模，不互相污染
