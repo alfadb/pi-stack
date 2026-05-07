@@ -596,122 +596,195 @@ sediment 写入前过 redactor pipeline：
 
 ## 附录 B：与 Karpathy LLM Wiki 方法论的对比分析
 
-> 基于 2026-05-06 第三轮 T0 深度讨论。参与者：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro
+> 基于 2026-05-06 第三轮 T0 深度讨论。
 
 ### B.1 核心方法论概述
 
-Andrej Karpathy 提出了 LLM Wiki 知识管理方法论，核心类比是**编译器模型**：
+Andrej Karpathy 的 LLM Wiki 知识管理方法论，核心类比是**编译器模型**：
 
 - **Source code** = 原始资料（论文、文章、笔记、网页剪藏）
 - **Compiler** = LLM
 - **Executable** = 结构化的 interlinked markdown wiki
 
-四个阶段循环：
-1. **Ingest**：原始资料收集到 `raw/` 文件夹
-2. **Compile**：LLM 增量编译 raw → wiki（index 文件、概念文章、交叉引用）
-3. **Query & Enhance**：查询 wiki，每次交互反哺系统
-4. **Lint & Maintain**：LLM 健康检查——断链、矛盾、建议合并、补缺口
-
-关键主张：
-- 不做传统 RAG，不做向量数据库——在个人知识库规模（~100 篇）下，index 文件 + LLM 上下文窗口足够
-- LLM 是维护者，人类几乎不手动编辑 wiki
-- "编译真相"优于"每次重新推导"
-- 未来方向：用 wiki 生成合成训练数据 fine-tune 个性化模型
+四个阶段循环：Ingest → Compile → Query & Enhance → Lint & Maintain。
 
 ### B.2 与当前架构的契合度
 
-| Karpathy 核心理念 | 我们的等价设计 | 对齐程度 |
-|---|---|---|
-| Markdown = executable（LLM 编译产物） | Markdown = source of truth，派生索引可重建 | 🔒 完全一致 |
-| LLM 是维护者，人类不手动编辑 | Sediment sidecar 是唯一持久写入者，主会话只读 | 🔒 完全一致 |
-| 编译真相优于重推导 | maxims/decisions 预编译，不每次从 raw 推导 | 🔒 完全一致 |
-| 不做传统 RAG / 向量数据库 | 向量索引是可选的派生层，默认 grep + index 文件 | 🟢 高度一致 |
-| 四阶段循环 | agent_end → sediment 评估写入 | 🟡 有 compile，缺 lint |
-| 每次查询反哺 | 主会话只读不写，查询-应用关联丢失 | 🔴 缺失 |
+㤣 高度一致：markdown=source of truth、LLM=维护者、编译真相优于重推导、不做传统 RAG。
+🔴 缺失：Lint & Maintain 阶段、查询反哺闭环、Raw Sources 层。
 
 ### B.3 引入的修改
 
-基于 Karpathy 方法论，对 §10 治理和 §11 路线图做以下补充：
-
-#### B.3.1 Lint & Maintain 阶段（`sediment-lint`）
-
-增加定期健康检查任务（cron 或手动触发），sediment sidecar 的第二个角色：
-
-- **断链检测**：所有 `[[wikilink]]` 和 logical ID 引用有效性检查
-- **重复检测**：LLM 比对相似条目，建议合并
-- **过期提醒**：TTL expired / decisions 失效条件触发的 review prompt
-- **缺口分析**：近期高频查询但无对应知识的概念列表
-- **scope 污染检测**：world 条目中出现项目私有路径、repo 名
-
-输出 lint report 到 `.state/lint-report.md`，只建议不自动修改。
-
-#### B.3.2 查询反哺闭环
-
-sediment 在 agent_end 处理中增加**知识应用追踪**：
-
-- 检测本 session 中是否检索并**实际应用**了知识条目
-- 若被应用 → 在原条目的 evidence timeline 追加 `applied_in` 记录
-- 形成"知识因为被使用而增值"的增长飞轮
-- 不修改 canonical 内容本身，只追加 usage edge
-
-这弥补了"查询结果不被保留、知识-应用关联在会话结束后丢失"的架构缺口。
-
-#### B.3.3 Raw Sources 层
-
-渐进式引入 `raw/` 目录：
-
-```
-.pensieve/raw/          # 用户 /ingest 的原始资料
-~/.abrain/raw/          # 跨项目原始资料
-```
-
-- 编译后的知识条目通过 `derives_from` / `sources` frontmatter 字段链接回 raw
-- 不把所有对话都存为 raw（避免日志膨胀）
-- 只有用户明确标记为持久化的源材料进入 raw/
-
-#### B.3.4 Index 文件自动生成
-
-sediment 自动维护每个 scope 的 `_index.md`：
-
-- 综述段落（知识库的高层摘要）
-- 按 kind 分类的 TOC
-- 核心概念摘要（每个概念 1-2 句，带链接）
-- 作为 T1 system prompt 注入的主要载体（替代 grep 裸搜）
+- **Lint & Maintain**（`sediment-lint`）：断链/重复/过期/scope 污染检测，定期健康检查
+- **查询反哺闭环**：知识被实际应用 → evidence timeline 追加 `[applied]` 记录
+- **Raw Sources 层**：`raw/` 目录，编译条目通过 `derives_from` 链接回原始资料
+- **Index 文件**：sediment 自动维护 `_index.md` 作为导航目录
 
 ### B.4 qmd 的定位
 
-qmd（github.com/tobi/qmd）是一个本地 markdown 搜索引擎：
-- BM25 全文 + 向量语义 + LLM rerank，全部本地运行（node-llama-cpp + GGUF）
-- 支持 MCP 协议，已有 **pi-qmd 扩展**（github.com/hjanuschka/pi-qmd）
-
-**qmd 在 Facade 模式下的定位**：
-
-```
-                    Memory Facade
-                    /     |      \
-                   /      |       \
-            qmd 后端   gbrain    ripgrep fallback
-         (BM25+Vec+    (keyword+  (纯 grep)
-          LLM Rerank)   graph)
-```
-
-| qmd 能替代的 | qmd 不能替代的 |
-|---|---|
-| 本地 markdown 的 BM25/向量/rerank 搜索 | Facade 的 scope 路由与结果归并 |
-| 零云依赖的语义搜索能力 | gbrain 的图查询（callers/callees、实体关系） |
-| 当前"无 embedding API"困境的直接解决方案 | sediment 写入路径与 promotion gates |
-| | 跨机器同步与长期 world 知识持久化 |
-
-**建议**：pi-qmd 作为 Facade 下的可选本地搜索后端接入，与 gbrain 平行。qmd 解决"本地语义搜索"，gbrain 解决"图查询 + 跨机器同步"。
+qmd（本地 BM25+向量+LLM Rerank，已有 pi-qmd 扩展）作为 Facade 下的可选搜索后端，解决"无 embedding API"困境。不能替代 Facade 的 scope 路由和图查询。
 
 ### B.5 向量索引定位调整
 
-Karpathy 的"个人规模不需要向量数据库"论点验证了我们的已有决策：
+- Pensieve 层：不做向量索引，`_index.md` + grep + LLM 上下文足够
+- gbrain 层：向量搜索降为可选加速层，2,000 条目以下标注"不需要"
 
-- **Pensieve 层（项目范围）**：不做向量索引。`_index.md` + grep + LLM 上下文窗口足够
-- **gbrain 层（世界范围）**：向量搜索降为可选加速层，非核心依赖
-  - 新用户默认不启用 pgvector
-  - 文档标注"在 2,000 条目以下通常不需要向量索引"
-  - 无 pgvector 时 FTS + 图遍历 + grep fallback 完整可用
+---
 
-**关键转变**：不说"我们需要向量索引"，而说"我们需要可重建的检索层，向量索引是其中一个可选组件"。
+## 附录 C：gbrain Timeline + Graph 方法论的 Markdown 实现
+
+> 基于 2026-05-06 第四轮 T0 深度讨论。核心决策：不用 gbrain 作存储后端，但借鉴其 timeline 和图谱方法论，在纯 markdown 层面实现等价能力。
+
+### C.1 Compiled Truth + Timeline 双段格式
+
+借鉴 gbrain 的 Above/Below the Line 模式，每个持久化条目分为两段，以 `---`（triple-hr）分隔：
+
+```markdown
+---
+id: avoid-long-argv-prompts
+scope: world
+kind: pattern
+status: active
+confidence: 8
+created: 2026-05-06
+updated: 2026-05-06
+relates_to:
+  - world:use-at-file-input
+derives_from:
+  - project:dispatch-agent-input-compat-contract
+---
+
+# Avoid Long argv Prompts
+
+## Summary
+一句话摘要。
+
+## Principle
+详细论述、边界条件、适用场景、反模式。
+这是知识的**当前最佳结论**，可随着新证据被整体重写。
+
+---
+
+## Timeline
+
+- 2026-05-05 | sess-abc | captured | 在 dispatch_agent 长 prompt 失败中首次发现
+- 2026-05-07 | sess-def | validated | 在另一个 CLI wrapper 中再次验证 [+1]
+- 2026-05-09 | sess-ghi | promoted | project→world，通过 5 个 promotion gates
+```
+
+**区域定义**：
+
+| 区域 | 含义 | 可重写？ |
+|---|---|---|
+| frontmatter | 结构化元数据、关系、当前状态 | 可更新，受 schema 校验 |
+| compiled truth | `---` 之前的正文 | 可被 sidecar 完全重写 |
+| timeline | `---` 之后的 append-only 事件日志 | 只能追加，不能改旧行 |
+
+**关键设计决策**：
+- `updated` 只反映 compiled_truth 编辑时间；timeline 是 append-only，不影响 `updated`
+- git diff 可一眼区分"知识演化"和"证据追加"
+- timeline 的 4 字段格式：`- DATE | SESSION | MACHINE | DESCRIPTION [TAG]`
+- 可选 tag 枚举：`[+N]` `[-N]`（confidence delta）、`[validated]` `[contested]` `[applied]` `[promoted]` `[deprecated]`
+
+### C.2 Timeline 校验规则（7 条确定性 Lint 规则）
+
+| 规则 | 检测内容 | 严重度 |
+|------|---------|--------|
+| T1 `triple-hr-present` | 条目文件必须包含 `---` 分隔符（不含 frontmatter 的 `---`） | ERROR |
+| T2 `triple-hr-unique` | `---` 在文件中出现恰好一次（跳过 frontmatter 闭合的） | ERROR |
+| T3 `no-headings-in-timeline` | Timeline 区域不能有 `###` / `##` / `#` 标题 | ERROR |
+| T4 `timeline-bullet-only` | Timeline 每行必须是 `- YYYY-MM-DD \| ...` 格式 | WARNING |
+| T5 `timeline-chronological` | Timeline 条目必须按日期升序排列 | WARNING |
+| T6 `timeline-not-empty` | 凡有 `---` 的条目，Timeline 至少有一行记录 | WARNING |
+| T7 `frontmatter-complete` | 必须有 `created` 和 `updated` 字段 | ERROR |
+
+**T3 是关键安全规则**——防止 compiled truth 内容通过标题泄漏到 timeline 区域。零 LLM 调用，纯 `grep` + `awk` 实现。
+
+### C.3 图谱的 Markdown 实现
+
+**边的三个来源**：
+
+| 来源 | 格式 | 语义 | 提取方式 |
+|------|------|------|---------|
+| frontmatter `relates_to` / `derives_from` / `superseded_by` / `contested_with` / `applied_in` | YAML 列表 | 强类型边，sediment 显式声明 | YAML 解析 |
+| 正文 `[[slug]]` wikilink | markdown wikilink | 弱类型 `references` 边 | `rg -oN '\[\[([^]]+)\]\]'` |
+| 代码引用（可选） | `` `src/foo.ts` `` | `code_ref` 边 | 正则提取 |
+
+**图作为派生 JSON 索引**（不引入数据库）：
+
+```
+.pensieve/.index/graph.json     ← gitignored，可重建
+~/.abrain/.state/index/graph.json
+```
+
+Schema：
+
+```json
+{
+  "built_at": "...", "git_head": "abc123",
+  "nodes": { "<slug>": { "scope": "project|world", "kind": "maxim|...", "status": "active|...", "title": "..." } },
+  "edges": [
+    { "from": "a-slug", "to": "b-slug", "type": "relates_to|derives_from|superseded_by|...", "source": "frontmatter|body" }
+  ],
+  "stats": { "node_count": 320, "edge_count": 614, "orphans": [...], "dead_links": [...] }
+}
+```
+
+**重建触发**：post-commit hook 增量重建 / HEAD 漂移时 lazy 全量 / 缺失时 grep fallback。
+
+**关系对称性表**（决定 check-backlinks 的行为）：
+
+```yaml
+# schemas/relations.yaml
+symmetric:                         # lint 检测缺失对，建议补全
+  - relates_to
+  - contested_with
+
+asymmetric:                        # 反向边只在派生索引存在，不写回 markdown
+  derives_from:    derived_into
+  superseded_by:   supersedes
+  applied_in:      cited_by
+
+body_links:                        # wikilink 默认关系
+  references:      referenced_by
+```
+
+**三个核心 CLI 命令**：
+
+```bash
+pi memory check-backlinks [--fix]   # 反向链接完整性（仅 symmetric 类型）
+pi memory graph <slug> --depth 2 --type relates_to --direction out  # 图遍历
+pi memory neighbors <slug> --hop 1 --max 8   # 邻居快照（用于 LLM 注入）
+```
+
+### C.4 Brain Health 评分
+
+完全通过确定性脚本（ripgrep + jq）计算，零数据库，零 LLM：
+
+| 指标 | 算法 | 权重 |
+|------|------|------|
+| `timeline_coverage` | 含 `---` 且 timeline ≥1 bullet 的条目数 / 总条目数 | 30% |
+| `link_density` | `clamp(avg_degree / 2.0, 0, 1)` | 25% |
+| `orphan_avoidance` | `1 - 零入零出节点数 / 总节点数` | 20% |
+| `dead_link_avoidance` | `1 - 死链数 / 总链接数` | 15% |
+| `staging_freshness` | `1 - p90(staging entry age) / 30d` | 10% |
+
+综合评分 = 加权求和，输出到 `.state/health-report.md`。
+
+**运行时机**：
+- CI（每个 commit）：硬错误（dead link / 格式违规）阻塞 commit
+- cron（每日）：跑完整 doctor，存档 health history
+- sediment 沉淀后：增量更新 graph.json
+
+**timeline_coverage 作为渐进指标**：不强制一次性迁移所有旧条目。新条目强制双段格式，旧条目在 doctor 中报告但不断阻。
+
+### C.5 与架构文档各节的映射
+
+| 架构节 | 新增内容 |
+|--------|---------|
+| §4 知识模型 | 新增：compiled truth + timeline 双段格式规范（§4.5）、关系类型与对称性表（§4.6） |
+| §5 存储架构 | 新增：Graph 派生索引层（§5.5），与 vectors/fulltext 平级 |
+| §9 演化机制 | 新增：Timeline 在 promotion/deprecation/specialization 时的事件记录（§9.4）、知识应用反哺（§9.5） |
+| §10 治理 | 新增：Lint & Health Pipeline（§10.4）、关系完整性规则（§10.5） |
+
+**不引入新依赖**：ripgrep + Node + jq + git hook 已在栈内。与 §3 核心原则完全一致——markdown 为 source of truth，派生索引可重建，sediment 单写入，graceful degradation。
