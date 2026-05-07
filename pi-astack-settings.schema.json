@@ -64,9 +64,9 @@
       }
     },
 
-    "retryAllErrors": {
+    "modelFallback": {
       "type": "object",
-      "description": "Retry + multi-model fallback (extensions/retry-all-errors/). Asymmetric policy: the **initial** model gets pi's full retry budget (default 3 retries = 4 attempts) before fallback kicks in; **each fallback model** gets exactly 1 attempt — any error switches to the next configured model immediately. When all fallback models are tried and all fail, the extension stops.",
+      "description": "Multi-model fallback chain with retry (extensions/model-fallback/). Asymmetric policy: the **initial** model gets pi's full retry budget (default 3 retries = 4 attempts; for claude-code parity 9 retries = 10 attempts) before fallback kicks in; **each fallback model** gets exactly 1 attempt — any error switches to the next configured model immediately. When all fallback models are tried and all fail, the extension stops.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -87,7 +87,7 @@
         "initialRetries": {
           "type": "integer",
           "minimum": 1,
-          "description": "How many retries pi will attempt **on the initial model** before this extension switches to the first fallback. **Must match pi's settings.json#retry.maxRetries** — the extension's give-up node aligns to pi's, and a mismatch will either skip fallback (if this is too low and pi keeps retrying) or fire fallback before pi's retries are done (if this is too high; pi already gave up but extension is still waiting). Recommended claude-code-parity values: pi.retry.maxRetries=9, pi.retry.baseDelayMs=1000, initialRetries=9 → 10 total attempts on initial model with delays 1s,2s,4s,8s,16s,32s,64s,128s,256s (worst case ~8.5min per turn). Fallback models always get exactly 1 attempt regardless of this setting — any error on a fallback switches immediately to the next one.",
+          "description": "How many retries pi will attempt **on the initial model** before model-fallback switches to the first fallback model. **Must match pi's settings.json#retry.maxRetries** — the extension's give-up node aligns to pi's, and a mismatch will either skip fallback (if this is too low and pi keeps retrying) or fire fallback before pi's retries are done (if this is too high; pi already gave up but extension is still waiting). Recommended claude-code-parity values: pi.retry.maxRetries=9, pi.retry.baseDelayMs=1000, initialRetries=9 → 10 total attempts on initial model with delays 1s,2s,4s,8s,16s,32s,64s,128s,256s (worst case ~8.5min per turn). Fallback models always get exactly 1 attempt regardless of this setting — any error on a fallback switches immediately to the next one.",
           "default": 3
         }
       }

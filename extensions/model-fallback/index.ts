@@ -1,6 +1,7 @@
 /**
- * retry-all-errors — 让 pi 把所有 agent 错误识别为可重试，
- * 并在单一模型耗尽重试后按配置切换到下一个 fallback 模型。
+ * model-fallback — 为 pi 提供错误重试加多模型接力能力。
+ * 初始模型耗尽重试后按配置依次切换到 fallback 模型，
+ * fallback 模型错一次就继续切，全部耗尽才停。
  *
  * ── 行为 ──────────────────────────────────────────────────────
  *   分两种角色，policy 不同：
@@ -44,17 +45,18 @@
  *     DEFAULT_INITIAL_RETRIES = 3 对齐 pi 未改动时的默认值。推荐的
  *     claude-code parity 配置：
  *        pi settings.json:           retry.maxRetries=9, retry.baseDelayMs=1000
- *        pi-astack-settings.json:    retryAllErrors.initialRetries=9
+ *        pi-astack-settings.json:    modelFallback.initialRetries=9
  *     这让初始模型拿到 10 次尝试 (1+9)，延迟 1s/2s/4s/.../256s，最差
  *     情况每轮等 ~8.5 分钟才 fallback，与 claude-code 默认行为一致。
  *   • 子进程 pi (dispatch spawn) 同样生效：pi-astack 通过
  *     package.json#pi.extensions: ["./extensions"] 给所有 pi 实例加载。
  *
  * ── 历史 ────────────────────────────────────────────────────
- *   原名 retry-stream-eof（仅匹配流 EOF）→ 2026-05 扩成全错误重试 →
- *   2026-05 加多模型 fallback（每模型同等重试）→ 2026-05 改成
- *   "初始 N 次 + fallback 各 1 次" 的非对称 policy。canary log 文件名
- *   仍沿用 retry-stream-eof.log 以保持日志连续性。
+ *   retry-stream-eof（仅匹配流 EOF）→ 2026-05 retry-all-errors（全错误
+ *   重试）→ 2026-05 加多模型 fallback（每模型同等重试）→ 2026-05 改成
+ *   "初始 N 次 + fallback 各 1 次"的非对称 policy + claude-code parity
+ *   delay 调度 → 2026-05 重命名为 model-fallback（凸显主要价值：fallback
+ *   链；retry 现在只是 pi 内建能力的代理）。
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -75,7 +77,7 @@ const PI_STACK_SETTINGS_PATH = path.join(
 );
 
 const CANARY_LOG_DIR = path.join(os.homedir(), ".pi-extensions");
-const CANARY_LOG_PATH = path.join(CANARY_LOG_DIR, "retry-stream-eof.log");
+const CANARY_LOG_PATH = path.join(CANARY_LOG_DIR, "model-fallback.log");
 const CANARY_LOG_MAX_BYTES = 512 * 1024;
 
 /**
@@ -83,7 +85,7 @@ const CANARY_LOG_MAX_BYTES = 512 * 1024;
  * doesn't misbehave on a bare pi install. For claude-code parity (10 attempts,
  * 1s/2s/4s/.../256s) set both:
  *   - pi settings.json#retry.maxRetries = 9, retry.baseDelayMs = 1000
- *   - pi-astack-settings.json#retryAllErrors.initialRetries = 9
+ *   - pi-astack-settings.json#modelFallback.initialRetries = 9
  */
 const DEFAULT_INITIAL_RETRIES = 3;
 
@@ -92,18 +94,18 @@ const FALLBACK_TRIGGER_DELAY_MS = 100;
 
 // ── Config loading ────────────────────────────────────────────
 
-interface RetryAllErrorsConfig {
+interface ModelFallbackConfig {
 	fallbackModels: string[];
 	/** Pi auto-retry count granted to the **initial** model only. Fallback models always get 1 attempt. */
 	initialRetries: number;
 }
 
-function loadConfig(): RetryAllErrorsConfig {
+function loadConfig(): ModelFallbackConfig {
 	try {
 		const raw = JSON.parse(
 			fs.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8"),
 		) as Record<string, unknown>;
-		const cfg = (raw.retryAllErrors as Record<string, unknown> | undefined) ?? {};
+		const cfg = (raw.modelFallback as Record<string, unknown> | undefined) ?? {};
 		const fallbackModels = Array.isArray(cfg.fallbackModels)
 			? (cfg.fallbackModels as unknown[]).filter(
 				(x): x is string => typeof x === "string" && x.includes("/"),
@@ -230,7 +232,7 @@ export default function (pi: ExtensionAPI) {
 		if (consecutiveErrors < threshold || fallbackInFlight) return;
 
 		if (config.fallbackModels.length === 0) {
-			// No fallback configured → behave like vanilla retry-all-errors. Just stop.
+			// No fallback configured → retry-only behavior, no model switching.
 			canaryLog("fallback-disabled (no fallbackModels configured)");
 			return;
 		}
@@ -252,7 +254,7 @@ export default function (pi: ExtensionAPI) {
 			if (!parsed) {
 				tried.add(entry);
 				ctx.ui?.notify?.(
-					`retry-all-errors: invalid fallback entry "${entry}" (expected "provider/modelId")`,
+					`model-fallback: invalid fallback entry "${entry}" (expected "provider/modelId")`,
 					"warning",
 				);
 				continue;
@@ -263,7 +265,7 @@ export default function (pi: ExtensionAPI) {
 			if (!candidate) {
 				tried.add(entry);
 				ctx.ui?.notify?.(
-					`retry-all-errors: model "${entry}" not in registry — skipping`,
+					`model-fallback: model "${entry}" not in registry — skipping`,
 					"warning",
 				);
 				continue;
@@ -271,7 +273,7 @@ export default function (pi: ExtensionAPI) {
 			if (!ctx.modelRegistry.hasConfiguredAuth(candidate)) {
 				tried.add(entry);
 				ctx.ui?.notify?.(
-					`retry-all-errors: no auth configured for "${entry}" — skipping`,
+					`model-fallback: no auth configured for "${entry}" — skipping`,
 					"warning",
 				);
 				continue;
@@ -283,7 +285,7 @@ export default function (pi: ExtensionAPI) {
 
 		if (!next) {
 			ctx.ui?.notify?.(
-				`retry-all-errors: all ${tried.size} fallback model(s) exhausted — giving up`,
+				`model-fallback: all ${tried.size} fallback model(s) exhausted — giving up`,
 				"error",
 			);
 			canaryLog(`fallback-exhausted tried=[${[...tried].join(",")}]`);
@@ -308,7 +310,7 @@ export default function (pi: ExtensionAPI) {
 				const ok = await pi.setModel(next as Model<any>);
 				if (!ok) {
 					ctx.ui?.notify?.(
-						`retry-all-errors: setModel("${nextKey}") returned false — fallback aborted`,
+						`model-fallback: setModel("${nextKey}") returned false — fallback aborted`,
 						"error",
 					);
 					canaryLog(`fallback-setModel-failed model=${nextKey}`);
@@ -331,9 +333,9 @@ export default function (pi: ExtensionAPI) {
 					: `1 attempt (no retries on fallback models)`;
 				pi.sendMessage(
 					{
-						customType: "retry-all-errors-fallback",
+						customType: "model-fallback",
 						content:
-							`[retry-all-errors] Previous model ${fromKey} failed after ${priorAttempts}. ` +
+							`[model-fallback] Previous model ${fromKey} failed after ${priorAttempts}. ` +
 							`Switched to ${nextKey}. Please continue the task from where the failed turn left off.`,
 						display: true,
 						details: {
@@ -350,7 +352,7 @@ export default function (pi: ExtensionAPI) {
 				const msg = err instanceof Error ? err.message : String(err);
 				canaryLog(`fallback-error ${msg}`);
 				ctx.ui?.notify?.(
-					`retry-all-errors: fallback failed: ${msg}`,
+					`model-fallback: fallback failed: ${msg}`,
 					"error",
 				);
 				fallbackInFlight = false;
