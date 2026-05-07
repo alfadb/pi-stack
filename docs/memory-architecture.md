@@ -731,211 +731,123 @@ short-term 不作为 scope 第四层。改为 lifetime 属性（kind: permanent 
 
 ## 附录 C：qmd 集成方案
 
-> 基于 2026-05-06 第六轮 T0 讨论 + 实际环境验证。参与者：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro
+> 基于 2026-05-06 第六轮 T0 讨论 + 实际环境验证 + 后续深入分析。
+> 参与者：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro
 
-### C.1 背景：qmd 的当前部署
+### C.1 qmd 概述
 
-qmd（github.com/tobi/qmd）是一个本地 markdown 搜索引擎，提供 **BM25 全文搜索 + 向量语义搜索 + LLM 重排序**，全部本地运行（node-llama-cpp + GGUF 模型，零云依赖）。
+qmd（github.com/tobi/qmd, v2.1.0）是一个本地 markdown 搜索引擎，提供三层搜索：
 
-当前部署为 **单 daemon + 多 collection** 架构（基于 `2026-04-21` 的架构决策），部署在 `~/.qmd/` 下：
+| 命令 | 能力 | 是否需要模型 |
+|------|------|------------|
+| `qmd search` | BM25 关键词全文搜索 | ❌ 不需要，纯 SQLite FTS |
+| `qmd vsearch` | 向量语义搜索 | ✅ 需要 embedding 模型（~300MB） |
+| `qmd query` | BM25 + 向量 + LLM rerank 混合搜索 | ✅ 需要 embedding + rerank 模型（~3GB） |
+
+全部本地运行（node-llama-cpp + GGUF 模型），零云依赖。
+
+当前部署为 **单 daemon + 多 collection** 架构：
+- 全局索引：`~/.cache/qmd/index.sqlite`（804 文件，3,694 向量已嵌入）
+- Collection 定义：`~/.qmd/config/index.yml`
+- Daemon HTTP：`http://localhost:8181`（MCP 协议 + `/health` 端点）
+- 模型常驻 VRAM，跨请求共享
+
+### C.2 核心洞察：关键词搜索和语义搜索走不同的最优路径
+
+**BM25 关键词搜索不需要模型**——纯 SQLite FTS 查询，任何进程直接读 db 都能在 ~50ms 内完成。
+
+**语义搜索必须加载 embedding 模型**——查询文本 → embedding 向量 → 和 db 中的向量做余弦相似度。模型的冷启动成本是 2-3s（~300MB 模型加载 + 首次推理）。
+
+这意味着：
+
+| 搜索类型 | 最优路径 | 模型在哪 | 冷启动 |
+|---------|---------|---------|--------|
+| BM25 关键词 | **CLI 直读 db**（`execFile` 调 `qmd search --json`） | 不需要 | 无 |
+| 语义搜索 | **Daemon REST**（daemon 已持有模型在 VRAM） | daemon 进程 | 无（永远 warm） |
+| 语义搜索（CLI 路径） | CLI 自加载模型 | CLI 进程（每次启动） | 每次 2-3s ❌ |
+| 语义搜索（SDK 路径） | pi 进程内加载模型 | pi 进程 | 首次 2-3s，后续 warm ⚠️ 但和 daemon 重复加载 |
+
+**结论**：
+- **BM25** → CLI 直读 db。已验证可行，~50ms，零依赖。不需要 daemon。
+- **语义搜索** → daemon 已经有模型在 VRAM 里。pi extension 通过 daemon 的 REST 端点调用（~100ms）。让 pi 自己再加载一份模型是浪费。
+- daemon 当前只暴露 MCP 协议——需要补一个 **薄 REST 端点**（`POST /search`、`POST /query`）。这不是架构问题，是 qmd daemon 缺一个 pi-friendly 接口。
+
+### C.3 语义搜索"直读 db"的局限性
+
+语义搜索的流程：查询文本 → embedding 模型 → 向量 → 和 db 中预嵌入的向量做余弦相似度。
+
+db 中的向量是预先嵌入好的（存储成本为 0），但**查询时必须把查询文本也转成向量**——这一步绕不开 embedding 模型。CLI 直读 db 做语义搜索：每次启动 CLI 进程都要重新加载模型（2-3s），而 daemon REST 路径下模型永远 warm（~100ms）。
+
+这就是"直读 db"在语义搜索场景下的局限——db 可以直读，但向量化查询文本的那一步离不开模型。
+
+**附加问题**：当前 daemon 的索引是用旧版 embedding 模型（1024-dim）构建的，CLI v2.1.0 自带新版模型（768-dim），维度不匹配导致 CLI 的 `qmd vsearch` 直接报错。这是 qmd 版本升级导致的配置不一致——daemon 和 CLI 需要统一 embedding 模型版本。与架构无关。
+
+### C.4 MCP 与 pi 设计哲学的冲突
+
+pi 使用 TypeScript extension 工具体系：工具在 `activate()` 中注册，在 pi 进程内执行，拥有 `signal`/`onUpdate`/`ctx` 的完整控制。
+
+MCP（Model Context Protocol）存在的真实原因是 **Claude Code 是短会话进程**——需要一个独立 daemon 保持模型常驻。pi 本身就是长生命周期 TUI 进程，不需要这层脚手架。引入 MCP 等于在不需要它的平台上加 JSON-RPC + HTTP + MCP session 三层额外开销。
+
+**但 daemon 本身是有价值的**——它让 embedding 模型常驻 VRAM，被所有消费者共享。pi 不走 MCP 调它，而是通过 REST 调它的搜索能力：
 
 ```
-~/.qmd/config/index.yml          # 全局 collection 定义
-~/.cache/qmd/index.sqlite         # 全局索引
-~/.cache/qmd/mcp.pid              # daemon PID
+  ┌─ pi (TUI 进程) ─────────────────────────────┐
+  │  pi-qmd extension                           │
+  │    ├─ BM25: execFile('qmd', ['search'...])  │ ← 直读 db，不需要 daemon
+  │    └─ 语义: fetch('localhost:8181/search')  │ ← 调 daemon，模型 warm
+  └──────────────────────────────────────────────┘
+
+  ┌─ qmd daemon（独立进程）──────────────────────┐
+  │  模型常驻 VRAM                              │
+  │  POST /mcp      ← Claude Code               │
+  │  POST /search    ← pi（需补充）               │
+  │  POST /query     ← pi（需补充）               │
+  │  GET  /health    ← pi health check           │
+  └──────────────────────────────────────────────┘
 ```
+
+### C.5 Collection 路由
 
 ```yaml
-# ~/.qmd/config/index.yml（示例）
-collections:
-  claude-knowledge:
-    path: /home/worker/.claude/.pensieve/knowledge
-    pattern: "**/*.md"
-  sub2api-pensieve:
-    path: /home/worker/work/base/sub2api/.pensieve
-    pattern: "**/*.md"
-  # ... 每项目 1-N 个 collection
-```
-
-**当前状态**（2026-05-06 实测）：
-- daemon 运行中，804 个文件已索引，3,694 个向量已嵌入
-- 模型常驻 VRAM 跨请求共享
-- MCP HTTP 端点：`http://localhost:8181/mcp`（供 Claude Code 等 MCP 客户端使用）
-- daemon 通过 `qmd mcp --http --daemon --port 8181` 启动
-
-### C.2 核心决策：pi 不用 MCP，用 CLI + 共享索引
-
-#### C.2.1 MCP 与 pi 设计哲学的冲突
-
-pi 使用 **TypeScript extension 工具体系**：
-- 工具在 `activate()` 中通过 `pi.registerTool()` 注册
-- 工具函数在 pi 进程内执行
-- 拥有 `signal`（abort）、`onUpdate`（流式）、`ctx`（UI/事件）的完整控制
-
-MCP（Model Context Protocol）是外部工具服务器协议：
-- MCP 存在的真实原因是 Claude Code 等客户端是**短会话进程**——需要一个独立 daemon 保持模型常驻 VRAM
-- pi 本身就是**长生命周期 TUI 进程**，天然扮演 daemon 角色
-- 引入 MCP 层等于引入 Claude Code 的脚手架到不需要它的平台：JSON-RPC 序列化、HTTP roundtrip、MCP session 握手——全部是多余开销
-
-#### C.2.2 CLI + 共享索引：已验证可行
-
-**关键发现**（实际环境验证）：qmd CLI 可以通过环境变量直接使用 daemon 的索引：
-
-```bash
-# ✅ 已验证：CLI 读 daemon 索引进行向量搜索
-QMD_CONFIG_DIR=~/.qmd/config INDEX_PATH=~/.qmd/index.sqlite \
-  qmd vsearch "knowledge management" --json -n 3
-# → 返回 3694 个向量的语义搜索结果
-
-# ✅ 已验证：BM25 关键词搜索 + collection 过滤
-QMD_CONFIG_DIR=~/.qmd/config INDEX_PATH=~/.qmd/index.sqlite \
-  qmd search "memory architecture" --json -c "claude-knowledge"
-
-# ✅ 已验证：索引状态
-QMD_CONFIG_DIR=~/.qmd/config INDEX_PATH=~/.qmd/index.sqlite qmd status
-# → 804 files indexed, 3694 vectors embedded
-```
-
-**这意味着**：pi 集成 qmd 不需要通过 MCP、不需要 SDK、不需要重新 embed。CLI 直接操作 daemon 的 sqlite 索引文件即可。
-
-#### C.2.3 三种集成路径的系统评估
-
-| 维度 | CLI subprocess | SDK (`@tobilu/qmd`) | MCP HTTP |
-|------|---------------|---------------------|----------|
-| **pi-native 程度** | 🟡 需要 `execFile` + stdout 解析 | 🟢 TypeScript 函数调用（但 ESM-only，CJS 兼容性障碍） | 🔴 引入外部协议栈 |
-| **daemon 共享 VRAM** | 🟢 读 daemon 的索引文件，不加载模型 | 🔴 每个 pi 进程各自加载模型（~4.3GB VRAM 重复） | 🟢 共享（但需 MCP） |
-| **实现复杂度** | 🟢 约 50 行（已有 pi-qmd 1400 行参考） | 🟡 ESM/CJS 兼容 + 原生依赖 | 🔴 JSON-RPC + session 管理 |
-| **延迟** | BM25: ~50ms；向量: ~500ms（读索引，无模型加载） | warm: ~50ms | +HTTP+MCP overhead |
-| **abort 支持** | 🟡 SIGKILL 杀进程 | 🟢 原生 `signal` 穿透 | 🟡 connection close |
-| **error 处理** | 🟡 解析 stderr / exit code | 🟢 原生 exception | 🟡 字符串化 RPC error |
-| **当前可用性** | 🟢 已验证 | 🔴 ESM/CJS 导入失败 | 🟢 daemon 运行中 |
-
-**最终决策**：**Phase 1 使用 CLI + 共享索引**。这是唯一已验证可行且符合 pi 设计哲学的路径。
-
-#### C.2.4 Daemon 的角色
-
-qmd daemon **保留**，继续服务：
-- Claude Code（如果仍在使用）
-- 终端 ad-hoc 查询：`qmd search "something"`
-- 其他 MCP 客户端
-
-pi **不依赖 daemon**。pi 的 qmd 扩展通过 CLI 直接读 sqlite 索引文件。daemon 挂掉不影响 pi 的 qmd 搜索能力。
-
-```
-  ┌─ pi (TUI 进程) ────────────────────────────┐
-  │  pi-qmd extension                          │
-  │    └── execFile('qmd', ['search', ...])    │
-  │          ↓ (env: QMD_CONFIG_DIR, INDEX_PATH)│
-  │     ~/.cache/qmd/index.sqlite (直接读)      │
-  └─────────────────────────────────────────────┘
-
-  ┌─ qmd daemon (可选，独立进程) ──────────────┐
-  │  模型常驻 VRAM，服务 MCP 客户端             │
-  │  Claude Code / ad-hoc CLI 等               │
-  └─────────────────────────────────────────────┘
-```
-
-### C.3 Collection 路由方案
-
-**核心原则**：collection 映射是项目知识边界配置，属于项目级配置，不是 pi UI 设置。
-
-#### C.3.1 配置位置
-
-```yaml
-# <project>/.pensieve/config.yml（新增 qmd 节）
+# <project>/.pensieve/config.yml
 qmd:
   collections:
-    - "pi-pensieve"          # 当前 project 的 pensieve
-    - "pi-knowledge"         # 当前 project 的 knowledge
-  world_collections:         # 跨项目 world 知识
+    - "pi-pensieve"
+    - "pi-knowledge"
+  world_collections:
     - "global-knowledge"
-  mode: "cli"                # cli | daemon-rest（未来）
+  daemon_endpoint: "http://localhost:8181"
 ```
 
-#### C.3.2 解析优先级
+解析优先级：`.pensieve/config.yml` → `settings.json` → 环境变量 → `~/.qmd/config/index.yml`（仅校验）→ FAIL CLOSED。
+
+### C.6 与 `memory_search` Facade 的集成
+
+qmd 作为 Facade 下 QmdBackend，不暴露独立工具给 LLM：
+
+- BM25 查询 → `execFile('qmd', ['search', query, '--json'])`（直读 db）
+- 语义查询 → `fetch(`${daemon}/search`, ...)`（调 daemon，模型 warm）
+- Daemon 不可用 → graceful degradation 到 GrepBackend
+- 结果标注 `backend: 'qmd'`，含 score/source_path
+
+### C.7 pi-qmd 现有扩展
+
+`github.com/hjanuschka/pi-qmd`：TypeScript pi extension，用 CLI（`execFile`），不用 MCP、不用 SDK。注册了 `qmd_search`/`qmd_vsearch`/`qmd_query`/`qmd_get`/`qmd_multi_get`/`qmd_status` 6 个工具 + TUI browser。可改造为 Facade backend 模式。
+
+### C.8 实施路线
 
 ```
-1. 显式参数 / 调试 override（QMD_COLLECTIONS 环境变量）
-2. <project>/.pensieve/config.yml 的 qmd.collections（主路径）
-3. ~/.pi/agent/settings.json 的 qmd.defaultCollections（全局默认）
-4. ~/.qmd/config/index.yml（仅做存在性校验，不用于自动推断）
-5. 未解析出任何 collection → FAIL CLOSED（不默认搜全部）
-```
+Phase 1（立即可做）: BM25 via CLI 直读 db
+  - execFile 调 qmd search --json
+  - QMD_CONFIG_DIR + INDEX_PATH 指向 daemon 索引
+  - ~50ms/query，零依赖，已验证
 
-**Fail-closed 是关键安全措施**：默认搜全部 collection 会把其他项目的知识注入当前 agent 上下文，造成 scope 污染。
+Phase 2（需 daemon 补 REST）: 语义搜索 via daemon
+  - daemon 加 POST /search + POST /query 端点
+  - pi extension 通过 fetch() 调 daemon
+  - 模型永远 warm，语义搜索 ~100ms
 
-### C.4 与 `memory_search` Facade 的集成
-
-**结论**：qmd 作为 `memory_search` Facade 下的一个 backend，不单独暴露 `qmd_search` 工具给 LLM。
-
-```
-                    LLM Tools
-              memory_search | memory_get
-                         │
-                    Memory Facade
-                 (路由 · RRF 融合 · degrade)
-              /          |           \
-     QmdBackend    GbrainBackend   GrepBackend
-   (CLI+共享索引)   (可选,未来)    (ripgrep fallback)
-```
-
-每个 backend 声明 `capabilities`：
-
-```typescript
-interface BackendCapabilities {
-  keywordSearch: boolean;     // BM25 / grep
-  semanticSearch: boolean;    // 向量相似度
-  hybridSearch: boolean;      // BM25 + 向量 + rerank
-  graphTraversal: boolean;    // 图遍历（仅 gbrain）
-  listByKind: boolean;        // 按 kind 过滤
-}
-```
-
-Facade 按 capability 路由：
-- 关键词查询 → QmdBackend + GrepBackend（双路并发）
-- 语义查询 → QmdBackend（qmd vector search）
-- QmdBackend 不可用 → 自动降级到 GrepBackend
-- 每条结果标注 `backend` 字段（`'qmd' | 'gbrain' | 'rg'`）
-
-**不暴露独立 `qmd_search` 工具**：LLM 不应该判断"该用 grep 还是 qmd 还是 gbrain"——那是 Facade 的路由职责。LLM 只调 `memory_search`。
-
-### C.5 pi-qmd 现有扩展分析
-
-**已确认**（GPT-5.5 检查了 `github.com/hjanuschka/pi-qmd` 源码）：
-
-- ✅ 是 pi extension（TypeScript），**不是 MCP client**
-- ✅ 使用 CLI 路径：`execFile('qmd', [...])`
-- ✅ 注册了 6 个工具：`qmd_search` / `qmd_vsearch` / `qmd_query` / `qmd_get` / `qmd_multi_get` / `qmd_status`
-- ✅ 有 TUI browser（`/qmd_ui`）
-- ⚠️ `execute` 参数签名可能需要适配当前 pi 版本
-- ❌ 没有 `@modelcontextprotocol/sdk` 依赖
-- ❌ 没有 `@tobilu/qmd` SDK 依赖
-
-**改造方向**（不 fork，直接扩展或上游 PR）：
-
-1. 修正所有 tool `execute` signature 为当前 pi 约定
-2. 将 6 个独立工具包装在 `memory_search` Facade 后（`qmd_search` 等保留为 debug config flag）
-3. 从 `.pensieve/config.yml` 读取 collection 配置（替代当前的手工 collection 参数）
-4. 设置 `QMD_CONFIG_DIR` / `INDEX_PATH` 环境变量指向 daemon 的索引
-5. 保留 `/qmd_ui` TUI browser（这是 pi-qmd 相比裸 qmd 的核心增值）
-
-### C.6 实施路线
-
-```
-Phase 1（当前）: CLI + 共享索引
-  - pi-qmd extension 设置 QMD_CONFIG_DIR=~/.qmd/config INDEX_PATH=~/.qmd/index.sqlite
-  - qmd_search 通过 execFile('qmd', ['search', query, '--json', '-c', collection]) 实现
-  - qmd_vsearch 同上
-  - collection 配置从 .pensieve/config.yml 读取
-  - daemon 保留，pi 不依赖
-
-Phase 2（未来）: memory_search Facade 集成
-  - qmd 作为 Facade 的 QmdBackend
-  - 与 GrepBackend 并行查询，RRF 融合
-  - graceful degradation：qmd 不可用 → 自动降级到 grep
-
-Phase 3（如果 daemon 加了 REST endpoint）: daemon REST backend
-  - pi extension 用 fetch() 调 daemon 的 /search /query 端点
-  - 模型 warm，延迟最低
-  - 保留 CLI fallback
+Phase 3: memory_search Facade 统一
+  - QmdBackend + GrepBackend 并行，RRF 融合
+  - 自动降级 + collection 路由 fail-closed
 ```
