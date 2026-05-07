@@ -1,61 +1,16 @@
 /**
- * model-fallback — 为 pi 提供错误重试加多模型接力能力。
- * 初始模型耗尽重试后按配置依次切换到 fallback 模型，
- * fallback 模型错一次就继续切，全部耗尽才停。
+ * model-fallback — 多模型 fallback 链。
  *
- * ── 行为 ──────────────────────────────────────────────────────
- *   分两种角色，policy 不同：
+ * 初始模型错误时 pi 内建指数退避重试（依 pi settings#retry.maxRetries）；
+ * 耗尽后切成下一个已配置的 fallback 模型继续——直到列表里有人成功，或全部
+ * 失败。Falback 模型任一错误直接切（不重试）。
  *
- *   A. 初始模型（用户起手用的那个）：错误时给 pi 内建 retry 一个机会
- *      —— errorMessage 前缀 "connection lost — " 命中 pi 的
- *      _isRetryableError，走指数退避重试。重试次数遵循 pi 自有配置
- *      (retry.maxRetries)，扩展自动从 pi settings.json 读取；用完后
- *      pi 自动放弃，本扩展立即切到下一个 fallback 模型。
+ * pi agent_end 里扩展先于 pi 的 _handleRetryableError 运行：加 "connection
+ * lost — " 前缀触发 pi 重试，或不加前缀让 pi 跳过 retry 分支。切换模型 +
+ * 继续走 setTimeout(100ms) 落地到 pi give-up 之后。
  *
- *   B. Fallback 模型（切换后用的）：任何错误都直接切下一个
- *      —— **不**加前缀，pi 看到的是 non-retryable error，不重试；
- *      本扩展立刻挑下一个 fallback 模型继续。每个 fallback 只有 1 次
- *      尝试机会。这避免了 fallback 链路上多次重试拖时间。
- *
- *   两种角色都通过同一段代码实现：
- *      - 维护 isOnFallback 标志；
- *      - 错误阈值：初始模型 = pi.settings.json#retry.maxRetries + 1（自动读取）；
- *        fallback 模型 = 1（错一次就切）；
- *      - 用 setTimeout(100ms) 把 setModel + sendMessage 排到 pi 当前
- *        agent_end 处理完之后，避免和 pi 的 retry teardown 冲突；
- *      - 通过 pi.sendMessage({customType, triggerTurn:true}) 注入一条
- *        custom 消息（在 LLM context 里转 user role，见
- *        pi-coding-agent/dist/core/messages.js convertToLlm），让新模型
- *        看到 “上一个模型失败了，换我接着干” 的明确上下文。
- *
- *   配置列表里所有模型都试过且都失败 → notify error，停止接力。
- *
- *   任意 successful assistant 响应 (stopReason!=="error") → 重置
- *   consecutiveErrors / tried / isOnFallback，下次出错重新走完整流程
- *   （从初始模型重新开始算）。
- *
- * ── 实现要点 ─────────────────────────────────────────────────
- *   • _emitExtensionEvent 透传 messages 引用，原地 mutate errorMessage
- *     对 pi 的 retry 检查生效（与历史 retry-stream-eof 行为一致）。
- *   • pi 在 agent_end 里 "先 emit 给扩展，后跑 _handleRetryableError"，
- *     所以我们在加前缀后还可以 setTimeout 把 fallback 排到 pi give-up
- *     结束之后；fallback 模型上不加前缀时 pi 直接跳过 retry 分支，
- *     setTimeout 也能干净落地。
- *   • 扩展自动读取 ~/.pi/agent/settings.json#retry.maxRetries 来确定
- *     pi 的 give-up 节点，无需用户额外配置。若文件缺失或未设此字段，
- *     回退到 pi 默认值 3。推荐 claude-code parity 时在 pi settings.json
- *     中设 retry.maxRetries=9 + retry.baseDelayMs=1000，扩展自动对齐。
- *     这让初始模型拿到 10 次尝试 (1+9)，延迟 1s/2s/4s/.../256s。
- *   • 子进程 pi (dispatch spawn) 同样生效：pi-astack 通过
- *     package.json#pi.extensions: ["./extensions"] 给所有 pi 实例加载。
- *
- * ── 历史 ────────────────────────────────────────────────────
- *   retry-stream-eof（仅匹配流 EOF）→ 2026-05 retry-all-errors（全错误
- *   重试）→ 2026-05 加多模型 fallback（每模型同等重试）→ 2026-05 改成
- *   "初始 N 次 + fallback 各 1 次"的非对称 policy + claude-code parity
- *   delay 调度 → 2026-05 重命名为 model-fallback（凸显主要价值：fallback
- *   链；retry 现在只是 pi 内建能力的代理）→ 2026-05 消除配置重复：
- *   扩展改为自动读取 pi settings.json#retry.maxRetries。
+ * 扩展自动读取 pi settings.json#retry.maxRetries，对齐 give-up 节点。
+ * 旧名 retry-stream-eof → retry-all-errors。
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
