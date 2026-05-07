@@ -101,7 +101,7 @@ pi install git:github.com/alfadb/pi-astack
 - `sediment/` — 后台沉淀代理（gbrain 唯一写入者，v6.7 双轨 project+world，ADR 0011）
 - `model-curator/` — 模型能力快照与选择建议
 - `gbrain/` — 主会话记忆 read tool（`gbrain_search/get/query`），含 markdown fallback
-- `retry-stream-eof/` — 流错误重试（**自有功能，不向上游 PR**）
+- `retry-all-errors/` — 将所有 agent 错误标记为可重试，走 pi 内建 3 次指数退避（旧名 retry-stream-eof；**自有功能，不向上游 PR**）
 
 ### Skills（pi 技能）
 - `memory-wand/` — 记忆库查询助手（`gbrain_*` tool 包装）
