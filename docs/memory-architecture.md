@@ -1,13 +1,11 @@
 # Pi 知识管理架构设计
 
-> 基于 2026-05-06 用户原始架构想法，通过四轮 T0 深度讨论逐步细化而成。
-> 讨论参与者：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro
+> 基于 2026-05-06 用户原始架构想法，通过四轮 T0 深度讨论 + 完备性审查逐步细化而成。
+> 讨论与审查参与者：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro
 
 ---
 
 ## 1. 用户的原始 9 点框架（2026-05-06）
-
-关于知识沉淀，用户提出以下框架性想法，作为本设计的出发点：
 
 1. 知识分为两层：**项目级知识**和**世界级知识**
 2. 项目级知识提取原则来自 pensieve 的 maxims / decisions / knowledge 三个维度
@@ -23,150 +21,133 @@
 
 ## 2. 用户的关键设计决策（2026-05-06，四轮讨论）
 
-基于原始 9 点，用户在四轮 T0 讨论中做了以下关键决策：
+**决策 1**：short-term 不作为 scope 层，作为任意持久层上的 **lifetime 属性**（ttl / expires_at / expire_on）。
 
-### 决策 1：short-term 不作为 scope 层，作为 lifetime 属性
+**决策 2**：暂时不上 gbrain。统一用 **markdown + git** 作为 source of truth。但借鉴 gbrain 的 timeline 和图谱方法论（决策 5）。
 
-**用户追问**：旧的 pensieve 体系中有一个"short-term"分类。在新架构中它应该是 scope 的一层、还是任意层的属性？
+**决策 3**：`~/.abrain/` 作为世界级知识的独立 git 仓库（private），`ABRAIN_ROOT` 环境变量引用。与 `.pensieve/` 边界：pensieve=项目特定，abrain=跨项目通用。
 
-**决策**：short-term 不做 scope 第四层。改为任意持久层上的 **lifetime 属性**（`ttl` / `expires_at` / `expire_on: branch_merged`），与 scope 正交。世界级也需要短期（staging 未经验证的洞察，90 天 TTL 等第二次验证）。
+**决策 4**：参考 Karpathy LLM Wiki 方法论，补齐 **Lint & Maintain** 阶段、**查询反哺闭环**、**Index 文件自动生成**。qmd 作为可选本地搜索后端。向量索引降为可选加速层。
 
-> 分析详见附录 B.1
-
-### 决策 2：暂时不上 gbrain，统一用 markdown + git 作为 source of truth
-
-**用户追问**：从检索质量、版本控制、离线可用、人类可编辑、搭建复杂度、维护负担、跨机器同步、扩展性、成本、锁定风险等多个维度，全面评估 gbrain 与纯 markdown 存储的优劣。
-
-**用户最终意见**："可以暂时不上 gbrain，但是 gbrain 中的 timeline、图谱等方法论可以借鉴。"
-
-**决策**：
-- 世界级知识与项目级知识统一使用 **markdown + git** 作为 source of truth
-- gbrain 暂时不作为存储后端，但借鉴其 **timeline 双段格式**和**图关系**方法论，在纯 markdown 层面实现等价能力
-- gbrain 未来可作为"从 md 派生的可重建索引层"接入（Facade 模式允许）
-
-> 分析详见附录 B.2（gbrain vs md 多维度对比）、附录 B.3（gbrain 方法论借鉴）
-
-### 决策 3：~/.abrain 作为世界级知识库
-
-**用户追问**：如果世界级也用 markdown + git 存储，放在 `~/.abrain/` 作为独立版本化仓库是否可行？
-
-**决策**：
-- `~/.abrain/` 作为世界级知识的独立 git 仓库（private），与 `~/.pi` 完全平行
-- 通过 `ABRAIN_ROOT` 环境变量引用（不用 submodule，不用 symlink）
-- 与 `.pensieve/` 的边界：pensieve = 项目特定，abrain = 跨项目通用
-- 多机器通过 git push/pull 同步
-
-> 分析详见附录 B.2.4
-
-### 决策 4：参考 Karpathy LLM Wiki 方法论，补齐 Lint 和查询反哺
-
-**用户方向**：研究 Karpathy 的 LLM Wiki 方法论，看与我们的方案是否契合。
-
-**决策**：
-- 我们的架构与 Karpathy 在核心哲学上完全一致（markdown=源真、LLM=维护者），验证了方向正确
-- 补齐三个 Karpathy 有而我们缺失的组件：
-  - **Lint & Maintain** 阶段（sediment 第二个角色：断链/重复/过期/scope 污染检测）
-  - **查询反哺闭环**（知识被实际应用 → timeline 追加 `[applied]` 记录）
-  - **Index 文件**（sediment 自动维护 `_index.md` 作为导航）
-- 采用 qmd（已有 pi-qmd 扩展）作为可选本地搜索后端
-- 向量索引降为可选加速层（2,000 条目以下标注"不需要"）
-
-> 分析详见附录 B.4
-
-### 决策 5：借鉴 gbrain 的 Timeline + Graph 方法论，纯 markdown 实现
-
-**用户意见**："gbrain 中的 timeline、图谱等方法论可以借鉴，继续讨论。"
-
-**决策**：
-- **Compiled Truth + Timeline 双段格式**：以 `---`（triple-hr）分隔，compiled truth 可重写，timeline append-only
-- **7 条确定性 Lint 规则**（T1-T7）：零 LLM 调用，纯 grep + awk 校验
-- **图作为派生 JSON 索引**（`graph.json`）：从 markdown 确定性构建，gitignored 可重建
-- **三种关系对称性**：symmetric / asymmetric / body_links
-- **Brain Health 评分**：5 指标加权，纯脚本计算
-
-> 详细设计见 §5.5 和附录 B.3
+**决策 5**：借鉴 gbrain 方法论，在纯 markdown 层面实现 **Compiled Truth + Timeline 双段格式**、**7 条确定性 Lint 规则**、**Graph 派生 JSON 索引**、**Brain Health 评分**。
 
 ---
 
 ## 3. 核心架构原则
 
-1. **读写分离**：只有 sediment sidecar 可以写持久知识。
-2. **读接口统一**：对 LLM 暴露的查询工具不区分项目级/世界级。
-3. **写入显式 scoped**：只有 sidecar 的写入工具需要区分目标层级。
-4. **Scope × Lifetime 正交**：适用范围和失效时间是独立维度。
-5. **Markdown 为唯一 source of truth**：索引是 view，文本是 table。
-6. **Facade 模式隔离**：LLM 只看到统一接口，底层可替换。
-7. **默认永久，显式临时**：只有真正临时的条目显式声明 lifetime。
-8. **Graceful degradation**：索引不可用时降级到 grep。
-9. **拒绝完备性**：默会知识入库的是投影，不是本体。
+1. **读写分离**：只有 sediment sidecar 可以写持久知识（markdown 文件、frontmatter、graph.json）。主 session、dispatch 子进程只能读。
+2. **读接口统一，结果保留 provenance**：LLM 工具不区分 project/world（分配置），但返回的每条结果必须带 `scope`、`source`、`backend` 标注——统一是 rank 层的责任，不是 LLM 的认知负担。
+3. **写入显式 scoped**：只有 sidecar 的写工具区分项目/世界。
+4. **Scope × Lifetime 正交**：适用范围和失效时间是独立维度，不在目录结构中混叠。
+5. **Markdown 为唯一 source of truth**：索引是 view，文本是 table。索引 gitignored，可随时从 md 重建。
+6. **Facade 模式隔离**：LLM 只看到统一的读接口，底层存储和索引拓扑变更不影响上层。
+7. **默认永久，显式临时**：大多数知识无过期时间。只有实验性的条目显式声明 ttl。
+8. **Graceful degradation**：索引不可用时降级到 ripgrep 关键词搜索，结果标注 `degraded: true`。系统不失效。
+9. **核心接口必须完备，边缘功能渐进迭代**：数据模型、写入安全、读接口契约不能有空白。性能优化、高级治理可以按 Phase 迭代。
 
 ---
 
 ## 4. 知识模型
 
-### 4.1 三层 Scope
+### 4.1 三层 Scope（MVP 为 Project + World，Session 为可选层）
 
-| 层 | 生命周期 | 存储位置 | 写入者 |
-|---|---|---|---|
-| **Session** | 当前会话 | 内存 scratchpad | 主 agent（零摩擦） |
-| **Project** | 项目存活期 | `<project>/.pensieve/`（md + git） | sediment sidecar |
-| **World** | 跨项目持久 | `~/.abrain/`（md + git） | sediment sidecar（with gates） |
+| 层 | 生命周期 | 存储位置 | 写入者 | MVP |
+|---|---|---|---|---|
+| **Session** | 当前会话，结束即蒸发 | 内存 scratchpad | 主 agent（零摩擦） | Phase 5 |
+| **Project** | 项目存活期 | `<project>/.pensieve/`（md + git） | sediment sidecar | ✅ Phase 1 |
+| **World** | 跨项目持久 | `~/.abrain/`（md + git） | sediment sidecar（with gates） | ✅ Phase 2 |
+
+Session scope 只能有 `lifetime: session`（write-path validator 强制约束），不可 promote 到 project/world。Session 是 scope 轴上的合法值，但 MVP 不做持久化。
 
 ### 4.2 正交属性
 
 ```yaml
-scope: session | project | world       # 空间边界
+# 知识条目的核心元数据
+scope: project | world                  # MVP；Phase 5 加 session
 kind: maxim | decision | anti-pattern | pattern | fact | preference | smell
 status: provisional | active | contested | deprecated | superseded | archived
-confidence: 0-10
+confidence: 0-10                        # 0-2=staging smell, 3-5=provisional, 6-7=active, 8-10=high-certainty
 
-lifetime:                              # 时间边界（决策 1）
+lifetime:                               # 时间边界
   kind: permanent | ttl | event | review
-  expires_at: 2026-05-14               # kind=ttl
-  expire_on: branch_merged:feat/x      # kind=event
-  review_after: 2026-05-10             # kind=review
+  expires_at: 2026-05-14                # kind=ttl
+  expire_on: branch_merged:feat/x       # kind=event
+  review_after: 2026-05-10              # kind=review
 ```
+
+**`confidence` 定义**：
+- 取值 0-10 整数。由 sediment 在写入/update 时设定，promotion gate 通过后自动 +2。
+- project 与 world 的 confidence 不可直接比较——只是各自 scope 内的信号强度。
+- 不随时间自动衰减。被反例命中（contested）后 sediment 下调；被多项目验证后上调。
+- search ranking 中 confidence 作为加权因子（`* (confidence/10)`）。
 
 ### 4.3 Kind 定义
 
-| kind | 权威性 | 说明 |
+| kind | 权威性 | 例子 |
 |---|---|---|
-| **maxim** | MUST | 硬约束，不可违反 |
-| **decision** | WANT | 时效性约束 |
-| **anti-pattern** | WARN | 已知陷阱（复用价值最高） |
-| **pattern** | SUGGEST | 经过验证的良好模式 |
-| **fact** | IS | 事实陈述 |
-| **preference** | PREFER | 用户/项目偏好 |
-| **smell** | MAYBE | 刚浮现的模式，confidence < 5 |
+| **maxim** | MUST | "tmux 中永不关主 pane" |
+| **decision** | WANT | "本项目用 pnpm，不用 npm" |
+| **anti-pattern** | WARN | "dispatch_agents 表面并行可能实际串行" |
+| **pattern** | SUGGEST | "用 @file 传 long prompt" |
+| **fact** | IS | "pi 的 _emitExtensionEvent 透传引用" |
+| **preference** | PREFER | "用户喜欢中文回复" |
+| **smell** | MAYBE | confidence < 5 的模式初现 |
 
-### 4.4 默会知识管道
+### 4.4 条目内部结构：Compiled Truth + Timeline（决策 5）
 
-```
-smell (staging)  ──验证──→  pattern (project)  ──promotion gates──→  maxim (world)
-confidence < 5              confidence 5-7                       confidence 8-10
-随意捕获，低承诺              半形式化，有边界                   跨项目验证，高承诺
-```
-
-**边界**：可写的是"当 X 出现时做 Y"的规则。必须保持默会的是"从 200 行 diff 中 2 秒定位 bug"的注意力机制。
-
-### 4.5 条目内部结构：Compiled Truth + Timeline（决策 5）
+**完整示例（avoid-long-argv-prompts）**：
 
 ```markdown
 ---
-id: avoid-long-argv-prompts
+id: world:avoid-long-argv-prompts
 scope: world
 kind: pattern
 status: active
+confidence: 8
+schema_version: 1
 created: 2026-05-06
-updated: 2026-05-06
-relates_to: [world:use-at-file-input]
-derives_from: [project:dispatch-agent-input-compat-contract]
+updated: 2026-05-08
+trigger_phrases:
+  - "argv"
+  - "long prompt"
+  - "shell argument"
+  - "@file"
+relates_to:
+  - world:use-at-file-input
+derives_from:
+  - project:pi/dispatch-agent-input-compat-contract
+provenance:
+  sessions:
+    - sess-abc123
+    - sess-def456
+  models:
+    - claude-opus-4-7
+  human_reviewed: false
 ---
 
 # Avoid Long argv Prompts
 
+## Summary
+传给子进程的 prompt 如果包含换行、引号或超过约 200 字符，
+应写入临时 .md 文件，通过 `@file` 语法传递，而非直接作为 argv 参数。
+
 ## Principle
-详细论述、边界条件。这是知识的**当前最佳结论**，可随新证据被整体重写。
+`spawn("pi", [prompt], ...)` 中的 prompt 可能包含：
+- 换行符（多段落指令）
+- 双引号 / 单引号（shell escaping 边界）
+- Markdown 代码块（反引号在 shell 中需要转义）
+
+即使 Linux ARG_MAX 为 2MB，shell escaping + 调试可读性在远低于此
+限制时已退化。推荐：prompt 一律写入临时 .md，通过 `@file` 传递。
+
+## Boundaries
+- 适用于 Node `spawn` / shell `exec` 传参
+- 不适用于 HTTP body / stdin stream / REST API
+- 短 prompt（< 200 chars 且无特殊字符）可以直接传
+
+## Evidence
+- sess-abc123: dispatch_agent 长 prompt 导致子进程接收到损坏的指令
+- sess-def456: 另一个 CLI wrapper 中同样问题再现，@file 彻底解决
 
 ---
 
@@ -174,159 +155,220 @@ derives_from: [project:dispatch-agent-input-compat-contract]
 
 - 2026-05-05 | sess-abc | captured | 在 dispatch_agent 长 prompt 失败中首次发现
 - 2026-05-07 | sess-def | validated | 在另一个 CLI wrapper 中再次验证 [+1]
+- 2026-05-08 | sess-ghi | promoted | project→world，通过 5 个 promotion gates [promoted]
 ```
 
-| 区域 | 含义 | 可重写？ |
-|---|---|---|
-| frontmatter | 结构化元数据、关系 | 可更新 |
-| compiled truth | `---` 之前的正文 | 可被 sidecar 完全重写 |
-| timeline | `---` 之后的 append-only 事件日志 | 只能追加 |
+**区域定义**：
 
-### 4.6 关系类型与对称性（决策 5）
+| 区域 | 含义 | 可重写？ | 参与 search？ |
+|---|---|---|---|
+| frontmatter | 结构化元数据、关系、当前状态 | 可更新 | 仅字段过滤，不参与语义搜索 |
+| compiled truth | `## Timeline` 之前的正文 | 可被 sidecar 完全重写 | ✅ 主检索区域 |
+| timeline | `## Timeline` 之后的 append-only 日志 | 只能追加 | ❌ 默认不参与 search，仅 audit/memory_get 时返回 |
+
+**关键规则**：
+- `## Timeline` 是最后一个 H2，之后只允许 `- YYYY-MM-DD | ...` 格式的 bullet 行
+- `updated` 只反映 compiled_truth 编辑时间；timeline 追加不影响 `updated`
+- Timeline 内禁止 heading、code fence、table、嵌套 list
+- git diff 可区分"知识演化"（compiled truth 变更）和"证据追加"（timeline 追加）
+
+### 4.5 关系类型与对称性
 
 ```yaml
-symmetric:                         # lint 检测缺失对
+symmetric:                         # lint 检测缺失对，建议补全
   - relates_to
   - contested_with
 
-asymmetric:                        # 反向边只在派生索引
+asymmetric:                        # 反向边只在派生索引存在，不写回 markdown
   derives_from:    derived_into
   superseded_by:   supersedes
   applied_in:      cited_by
 
-body_links:                        # wikilink 默认关系
+body_links:                        # 正文 [[slug]] wikilink 默认关系
   references:      referenced_by
 ```
+
+### 4.6 默会知识管道
+
+```
+smell (staging, confidence<5) → pattern (project, 5-7) → maxim (world, 8-10)
+```
+
+**边界**：可写的是"当 X 出现时，做 Y"的规则。必须保持默会的是"从 200 行 diff 中 2 秒定位 bug"的注意力机制。"拒绝完备性"指：永不追求把全部默会知识形式化——库里的永远是投影。
 
 ---
 
 ## 5. 存储架构
 
-### 5.1 核心决策：Markdown + Git 统一 SoT（决策 2）
+### 5.1 Source of Truth 与派生索引
 
-世界级与项目级统一用 markdown + git。gbrain 的优势可通过从 md 派生的索引层获得，离线/版本控制/人类可编辑/md 的结构性优势是 gbrain 换不回来的。
+Markdown + git 是唯一 canonical store。所有索引（向量、全文、图）是 gitignored 派生制品，可随时从 md 重建。不可用时系统降级但不失效。
 
 ### 5.2 存储拓扑
 
 ```
-源真层（SoT，git tracked）                派生索引层（gitignored，可重建）
+源真层（git tracked）                      派生索引层（gitignored，可重建）
 ─────────────────────────────          ──────────────────────────────
 
 project/                                .pensieve/.index/
   <project>/.pensieve/                    ├── graph.json
-    ├── maxims/                           ├── vectors.db (optional)
-    ├── decisions/                        └── fulltext.db (optional)
-    ├── knowledge/
-    ├── staging/                        ~/.abrain/.state/index/
-    ├── archive/                          ├── graph.json
-    ├── raw/                              ├── vectors.db (optional)
-    ├── _index.md                         └── fulltext.db (optional)
-    └── schemas/relations.yaml
-
-world/
-  ~/.abrain/
+    ├── maxims/                           └── fulltext.db (optional)
+    ├── decisions/
+    ├── knowledge/                      ~/.abrain/.state/index/
+    ├── staging/                          ├── graph.json
+    ├── archive/                          └── fulltext.db (optional)
+    ├── raw/
+    ├── _index.md                       .pensieve/.state/
+    └── schemas/relations.yaml            ├── health-report.md
+                                          ├── lint-report.md
+world/                                    ├── sediment-events.jsonl
+  ~/.abrain/                              └── locks/
     ├── maxims/
-    ├── patterns/
-    ├── anti-patterns/
-    ├── facts/
-    ├── staging/
-    ├── archive/
+    ├── patterns/                       ~/.abrain/.state/
+    ├── anti-patterns/                    ├── health-report.md
+    ├── facts/                            ├── lint-report.md
+    ├── staging/                          ├── sediment-events.jsonl
+    ├── archive/                          └── locks/
     ├── raw/
     ├── _index.md
     └── schemas/relations.yaml
 ```
 
-### 5.3 Facade 模式
+### 5.3 `memory_search` 算法规格
+
+**hybrid = BM25 关键词 + (可选) 向量语义，RRF 融合，grep fallback。**
 
 ```
-                        LLM Tools
-                  memory_search | memory_get | memory_list
-                              │
-                        Memory Facade
-                    (路由、归并、排序、去重、degrade)
-                     /                    \
-            ProjectStore               WorldStore
-    (rg + optional index)         (rg + optional index)
-    ── <project>/.pensieve/       ── ~/.abrain/
+memory_search(query):
+  1. 并发查询 ProjectStore + WorldStore
+  2. 每个 store:
+     a. 如果向量索引可用 → 向量语义搜索（top-50）
+     b. 始终运行 BM25 关键词搜索（ripgrep + 简单 tf-idf）
+     c. RRF 融合 a + b（向量不可用时仅 BM25）
+  3. Facade 合并两 store 结果：
+     a. 统一格式：{ slug, title, summary, score, scope, kind, status, confidence, backend, degraded? }
+     b. 排序：textScore × projectBoost(项目级当前project加权1.5) × log(1+citations) × (confidence/10)
+     c. 过滤：默认排除 status=archived
+     d. 截断：top-20
+  4. 返回结果始终标注 backend 来源（'rg' | 'vector'），但按统一 ranking 排序
 ```
 
-```typescript
-async function search(query: string, ctx: SessionContext): Promise<SearchResult[]> {
-  const [projectResults, worldResults] = await Promise.all([
-    projectStore.search(query),
-    worldStore.search(query),
-  ]);
-  return rrfMerge([projectResults, worldResults])
-    .map(r => ({ ...r, finalScore: r.score * projectBoost * Math.log(1 + r.citations) * (r.confidence/10) }))
-    .filter(r => r.status !== 'archived')
-    .sort((a, b) => b.finalScore - a.finalScore)
-    .slice(0, 20);
-}
-```
-
-### 5.4 ~/.abrain 设计（决策 3）
-
-独立 git 仓库（private），`ABRAIN_ROOT` 环境变量引用。
-
-| 维度 | `.pensieve/` (project) | `~/.abrain/` (world) |
-|------|------------------------|---------------------|
-| scope | 本项目特定 | 跨项目通用 |
-| 判断标准 | 离开当前 repo 不成立 | 换完全不同的项目仍然成立 |
-| 示例 | "本项目用 pnpm" | "argv 传 long prompt 用 @file" |
-
-**写入决策树**：
-
-```
-洞察 P 引用了具体文件路径/模块名/API？
-├─ 是 → 写 .pensieve/
-└─ 否 → ≥2 个不同项目验证过？
-        ├─ 是 → 写 ~/.abrain/
-        └─ 否 → 写 ~/.abrain/staging/，等第二次命中
-```
-
-### 5.5 Graph 派生索引（决策 5）
-
-`graph.json` 从 markdown 确定性构建，gitignored：
+每个结果格式：
 
 ```json
 {
-  "nodes": { "<slug>": { "scope": "...", "kind": "...", "status": "..." } },
-  "edges": [
-    { "from": "a", "to": "b", "type": "relates_to", "source": "frontmatter" }
-  ],
-  "stats": { "orphans": [...], "dead_links": [...] }
+  "slug": "world:avoid-long-argv-prompts",
+  "title": "Avoid Long argv Prompts",
+  "summary": "传给子进程的 prompt 应通过 @file 传递...",
+  "score": 0.87,
+  "scope": "world",
+  "kind": "pattern",
+  "status": "active",
+  "confidence": 8,
+  "backend": "rg",
+  "degraded": false,
+  "source_path": "~/.abrain/patterns/avoid-long-argv-prompts.md",
+  "related_slugs": ["world:use-at-file-input"]
 }
 ```
 
-CLI 命令：
+**LLM 不直接看到 `scope`（按 §3.2 原则不要求 LLM 判断 scope），但 scope 字段存在——用于 ranking 层的 project boost 和 Facade 路由。**
+
+### 5.4 Facade 模式
+
+```
+                        LLM Tools
+                  memory_search | memory_get | memory_list | memory_neighbors
+                              │
+                        Memory Facade
+                    (路由、归并、RRF 融合、排序、degrade)
+                     /                    \
+            ProjectStore               WorldStore
+    (rg + optional qmd/vector)    (rg + optional qmd/vector)
+    ── <project>/.pensieve/       ── ~/.abrain/ (ABRAIN_ROOT)
+```
+
+- 不统一 `KnowledgeStorage` interface（不同后端的 grep vs vector 能力曲线不同）
+- Facade 负责超时（单 store 3s timeout）、partial result（一个 store 超时另一个仍返回，标注 degraded）、backend 标注
+- ABRAIN_ROOT 未设置或 ~/.abrain 不存在时 → WorldStore 空结果，degraded 标注，不报错
+
+### 5.5 ~/.abrain 设计（决策 3）
+
+独立 git 仓库（private），`ABRAIN_ROOT` 环境变量引用（默认 `~/.abrain`）。
+
+| 时机 | 动作 |
+|---|---|
+| 机器启动 / session 开始 | `git pull --rebase --autostash` |
+| sediment 写完一条 | `git add . && git commit -m "abrain: <slug>"`（不 auto push） |
+| 会话结束 | 安全脚本：`pull --rebase --autostash && push` |
+| 冲突 | 不自动解决，pending 等人工 |
+
+### 5.6 Graph 派生索引（决策 5）
+
+`graph.json` 从 markdown 确定性构建（post-commit hook 增量重建，缺失时当场 grep）：
+
+```json
+{
+  "built_at": "...", "git_head": "abc123",
+  "nodes": { "<slug>": { "scope": "...", "kind": "...", "status": "...", "title": "..." } },
+  "edges": [
+    { "from": "a", "to": "b", "type": "relates_to", "source": "frontmatter" }
+  ],
+  "stats": { "node_count": 320, "edge_count": 614, "orphans": [...], "dead_links": [...] }
+}
+```
+
+CLI 命令（全部只读，写操作由 sediment 代理）：
 
 ```bash
-pi memory check-backlinks [--fix]     # 反向链接完整性（仅 symmetric）
-pi memory graph <slug> --depth 2      # 图遍历
-pi memory neighbors <slug> --hop 1    # 邻居快照
-pi memory doctor                      # 健康评分
+pi memory check-backlinks       # 反向链接完整性（仅 symmetric 类型），只报告不修改
+pi memory graph <slug> -d 2     # 图遍历（返回缩进边树）
+pi memory neighbors <slug>      # 1 跳邻居，供 memory_get include_related 使用
+pi memory doctor                # 健康评分
 ```
 
 ---
 
 ## 6. Memory 工具接口
 
-### 6.1 读工具（统一接口，不暴露 scope）
+### 6.1 读工具（主 session + dispatch 子进程可调用）
 
 ```
-memory_search(query, filters?)  → SearchResult[] { slug, title, summary, score, scope, kind, status, backend, degraded?, related_slugs }
-memory_get(slug, options?)      → KnowledgeEntry (完整内容 + 关联摘要)
-memory_list(filters?)           → { entries: EntryMeta[], next_cursor? }
-memory_relate(from, to, rel)    → void  (声明关系，sidecar 处理)
+memory_search(query: string, filters?: { kinds?, status?, limit? })
+  → SearchResult[] { slug, title, summary, score, scope, kind, status,
+                     confidence, backend, degraded?, source_path, related_slugs }
+  // 默认搜索当前 project + world；scope/kinds 过滤为可选参数
+
+memory_get(slug: string, options?: { include_related?: boolean })
+  → KnowledgeEntry { ...full entry including timeline }
+
+memory_list(filters: { scope?, kind?, status?, limit?, cursor? })
+  → { entries: EntryMeta[], next_cursor? }
+  // 分页浏览，主要用于人工调试
+
+memory_neighbors(slug: string, options?: { hop?: number, max?: number })
+  → { slug, title, kind, edge_type }[]
+  // 只读图遍历，不写任何关系（替代原名 memory_relate 的读语义）
 ```
 
-### 6.2 写工具（仅 sediment 可见）
+### 6.2 写工具（仅 sediment sidecar 可见）
 
 ```
-memory_write(entry, dest)  → { slug, status }
-memory_update(slug, patch)
-memory_deprecate(slug, reason)
-memory_promote(slug, 'world')  → { promoted, gates_passed[] }
+memory_write(entry, destination: 'project' | 'world')
+  → { slug, status: 'created' | 'merged' | 'rejected', reason? }
+
+memory_update(slug, patch: Partial<KnowledgeEntry>)
+  → void
+
+memory_deprecate(slug, reason, superseded_by?)
+  → void
+
+memory_promote(slug, target_scope: 'world')
+  → { slug, promoted: boolean, gates_passed: string[] }
+
+memory_relate(from_slug: string, to_slug: string, relation: string)
+  → void
+  // 声明关系并写入 frontmatter（写操作，仅 sediment）
 ```
 
 ---
@@ -335,112 +377,286 @@ memory_promote(slug, 'world')  → { promoted, gates_passed[] }
 
 ### 7.1 三层注入
 
-| 注入位置 | 内容 | 预算 |
-|---|---|---|
-| **System Prompt (T1)** | ≤5 条 maxims + `_index.md` catalogue | ≤2K tokens |
-| **Tool Retrieval (T2)** | 按需 search → get | ≤6K tokens/轮 |
-| **Passive Nudge (T3)** | trigger phrase 匹配推送 | ≤300 tokens/轮 |
+| 注入位置 | 内容 | 预算 | 选择算法 |
+|---|---|---|---|
+| **System Prompt (T1)** | ≤5 条当前 project maxims + `_index.md` 摘要 | ≤2K | 最近更新 + 最高 confidence，project 优先 |
+| **Tool Retrieval (T2)** | 按需 `memory_search` → `memory_get` | ≤6K/轮 | LLM 自行决定检索 |
+| **Passive Nudge (T3)** | trigger phrase 匹配推送 | ≤300/轮 | 每轮 agent_end 匹配，去重，最多 3 条 |
 
-### 7.2 被动回忆
+### 7.2 冲突裁决
 
-每条 world knowledge 带 `trigger_phrases`。agent 发言命中 → 自动推送 summary。解决"不会 search 不知道存在的东西"。
+同一知识出现在 T1 和 T2 → T2 结果优先（更新鲜）。project 与 world 矛盾 → project 优先（更具体、更近）。但若有 `contested` 标记 → 两者都暴露给 LLM，让它自行判断。
+
+### 7.3 被动回忆（Passive Nudge）
+
+每条知识带 `trigger_phrases: string[]`。sidecar 在 agent_end 后检测 agent 发言是否包含精确子串匹配任一 trigger phrase。命中 → 注入 summary 到下一轮 T3。每轮最多 3 条，同一条 24h 内不重复推送。中文和英文 trigger phrases 平等对待（均为子串匹配）。
 
 ---
 
-## 8. 读写分离
+## 8. 读写分离与 Sediment 行为规范
+
+### 8.1 权限表
 
 | 角色 | 读 | 写 project | 写 world |
 |---|---|---|---|
-| 主 session | ✅ | ❌ | ❌ |
+| 主 session agent | ✅ | ❌ | ❌ |
 | dispatch 子进程 | ✅ | ❌ | ❌ |
 | sediment sidecar | ✅ | ✅ | ✅ (with gates) |
+| 用户显式 `/skill:pensieve` | ✅ | 发起 intent 请求 | 发起 intent 请求 |
 
-- 写入路由 fail-closed：无法确定 target project → 不写
-- File lock 保证单写入者
+### 8.2 Sediment 触发与决策逻辑
+
+```
+agent_end 事件
+  ↓
+sediment 读取本轮完整 transcript（工具调用 + LLM 输出 + 用户消息）
+  ↓
+extract: 从 transcript 识别潜在洞察（LLM prompt: "本轮对话中有无值得持久化的知识？"）
+  ↓
+classify: 为每个候选判定 scope(project/world) + kind + confidence
+  ↓
+dedupe: memory_search 查询已有条目，计算语义相似度
+  ↓
+  ├─ 相似度 > 0.85 → merge：更新已有条目 compiled_truth + 追加 timeline
+  └─ 相似度 < 0.85 → create：写入新条目
+  ↓
+sanitize: 过 redactor（credential/IP/路径脱敏）
+  ↓
+lint: 内存中校验 frontmatter schema + timeline 格式
+  ↓
+acquire lock: 获取对应 scope 的 file lock（`.state/locks/sediment.lock`）
+  ↓
+write: 原子写入 markdown 文件（先写 tmp，再 rename）
+  ↓
+git: git add + git commit（不 auto push）
+  ↓
+index: 增量更新 graph.json（新增/修改的条目）
+  ↓
+release lock
+  ↓
+audit: 追加 sediment-events.jsonl
+```
+
+**写入决策树（project vs world）**：
+
+```
+新洞察 P：
+
+P 引用了具体文件路径 / 模块名 / API 名？
+├─ 是 → scope: project
+└─ 否 → P 在 ≥2 个不同领域的 project 中出现过？
+        ├─ 是 → scope: world（直接写 maxims/patterns/anti-patterns）
+        └─ 否 → scope: world, status: provisional, 写入 staging/
+```
+
+**Transaction 边界**：每个条目一次 git commit。多个条目可合并 commit。写入先写 tmp 文件再 rename（原子操作）。graph.json 写入也先 tmp 再 rename。任何步骤失败 → 回滚 markdown 写入（删除 tmp），不提交 git，不更新 graph.json。
+
+### 8.3 错误处理与恢复
+
+| 场景 | 行为 |
+|---|---|
+| Markdown 解析失败 | 记录 `sediment-events.jsonl`，跳过该条目，不阻断其他条目 |
+| Git 仓库不存在 | 跳过 git 操作，仅写 markdown + graph.json |
+| Git push 冲突 | 保留本地 commit，标记 pending，不下次写入前先 pull --rebase |
+| Lock 获取超时（>5s） | 退化为只读 + 入队 pending queue（`.state/locks/pending.jsonl`），下次 session 重试 |
+| 磁盘满 / 权限错误 | 记录错误到 sediment-events.jsonl，通知主 session（ui.notify） |
+| 写入中途崩溃 | tmp 文件残留，下次启动时清理 `.tmp-*` 文件；graph.json 从 markdown 全量重建 |
+| ABRAIN_ROOT 未设置 | WorldStore 空返回；写入 world 的 attempt 自动转为 project staging |
+| `.index/` 与 markdown 不一致 | 查询时检测 `git_head` ≠ HEAD → lazy rebuild，结果标注 `degraded: false`（已自动新鲜） |
+| 脱敏规则误伤 | 拒绝写入（fail-closed），人工通过直接编辑 markdown 恢复 |
+
+### 8.4 可观测性
+
+`sediment-events.jsonl`（gitignored）记录每次写入：
+
+```json
+{
+  "timestamp": "2026-05-07T08:30:00Z",
+  "session_id": "sess-abc123",
+  "operation": "create",
+  "target": "project:avoid-long-argv",
+  "model": "claude-opus-4-7",
+  "lint_result": "pass",
+  "git_commit": "abc123",
+  "dedupe_score": 0.32,
+  "duration_ms": 2340
+}
+```
 
 ---
 
 ## 9. 演化机制
 
-### Promotion（决策 1、决策 5）
+### 9.1 Promotion（Project → World）
 
 ```
-project knowledge
-  → Gate 1: 去上下文化 → Gate 2: 跨实例验证 → Gate 3: 反例检查
-  → Gate 4: 冷却期(≥3d) → Gate 5: 冲突检查
-  → promoted: world scope, confidence ≥ 7
+project knowledge (status: active)
+    ↓
+Gate 1: 去上下文化检查
+  → sediment 重写 compiled_truth，去掉项目名、路径、技术栈
+  → 存储：检出条目的 compiled_truth 副本，对照 schemas/decontextualized-check.md 规则
+    ↓
+Gate 2: 跨实例验证
+  → 同一 insight 在 ≥2 个独立 project 的 `.pensieve/` 中被 sediment 引用或写入过
+  → 存储：graph.json 中搜索 derives_from 或 similar slug
+    ↓
+Gate 3: 反例检查
+  → sediment 用 LLM 搜索：是否存在该 maxim 不成立的场景？
+  → 存储：如有反例 → 写入 boundaries 字段
+    ↓
+Gate 4: 冷却期
+  → 从首次 capture 起 ≥ 3 天
+  → 存储：timeline 首行日期 vs 当前日期
+    ↓
+Gate 5: 冲突检查
+  → memory_search 查询已有 world 条目，语义相似度 > 0.7 的逐一比对
+  → 如冲突 → 旧条目标 contested，新条目标 contested 互相 link
+  → 如一致 → promote
+    ↓
+promoted → scope: world, confidence: +2, status: active
+  → world 条目 timeline: "2026-05-09 | sess-ghi | promoted | project→world [promoted]"
+  → project 原条目：保留，追加 timeline "[promoted_to world:<slug>]"，不删除
 ```
 
-每次演化事件追加 timeline 行（决策 5）：
-```
-- 2026-05-09 | sess-ghi | promoted | project→world [promoted]
+**Gate 结果存储**：promotion 状态写在新 world 条目的 frontmatter 中：
+
+```yaml
+promotion:
+  source_entry: project:avoid-long-argv
+  gates:
+    decontextualized: pass
+    cross_instance: pass  # 2 projects
+    counterexamples: pass  # boundaries added
+    cooling_until: 2026-05-09
+    conflict_check: pass  # no conflicts
+  completed_at: 2026-05-09
 ```
 
-### Deprecation & Specialization
+### 9.2 Deprecation & Specialization
 
-- 被证伪 → deprecated + superseded_by（不降级）
-- 条件约束 → specialization（加 boundaries，不降级）
+- 被证伪 → `status: deprecated` + `superseded_by: <new-slug>`（不删除，保留历史）
+- 条件约束 → specialization（加 boundaries 字段，不改变 scope）
+- 不存在 World → Project 降级
 
 ---
 
 ## 10. 治理
 
-### Lint & Health Pipeline（决策 4、决策 5）
+### 10.1 Lint & Health Pipeline
 
-| 工具 | 时机 | 检查内容 |
-|------|------|---------|
-| `pi memory lint` | git pre-commit | timeline 格式 (T1-T7) + frontmatter schema |
-| `pi memory check-backlinks` | pre-commit / cron | symmetric 类型反向链接完整性 |
-| `pi memory doctor` | 每日 cron | 5 维 health score → report |
+| 工具 | 时机 | 范围 |
+|------|------|------|
+| `memory lint` | sediment 写后 + git pre-commit | timeline 格式 (7 rules) + frontmatter schema |
+| `memory check-backlinks` | CI / 每日 cron | 仅 symmetric 类型反向链接 |
+| `memory doctor` | 每周 cron | 健康评分 → `.state/health-report.md` |
 
-**5 维 Health Score**：
+**7 条 Lint 规则（T1-T7）**：
+
+| 规则 | 检测内容 | 严重度 |
+|------|---------|--------|
+| T1 `timeline-heading-present` | 条目文件必须包含 `## Timeline` 且为最后一个 H2 | ERROR |
+| T2 `timeline-heading-unique` | 文件中恰好一个 `## Timeline` | ERROR |
+| T3 `no-headings-in-timeline` | Timeline 之后不能有 `#`/`##`/`###` | ERROR |
+| T4 `timeline-bullet-format` | Timeline 每行必须是 `- YYYY-MM-DD \| ...` 格式 | WARNING |
+| T5 `timeline-chronological` | Timeline 条目按日期升序 | WARNING |
+| T6 `timeline-not-empty` | Timeline 至少一行记录 | WARNING |
+| T7 `frontmatter-required` | 必须有 `id`/`scope`/`kind`/`created`/`schema_version` | ERROR |
+
+### 10.2 Health 评分（避免腐烂，不追完备）
+
+与 §4.6 "拒绝完备性" 对齐——评分衡量**避免腐烂**，不衡量**正向覆盖率**：
 
 | 指标 | 权重 | 算法 |
 |------|------|------|
-| timeline_coverage | 30% | 含 timeline 条目数 / 总数 |
-| link_density | 25% | clamp(avg_degree / 2.0, 0, 1) |
-| orphan_avoidance | 20% | 1 - 零链节点数 / 总节点数 |
-| dead_link_avoidance | 15% | 1 - 死链数 / 总链接数 |
-| staging_freshness | 10% | 1 - p90(staging age) / 30d |
+| `dead_link_rate` | 30% | 1 - 死链数/max(总链接数, 1) |
+| `orphan_rate` | 25% | 1 - 零链节点数/总节点数 |
+| `staging_freshness` | 20% | 1 - p90(staging age)/90d |
+| `conflict_rate` | 15% | 1 - contested条目数/总条目数 |
+| `schema_validity` | 10% | lint 通过的条目数/总条目数 |
 
-### 安全脱敏
+**不包含** timeline_coverage（避免逼着补全旧条目）和 link_density（避免滥加链接）。
 
-sediment 写入前过 redactor：credential → `[REDACTED]`，绝对路径 → `$HOME/...`，token → 拒绝写入。
+CI gate：`dead_link_rate < 1.0` → fail（不允许死链）。其余指标只 warn，不阻塞。
+
+### 10.3 安全脱敏
+
+sediment 写入前执行（§8.2 sanitize 阶段），**写前脱敏**：
+
+| 模式 | 处理 |
+|---|---|
+| credential 字符串（匹配 API key / token 模式） | 整条写入拒绝，记录 warn |
+| IP 地址 / 内部 hostname | 替换为 `[HOST]` |
+| 绝对路径含 $HOME | 替换为 `$HOME/...` |
+| 客户名 / 公司名（world promotion 时） | 替换为 `[ENTITY]` 或去标识化 |
+| email 地址 | 替换为 `[EMAIL]` |
+
+写前脱敏意味着**存储中无明文敏感信息**，git push 不会泄漏。原始信息在 session transcript 中（不持久化），需要时从 transcript 回溯。
+
+### 10.4 迁移策略
+
+Phase 1 实施从旧 `.pensieve/` 格式到新格式的迁移：
+
+```bash
+pi memory migrate [--dry-run]
+```
+
+- 识别旧格式条目：无 `schema_version` 或无 `---` 分隔符
+- 自动映射：旧 `short-term/` → 条目移入同级目录 + `lifetime.kind: ttl` + `lifetime.expires_at` 
+- 缺失 timeline：迁移时生成初始 timeline 行 `- <now> | migrate | migrated from legacy format`
+- 迁移结果输出到 `.state/migration-report.md`
+- 支持 `--dry-run` 预览
+- migration 前自动 git commit 当前状态（可回滚）
+- Phase 1 结束后旧格式条目全部迁移完毕，doctor 对旧格式报错（不再只是 warn）
 
 ---
 
 ## 11. 实现路线图
 
-### Phase 1：Project 层 + 格式标准化
+### Phase 1：Project 层 + 格式标准化（MVP）
 
-- Markdown 条目 compiled truth + timeline 双段格式（决策 5）
-- `memory_search / get / list` grep-based 实现
-- `_index.md` 自动生成（决策 4）
-- `pi memory lint` 7 条校验规则（决策 5）
+**验收标准**：
+- [ ] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）
+- [ ] 7 条 Lint 规则实现（T1-T7），CI pre-commit hook 集成
+- [ ] 旧格式迁移工具 `pi memory migrate` 完成，现有 `.pensieve/` 全部迁移
+- [ ] `memory_search` grep-based 实现（keyword + BM25，无向量；仅 project 层）
+- [ ] `memory_get` / `memory_list` 实现
+- [ ] `_index.md` 自动生成（sediment 写入后）
+- [ ] graph.json 构建脚本 + `memory check-backlinks`（只读报告）
+- [ ] Sediment 行为规范完整实现（§8.2 全部步骤）
+- [ ] Project scope 的 file lock + 错误恢复
+
+**不包含**：World 层、向量搜索、promotion gates、passive nudge
 
 ### Phase 2：World 层接入
 
-- `~/.abrain/` 落地，`ABRAIN_ROOT` 支持（决策 3）
-- Memory Facade 跨 store + graceful degradation
-- Trigger phrases + passive nudge 机制
-- `graph.json` rebuild + check-backlinks（决策 5）
+- [ ] `~/.abrain/` 目录结构落地，独立 git repo
+- [ ] `ABRAIN_ROOT` 环境变量支持，默认 `~/.abrain`
+- [ ] Memory Facade 跨 store dispatch + graceful degradation（WorldStore 不存在不报错）
+- [ ] `memory_search` 同时检索 project + world
+- [ ] Sediment world lane（world 写入路径，决策树 logic）
+- [ ] World scope 的 file lock（独立于 project lock）
+- [ ] Promotion gate 1-5 实现（LLM judge 模式）
+- [ ] 跨机器同步脚本（session 启动 pull，session 结束 push）
 
-### Phase 3：派生索引 + Health
+### Phase 3：派生索引 + Health + 查询反哺
 
-- qmd 可选本地搜索后端接入（决策 4）
-- `pi memory doctor` 健康面板
-- 查询反哺闭环（决策 4）
+- [ ] qmd 可选本地搜索后端接入（BM25 + 向量 + LLM rerank）
+- [ ] `memory doctor` 健康评分（5 指标，cron 每周）
+- [ ] 查询反哺闭环：sediment 检测本 session 的知识应用 → 追加 `[applied]` timeline 行
+- [ ] Trigger phrases + passive nudge 机制
+- [ ] Sediment-events.jsonl 可观测性面板
 
 ### Phase 4：治理
 
-- 冲突检测 + contested 状态
-- 引用热度排序
-- 脱敏 pipeline
+- [ ] 冲突检测 + contested 状态自动标记
+- [ ] graph.json 引用热度参与 search ranking
+- [ ] 安全脱敏完整 pipeline（写前脱敏，多模式 redact）
+- [ ] 审计 dashboard（sediment-events 可视化）
 
-### Phase 5：Session 层
+### Phase 5：Session 层（可选）
 
-- Session scratchpad API
-- Cross-session 分析 pass
+- [ ] Session scratchpad API（零摩擦写入，会话结束蒸发）
+- [ ] Cross-session 分析 pass（每周，寻找未沉淀的重复洞察）
 
 ---
 
@@ -449,18 +665,20 @@ sediment 写入前过 redactor：credential → `[REDACTED]`，绝对路径 → 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                    Agent / LLM                       │
-│          memory_search()  │  memory_get()            │
+│     memory_search()  │  memory_get()                 │
+│     memory_list()    │  memory_neighbors()           │
 └────────────────────────┬────────────────────────────┘
                          │
               ┌──────────▼──────────┐
               │   Memory Facade     │
-              │  路由 · 归并 · 排序   │
+              │  路由 · RRF 融合 · 排序 │
               │  Graceful Degrade   │
+              │  Backend Provenance │
               └────┬──────────┬─────┘
                    │          │
     ┌──────────────▼──┐  ┌───▼──────────────┐
     │  grep backend   │  │  qmd/vector      │  ← 可选派生索引
-    │  (rg over md)    │  │  (embedding idx) │
+    │  (rg + BM25)    │  │  (embedding idx) │
     └──────┬──────────┘  └───┬──────────────┘
            │                 │
     ┌──────▼─────────────────▼──────────────┐
@@ -469,46 +687,32 @@ sediment 写入前过 redactor：credential → `[REDACTED]`，绝对路径 → 
     │  world/     ~/.abrain/**               │
     │  (markdown + git, 人类可读, 离线可用)   │
     └────────────────────────────────────────┘
+
+写入路径（仅 sediment）:
+  agent_end → extract → classify → dedupe → sanitize
+  → lint → lock → write md → git commit → index → unlock → audit
 ```
 
 ---
 
-## 附录 B：T0 讨论分析（按决策组织）
+## 附录 B：T0 分析摘要（按决策组织）
 
-### B.1 决策 1 分析：short-term 的定位
+### B.1 决策 1：short-term 的定位
 
-**结论**：short-term 不作为 scope 第四层。用 2×2 矩阵验证正交性：
+short-term 不作为 scope 第四层。改为 lifetime 属性（kind: permanent | ttl | event | review），GC 为独立 pipeline。与 scope 正交。
 
-| scope \ lifetime | permanent | ephemeral |
-|---|---|---|
-| Session | ❌ | ✅ |
-| Project | ✅ | ✅ |
-| World | ✅ | ✅ |
+### B.2 决策 2+3：gbrain vs markdown + ~/.abrain
 
-六个有效象限。若把 short-term 当 scope 层，会丢失"world 级临时暂存"这个关键需求。改为 lifetime 属性：`kind: permanent | ttl | event | review`，GC 作为独立 pipeline。
+12 维度多模型评估：gbrain 在检索质量上占优，但 md+git 在离线可用、版本控制、人类可编辑、零搭建、零锁定、跨机器同步等维度结构性占优。gbrain 的优势可通过派生索引获得。
 
-### B.2 决策 2+3 分析：gbrain vs markdown + ~/.abrain
+### B.3 决策 5：Timeline + Graph 的 Markdown 实现
 
-**多维度评估**：gbrain 在检索质量（语义向量+图查询）和 AI 原生特性上占优，但 md+git 在离线可用、版本控制、人类可编辑、零搭建、零锁定风险、跨机器同步等维度上结构性占优。且 gbrain 的优势可通过派生索引获得。
+借鉴 gbrain 的 Above/Below the Line 模式：`## Timeline` 作为最后一个 H2，append-only。7 条确定性 lint 规则。Graph 作为 `graph.json` 派生索引（gitignored），从 frontmatter + wikilink 提取边。
 
-**混合方案 C（推荐）**：md 做主存储 + 派生向量/图索引。索引 gitignored 可重建；不可用时 fallback 到 grep。
+### B.4 决策 4：Karpathy LLM Wiki 方法论
 
-**~/.abrain**：独立 git repo，`ABRAIN_ROOT` 环境变量引用（不用 submodule/symlink）。append-only timeline 段减少 git merge 冲突。
+核心哲学完全一致（markdown=源真、LLM=编译器）。补齐三个缺口：Lint & Maintain、查询反哺闭环、Index 文件自动生成。qmd 作为 Facade 下可选搜索后端。
 
-### B.3 决策 5 分析：Timeline + Graph 在 Markdown 中的实现
+### B.5 完备性审查（第五轮 T0）
 
-**Timeline**：`---`（triple-hr）作为 compiled_truth 与 timeline 的硬分隔符。7 条 lint 规则（T1-T7），零 LLM 调用：triple-hr 存在性、唯一性、无标题泄漏、bullet 格式、日期顺序、非空、frontmatter 完整。T3（无标题泄漏）是关键安全规则。
-
-**Graph**：三个边来源——frontmatter 关系字段（强类型）、正文 wikilink（弱类型）、代码引用（可选）。图作为 `graph.json` 派生索引。关系分 symmetric（需双向一致）、asymmetric（反向边只在索引）、body_links（wikilink 默认）。回溯链、N 跳遍历、反向链接检查均从 graph.json 确定性计算。
-
-**Health**：5 指标加权，纯 ripgrep + jq 脚本。timeline_coverage 作为渐进指标（新条目强制，旧条目报告不阻断）。CI 硬错误阻塞 dead link；cron 每日全量 doctor。
-
-### B.4 决策 4 分析：Karpathy LLM Wiki 方法论
-
-**契合度**：markdown=源真、LLM=维护者、编译真相等核心理念完全一致。**真正缺口**：Lint & Maintain 阶段、查询反哺闭环、Raw Sources 层。
-
-**引入的修改**：sediment-lint 定期健康检查；知识应用追踪（timeline 追记 `[applied]`）；`_index.md` 自动生成；`raw/` 目录渐进引入。
-
-**qmd 定位**：作为 Facade 下可选后端，本地 BM25+向量+LLM Rerank。不能替代 scope 路由、图查询、sediment 写入。
-
-**向量索引调整**：Pensieve 层不做向量索引。World 层向量搜索降为可选（2,000 条目以下标注"不需要"）。
+主要修补：`memory_relate` 移到写工具并补充 `memory_neighbors` 读工具；Sediment 行为规范从黑盒到完整 10 步 pipeline；`memory_search` 算法从"hybrid"到 BM25+向量 RRF 规格；Health Score 从正向覆盖率改为腐烂避免指标；补充错误恢复矩阵、审计日志、迁移策略。
