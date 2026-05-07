@@ -168,6 +168,7 @@ const INJECT_MARKER = "<!-- pi-model-curator: capability snapshot -->";
 function buildAvailableModelsBlock(
   reg: { getAvailable(): Model<Api>[]; getAll(): Model<Api>[] },
   hints: Record<string, string>,
+  curatedProviders: Set<string>,
   imageGen?: Record<string, string>,
 ): string | null {
   const all = reg.getAvailable ? reg.getAvailable() : reg.getAll();
@@ -177,9 +178,15 @@ function buildAvailableModelsBlock(
   for (const m of all) {
     const key = `${m.provider}/${m.id}`;
     const hint = hints[key];
-    if (!hint) continue;
+    const isCurated = curatedProviders.has(m.provider);
+
+    // Curated provider: only include explicitly hinted models (whitelist).
+    // Uncurated provider (e.g. github-copilot): inject raw — list every
+    // available model so the main session knows it can dispatch them.
+    if (isCurated && !hint) continue;
+
     const arr = byProvider.get(m.provider) ?? [];
-    arr.push({ m, hint });
+    arr.push({ m, hint: hint ?? "" });
     byProvider.set(m.provider, arr);
   }
   if (byProvider.size === 0) return null;
@@ -187,22 +194,30 @@ function buildAvailableModelsBlock(
   const lines: string[] = [
     "## Available models (curated by pi-astack/model-curator)",
     "",
-    "These are the ONLY chat models currently available. When dispatching " +
-      "sub-agents (dispatch_agent/dispatch_agents) or selecting a model for any " +
-      "task, choose from this list based on role fit. Diversity across " +
-      "providers usually beats stacking the same family.",
+    "Chat models currently available for dispatch. Sections marked **curated** " +
+      "have been hand-picked + annotated; sections marked **raw** are passed " +
+      "through from pi's registry untouched (no obsolete-model filtering, no " +
+      "hints). When choosing a model, diversity across providers usually beats " +
+      "stacking the same family.",
     "",
   ];
 
   const providerOrder = ["anthropic", "openai", "deepseek"];
-  const sorted = [
-    ...providerOrder.filter((p) => byProvider.has(p)),
-    ...[...byProvider.keys()].filter((p) => !providerOrder.includes(p)),
+  const curatedFirst = [
+    ...providerOrder.filter((p) => byProvider.has(p) && curatedProviders.has(p)),
+    ...[...byProvider.keys()].filter(
+      (p) => !providerOrder.includes(p) && curatedProviders.has(p),
+    ),
   ];
+  const rawAfter = [...byProvider.keys()]
+    .filter((p) => !curatedProviders.has(p))
+    .sort();
+  const sorted = [...curatedFirst, ...rawAfter];
 
   for (const prov of sorted) {
     const entries = byProvider.get(prov)!;
-    lines.push(`### ${prov}`);
+    const tag = curatedProviders.has(prov) ? "curated" : "raw";
+    lines.push(`### ${prov} _(${tag})_`);
     lines.push("");
     lines.push("| model | reasoning | image-in | $/1M in | hint |");
     lines.push("|---|---|---|---|---|");
@@ -230,9 +245,10 @@ function buildAvailableModelsBlock(
     "**Selection guidance.** When choosing models: (1) prefer DIFFERENT " +
       "providers across roles to diversify reasoning failure modes; (2) match " +
       "capability to need — don't pay for opus on one-line classification; " +
-      "(3) for vision tasks, pick a model with `image-in: ✓`; (4) the curator " +
-      "has already removed obsolete models, so any name in the table above is " +
-      "safe to dispatch.",
+      "(3) for vision tasks, pick a model with `image-in: ✓`; (4) for **curated** " +
+      "sections any listed name is safe to dispatch (obsolete models already " +
+      "removed); (5) for **raw** sections (e.g. github-copilot) pi exposes its " +
+      "full model list — prefer the newest non-preview entries.",
   );
 
   if (imageGen && Object.keys(imageGen).length > 0) {
@@ -310,7 +326,10 @@ export default function (pi: ExtensionAPI) {
     if (current.includes(INJECT_MARKER)) return undefined;
 
     const cfg = resolveConfig();
-    const block = buildAvailableModelsBlock(reg, cfg.hints, cfg.imageGen);
+    const curatedProviders = new Set(Object.keys(cfg.providers));
+    const block = buildAvailableModelsBlock(
+      reg, cfg.hints, curatedProviders, cfg.imageGen,
+    );
     if (!block) return undefined;
 
     return {
