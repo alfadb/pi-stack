@@ -336,6 +336,8 @@ echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
 - Gate 4: 冷却期（≥3 天）
 - Gate 5: 冲突检查（trigram Jaccard ≥0.7）
 
+**状态（2026-05-08）**：详细设计稿落在 [`phase-2.3-promotion-gates.md`](./phase-2.3-promotion-gates.md)，含 5 gate 算法 / 命令 surface / 文件流 / frontmatter / audit schema / 锁 / 工作量 / 10 个开放问题 + 顺序建议。等 Phase 1.4 burn-in 数周稳定后 + Q1-Q10 用户拍板后实施。
+
 ---
 
 ## Phase 3：qmd 集成
