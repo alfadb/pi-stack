@@ -9,26 +9,27 @@
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { resolveSedimentSettings } from "./settings";
-import { writeProjectEntry } from "./writer";
+import { buildRunWindow, checkpointSummary, loadCheckpoint } from "./checkpoint";
+import { appendAudit, writeProjectEntry } from "./writer";
 
 function registerSedimentCommand(pi: ExtensionAPI) {
   const maybePi = pi as unknown as {
     registerCommand?: (name: string, options: {
       description?: string;
       getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null;
-      handler: (args: string, ctx: { cwd?: string; ui: { notify(message: string, type?: string): void } }) => Promise<void> | void;
+      handler: (args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; ui: { notify(message: string, type?: string): void } }) => Promise<void> | void;
     }) => void;
   };
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status and smoke test: /sediment status, /sediment smoke --dry-run",
+    description: "Sediment writer status/window and smoke test: /sediment status, /sediment window --dry-run, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
-    async handler(args: string, ctx: { cwd?: string; ui: { notify(message: string, type?: string): void } }) {
+    async handler(args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; ui: { notify(message: string, type?: string): void } }) {
       const cwd = path.resolve(ctx.cwd || process.cwd());
       const settings = resolveSedimentSettings();
       const [subcommand = "status", ...rest] = args.trim() ? args.trim().split(/\s+/) : [];
@@ -39,10 +40,26 @@ function registerSedimentCommand(pi: ExtensionAPI) {
             `Sediment enabled: ${settings.enabled}`,
             `Git commit: ${settings.gitCommit}`,
             `Lock timeout: ${settings.lockTimeoutMs}ms`,
+            `Window: min=${settings.minWindowChars} chars, max=${settings.maxWindowChars} chars, entries=${settings.maxWindowEntries}`,
             "Extractor: not implemented in this slice",
           ].join("\n"),
           "info",
         );
+        return;
+      }
+
+      if (subcommand === "window") {
+        if (!rest.includes("--dry-run")) {
+          ctx.ui.notify("Usage: /sediment window --dry-run", "warning");
+          return;
+        }
+        if (!ctx.sessionManager?.getBranch) {
+          ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
+          return;
+        }
+        const checkpoint = await loadCheckpoint(cwd);
+        const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
+        ctx.ui.notify(JSON.stringify(checkpointSummary(window), null, 2), window.skipReason ? "warning" : "info");
         return;
       }
 
@@ -63,7 +80,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment smoke --dry-run", "warning");
     },
   });
 }
@@ -71,13 +88,25 @@ function registerSedimentCommand(pi: ExtensionAPI) {
 export default function (pi: ExtensionAPI) {
   registerSedimentCommand(pi);
 
-  pi.on("agent_end", async (_event: unknown, ctx: { cwd?: string; ui?: { notify(message: string, type?: string): void } }) => {
+  pi.on("agent_end", async (_event: unknown, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; ui?: { notify(message: string, type?: string): void } }) => {
     const settings = resolveSedimentSettings();
     if (!settings.enabled) return;
 
-    // The writer substrate is ready, but automatic extract/classify/dedupe is
-    // deliberately deferred to the next slice. Fail closed rather than writing
-    // low-confidence memories from an incomplete extractor.
-    ctx.ui?.notify?.("Sediment is enabled, but extractor is not implemented yet; no memory write attempted.", "warning");
+    const cwd = path.resolve(ctx.cwd || process.cwd());
+    if (!ctx.sessionManager?.getBranch) return;
+
+    const checkpoint = await loadCheckpoint(cwd);
+    const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
+    await appendAudit(cwd, {
+      operation: "window",
+      ...checkpointSummary(window),
+      extractor: "not_implemented",
+      checkpoint_advanced: false,
+    });
+
+    // The writer substrate and windowing are ready, but automatic
+    // extract/classify/dedupe is deliberately deferred to the next slice. Do
+    // not advance checkpoint here; future extractor must see this window.
+    ctx.ui?.notify?.("Sediment is enabled; window captured/audited, but extractor is not implemented yet. Checkpoint not advanced.", "warning");
   });
 }

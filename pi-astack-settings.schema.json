@@ -118,6 +118,27 @@
           "minimum": 0,
           "maximum": 10,
           "description": "Default confidence for writer smoke/deterministic provisional entries."
+        },
+
+        "minWindowChars": {
+          "type": "number",
+          "default": 200,
+          "minimum": 0,
+          "description": "Minimum rendered run-window size. Smaller windows are skipped by future extractor logic."
+        },
+
+        "maxWindowChars": {
+          "type": "number",
+          "default": 200000,
+          "minimum": 1000,
+          "description": "Maximum rendered run-window size. The builder keeps the newest entries within this budget."
+        },
+
+        "maxWindowEntries": {
+          "type": "number",
+          "default": 200,
+          "minimum": 1,
+          "description": "Maximum number of newest session entries considered for a sediment run window."
         }
       }
     },

@@ -12,6 +12,9 @@ export interface SedimentSettings {
   gitCommit: boolean;
   lockTimeoutMs: number;
   defaultConfidence: number;
+  minWindowChars: number;
+  maxWindowChars: number;
+  maxWindowEntries: number;
 }
 
 export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
@@ -19,6 +22,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   gitCommit: true,
   lockTimeoutMs: 5_000,
   defaultConfidence: 3,
+  minWindowChars: 200,
+  maxWindowChars: 200_000,
+  maxWindowEntries: 200,
 };
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -37,5 +43,8 @@ export function resolveSedimentSettings(): SedimentSettings {
     gitCommit: asBoolean(cfg.gitCommit, DEFAULT_SEDIMENT_SETTINGS.gitCommit),
     lockTimeoutMs: Math.max(100, asNumber(cfg.lockTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.lockTimeoutMs)),
     defaultConfidence: Math.min(10, Math.max(0, asNumber(cfg.defaultConfidence, DEFAULT_SEDIMENT_SETTINGS.defaultConfidence))),
+    minWindowChars: Math.max(0, asNumber(cfg.minWindowChars, DEFAULT_SEDIMENT_SETTINGS.minWindowChars)),
+    maxWindowChars: Math.max(1_000, asNumber(cfg.maxWindowChars, DEFAULT_SEDIMENT_SETTINGS.maxWindowChars)),
+    maxWindowEntries: Math.max(1, Math.floor(asNumber(cfg.maxWindowEntries, DEFAULT_SEDIMENT_SETTINGS.maxWindowEntries))),
   };
 }

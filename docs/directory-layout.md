@@ -59,8 +59,9 @@ alfadb/pi-astack/
 │   │   ├── migrate.ts                 # legacy migration dry-run planner
 │   │   └── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
 │   ├── sediment/                      # ✅ 部分实现：project-only writer substrate（Phase 1.4a）
-│   │   ├── index.ts                   # /sediment status + smoke dry-run；agent_end hook fail-closed
+│   │   ├── index.ts                   # /sediment status/window/smoke；agent_end hook fail-closed
 │   │   ├── settings.ts                # sediment 配置读取
+│   │   ├── checkpoint.ts              # checkpoint + run window builder
 │   │   ├── sanitizer.ts               # 最小写前脱敏/fail-closed
 │   │   └── writer.ts                  # lock + atomic markdown write + audit + git best-effort
 │   └── browse/                        # [计划] from pi-gstack
@@ -168,7 +169,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | modelCurator | `providers`, `hints`, `imageGen` |
 | modelFallback | `fallbackModels` |
 | memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays` |
-| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence` |
+| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries` |
 | vision | `modelPreferences` |
 
 ## 所有权矩阵

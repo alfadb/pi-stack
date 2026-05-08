@@ -113,7 +113,14 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 1.4 — Sediment project-only pipeline
 
-**实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/index.ts` 注册 `/sediment status` 与 `/sediment smoke --dry-run`。`agent_end` hook 默认 disabled，且即使启用也 fail-closed（extract 未实现时不写记忆）。
+**实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/checkpoint.ts` 已实现 checkpoint + run window builder；`extensions/sediment/index.ts` 注册 `/sediment status`、`/sediment window --dry-run` 与 `/sediment smoke --dry-run`。`agent_end` hook 默认 disabled，且即使启用也 fail-closed（只 audit window，不写记忆、不推进 checkpoint）。
+
+已完成 checkpoint/window substrate：
+- checkpoint path：`.pensieve/.state/sediment-checkpoint.json`
+- `buildRunWindow(branch, checkpoint)`：从 `ctx.sessionManager.getBranch()` 取 checkpoint 之后的新 entries
+- compaction/branch fallback：checkpoint entry 找不到时只取最新 entry，避免重放全历史
+- window budget：`minWindowChars` / `maxWindowChars` / `maxWindowEntries`
+- agent_end enabled 时 audit window stats，但 extractor 未实现所以不推进 checkpoint
 
 已完成 writer substrate：
 - sanitize：credential pattern 命中 fail-closed；`$HOME` 路径替换；IP/email redact
@@ -124,13 +131,16 @@ memory_search(query: "dispatch agent prompt")
 - audit：追加 `.pensieve/.state/sediment-events.jsonl`
 
 待实现完整 pipeline：
-- agent_end 增量窗口 / checkpoint
+- checkpoint advance policy（SKIP / SKIP_DUPLICATE / write success 后推进）
 - extract + classify（单 agent + lookup tools，继承 ADR 0010 内核）
 - deterministic dedupe：slug 精确相等 + 标题 trigram Jaccard ≥ 0.7
 - 自动写入 project 条目
 
 **当前验收**：
 ```text
+/sediment window --dry-run
+# → 返回 checkpoint/run-window stats，不推进 checkpoint
+
 /sediment smoke --dry-run
 # → 返回将写入的 slug/path/lint 结果，但不写 markdown
 ```

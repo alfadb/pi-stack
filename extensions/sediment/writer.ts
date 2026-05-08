@@ -177,7 +177,7 @@ async function gitCommit(projectRoot: string, filePath: string, slug: string): P
   }
 }
 
-async function appendAudit(projectRoot: string, event: Record<string, unknown>): Promise<string> {
+export async function appendAudit(projectRoot: string, event: Record<string, unknown>): Promise<string> {
   const auditPath = path.join(projectRoot, ".pensieve", ".state", "sediment-events.jsonl");
   await fs.mkdir(path.dirname(auditPath), { recursive: true });
   await fs.appendFile(auditPath, `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`, "utf-8");
