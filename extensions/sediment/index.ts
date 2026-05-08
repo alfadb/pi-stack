@@ -254,17 +254,46 @@ export default function (pi: ExtensionAPI) {
     }
     const sessionId = readSessionId(ctx.sessionManager);
     const notify = ctx.ui?.notify?.bind(ctx.ui);
+    const settingsSnapshot = snapshotSedimentSettings(settings);
+
+    // Ephemeral sessions (`pi --print --no-session`, dispatch_agent
+    // subprocess, CI / automation) refuse to run the deterministic
+    // extractor entirely.
+    //
+    // Rationale:
+    //   - Subagents return their output to the calling session via
+    //     tool_result; that real session's own agent_end hook will see
+    //     the subagent's content (including any MEMORY: blocks) and
+    //     sediment it there. Running sediment in the subprocess too is
+    //     redundant.
+    //   - `--no-session` is a user-explicit "throwaway" signal; writing
+    //     to .pensieve/ + git committing it directly contradicts that.
+    //   - Attribution: an entry written from `session_id: undefined` has
+    //     no session JSONL to trace back to; future debugging cannot
+    //     answer "where did this come from?".
+    //
+    // We still record a single audit row for observability so users
+    // running `tail audit.jsonl` can see ephemeral runs happened.
+    if (!sessionId) {
+      await appendAudit(cwd, {
+        operation: "skip",
+        reason: "ephemeral_session",
+        ephemeral_session: true,
+        branch_size: branch.length,
+        settings_snapshot: settingsSnapshot,
+        extractor: "explicit_marker",
+        parser_version: PARSER_VERSION,
+        checkpoint_advanced: false,
+        stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
+      });
+      return;
+    }
 
     const tStart = Date.now();
-    // Per-session checkpoint slot. When sessionId is missing (subprocess
-    // pi / --no-session), loadSessionCheckpoint returns {} and
-    // saveSessionCheckpoint is a no-op so we never corrupt the main
-    // session's persisted state.
     const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
     const window = buildRunWindow(branch, checkpoint, settings);
     const tWindowBuilt = Date.now();
     const summary = checkpointSummary(window);
-    const settingsSnapshot = snapshotSedimentSettings(settings);
     const entryBreakdown = countEntryTypes(window.entries);
 
     if (window.skipReason || !window.lastEntryId) {
@@ -273,14 +302,13 @@ export default function (pi: ExtensionAPI) {
         operation: "skip",
         reason: window.skipReason ?? "no_last_entry",
         session_id: sessionId,
-        ephemeral_session: !sessionId,
         ...summary,
         extractor: "explicit_marker",
         parser_version: PARSER_VERSION,
         settings_snapshot: settingsSnapshot,
         entry_breakdown: entryBreakdown,
         stage_ms: { window_build: tWindowBuilt - tStart, parse: 0, write_total: 0, total: Date.now() - tStart },
-        checkpoint_advanced: !!sessionId && !!window.lastEntryId,
+        checkpoint_advanced: !!window.lastEntryId,
       });
       return;
     }
@@ -294,14 +322,13 @@ export default function (pi: ExtensionAPI) {
         operation: "skip",
         reason: "no_explicit_memory_markers",
         session_id: sessionId,
-        ephemeral_session: !sessionId,
         ...summary,
         extractor: "explicit_marker",
         parser_version: PARSER_VERSION,
         settings_snapshot: settingsSnapshot,
         entry_breakdown: entryBreakdown,
         stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: 0, total: Date.now() - tStart },
-        checkpoint_advanced: !!sessionId,
+        checkpoint_advanced: true,
       });
       return;
     }
@@ -311,7 +338,7 @@ export default function (pi: ExtensionAPI) {
     for (const draft of drafts) {
       results.push(await writeProjectEntry({
         ...draft,
-        sessionId: sessionId || "sediment",
+        sessionId,
         timelineNote: draft.timelineNote || "captured from explicit MEMORY block",
       }, { projectRoot: cwd, settings, dryRun: false }));
     }
@@ -322,7 +349,6 @@ export default function (pi: ExtensionAPI) {
     await appendAudit(cwd, {
       operation: "explicit_extract",
       session_id: sessionId,
-      ephemeral_session: !sessionId,
       ...summary,
       extractor: "explicit_marker",
       parser_version: PARSER_VERSION,
@@ -332,7 +358,7 @@ export default function (pi: ExtensionAPI) {
       candidates: drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
       results: results.map((result) => ({ status: result.status, slug: result.slug, reason: result.reason, path: result.path, lintErrors: result.lintErrors, lintWarnings: result.lintWarnings, gitCommit: result.gitCommit })),
       stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: tWriteEnd - tWriteStart, total: Date.now() - tStart },
-      checkpoint_advanced: !!sessionId && shouldAdvance,
+      checkpoint_advanced: shouldAdvance,
     });
 
     // Use captured `notify` (ctx.ui.notify pre-bound) rather than ctx.ui

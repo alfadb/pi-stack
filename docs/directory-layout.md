@@ -213,7 +213,12 @@ Checkpoint v2 格式：
 ```
 
 - **多个 pi 实例在同一 `<projectRoot>/`**：每个会话有独立的 sessionId slot，互不覆盖。`saveSessionCheckpoint` 用文件锁（`.pi-astack/sediment/locks/checkpoint.lock`）串行化 read-modify-write，避免并发丢更新。锁隐含 30s 偏移后可被偷 (steal) 以防会话崩溃后死锁。
-- **子进程 pi / `pi --print --no-session` / dispatch_agent 生成的 ephemeral session**：`getSessionFile()` 返回 undefined 时被识别为 ephemeral，`saveSessionCheckpoint` no-op 不污染主会话的 slot。audit 仍追加但标记 `ephemeral_session: true` 且不写 `session_id` 字段。
+- **子进程 pi / `pi --print --no-session` / dispatch_agent 生成的 ephemeral session**：`getSessionFile()` 返回 undefined 时被识别为 ephemeral，agent_end hook **early-return**，不跑 `parseExplicitMemoryBlocks`、不写 `.pensieve/`、不存 checkpoint。仅追加一行 audit `operation: skip / reason: ephemeral_session / ephemeral_session: true` 用于 observability。
+
+  设计意图：
+  - dispatch_agent 子任务输出会作为 tool_result 返回主会话，主会话的 sediment 会看到并决定是否记录；子进程再跳一次是冗余。
+  - `--no-session` 是用户显式的 "throwaway" 信号，在 `.pensieve/` 里写入并 git commit 违背其语义。
+  - 归因：`session_id: undefined` 的条目无 session JSONL 可追溯，事后调试 "这条哪来的" 答不出。
 - **Audit 并发追加**：依赖 Linux `O_APPEND` 原子性（< PIPE_BUF=4KB 单次写入原子），JSONL 行 < 4KB 不会擕裂；多会话的行会交错但每行 `session_id` 可区分。
 - **v1 schema 迁移**：旧版 `{ lastProcessedEntryId, updatedAt }` 装进 `sessions._legacy` slot，被首个保存的 session 收养后清除。
 - **冗余会话清理**：`updatedAt > 90 天` 的 session slot 在下一次 RMW 时自动 prune，避免 sessions map 无限生长。
