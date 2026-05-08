@@ -318,7 +318,10 @@ export async function writeProjectEntry(
   const status = safeDraft.status ?? "provisional";
   const target = path.join(pensieveRoot, kindDirectory(safeDraft.kind, status), `${slug}.md`);
 
-  const duplicate = await detectProjectDuplicate(projectRoot, safeDraft.title, { slug });
+  const duplicate = await detectProjectDuplicate(projectRoot, safeDraft.title, {
+    slug,
+    kind: safeDraft.kind,
+  });
   if (duplicate.duplicate) {
     const auditPath = await appendAudit(projectRoot, {
       operation: "reject",
@@ -332,6 +335,28 @@ export async function writeProjectEntry(
       path: target,
       status: "rejected",
       reason: duplicate.reason === "slug_exact" ? "duplicate_slug" : "duplicate_title",
+      duplicate,
+      auditPath,
+    };
+  }
+  // Soft near-duplicate gate. Only enforced when the policy explicitly
+  // opts in (LLM auto-write lane). Explicit-marker writes are
+  // user-attested and intentionally bypass this gate — if the user
+  // wants to record a refined restatement of an existing entry they
+  // can.
+  if (duplicate.nearDuplicate && opts.policy?.disallowNearDuplicate) {
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "reject",
+      reason: "near_duplicate",
+      target: `project:${slug}`,
+      duplicate,
+      duration_ms: Date.now() - started,
+    });
+    return {
+      slug,
+      path: target,
+      status: "rejected",
+      reason: "near_duplicate",
       duplicate,
       auditPath,
     };

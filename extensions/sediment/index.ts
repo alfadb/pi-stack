@@ -934,6 +934,7 @@ export function buildAutoWritePolicy(settings: SedimentSettings): DraftPolicy {
     disallowMaxim: settings.autoWriteDisallowMaxim,
     disallowArchived: settings.autoWriteDisallowArchived,
     maxConfidence: settings.autoWriteMaxConfidence,
+    disallowNearDuplicate: settings.autoWriteDisallowNearDuplicate,
   };
 }
 

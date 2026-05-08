@@ -737,6 +737,139 @@ END_MEMORY`;
       assert(dup.duplicate && dup.reason === "slug_exact", `dedupe must see same title: ${JSON.stringify(dup)}`);
     }
 
+    // === Soft near-duplicate detection (added 2026-05-08) ================
+    // The deterministic dedupe layer's word-trigram jaccard misses pairs
+    // like:
+    //   t1 = "normalizeBareSlug Breaks on Titles Containing Forward Slash"
+    //   t2 = "normalizeBareSlug Must Not Be Used for Free-Text Titles"
+    // because they share zero word-trigrams. The soft signal
+    // (char-trigram >= 0.20 AND shared rare token (df<=2) AND same
+    // kind) catches these. The signal MUST also be conservative
+    // enough to spare unrelated pairs and pairs that share only
+    // common tokens.
+    {
+      const { detectProjectDuplicate } = req("./sediment/dedupe.js");
+      const ndRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-neardup-"));
+      fs.mkdirSync(path.join(ndRoot, ".pensieve"), { recursive: true });
+
+      // Seed entry with a rare technical token.
+      const seed = await writeProjectEntry({
+        title: "normalizeBareSlug Breaks on Titles Containing Forward Slash",
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: "normalizeBareSlug treats / as a path separator and silently truncates titles. This is a real bug.",
+      }, { projectRoot: ndRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      assert(seed.status === "created", `near-dup seed failed: ${seed.reason}`);
+
+      // Same insight, completely different phrasing. Word-trigram = 0,
+      // char-trigram ~ 0.27, shared rare token "normalizebareslug".
+      const candTitle = "normalizeBareSlug Must Not Be Used for Free-Text Titles";
+
+      // (1) Without policy.disallowNearDuplicate: the soft signal is
+      //     exposed (nearDuplicate=true) but writeProjectEntry still
+      //     allows the write. Explicit MEMORY: lane behavior.
+      const dupCheck = await detectProjectDuplicate(ndRoot, candTitle, { kind: "fact" });
+      assert(!dupCheck.duplicate, `should NOT be hard duplicate: ${JSON.stringify(dupCheck)}`);
+      assert(dupCheck.nearDuplicate === true, `should be soft near-duplicate: ${JSON.stringify(dupCheck)}`);
+      assert(dupCheck.reason === "near_duplicate_rare_token", `wrong reason: ${dupCheck.reason}`);
+      assert(
+        dupCheck.nearDuplicateDetail?.sharedRareTokens.includes("normalizebareslug"),
+        `expected shared rare token 'normalizebareslug': ${JSON.stringify(dupCheck.nearDuplicateDetail)}`,
+      );
+      assert(
+        dupCheck.nearDuplicateDetail.charTrigramScore >= 0.20,
+        `char trigram below threshold: ${dupCheck.nearDuplicateDetail.charTrigramScore}`,
+      );
+
+      // Explicit lane (no policy) accepts the soft near-dup.
+      const allowedWrite = await writeProjectEntry({
+        title: candTitle,
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: "Use slugify directly when the input is a free-text title; normalizeBareSlug is for path/wikilink/id inputs.",
+      }, { projectRoot: ndRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      assert(
+        allowedWrite.status === "created",
+        `explicit lane (no policy) must allow near-dup write: ${allowedWrite.reason}`,
+      );
+
+      // (2) With policy.disallowNearDuplicate: writer rejects.
+      const blockRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-neardup-block-"));
+      fs.mkdirSync(path.join(blockRoot, ".pensieve"), { recursive: true });
+      await writeProjectEntry({
+        title: "normalizeBareSlug Breaks on Titles Containing Forward Slash",
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: "normalizeBareSlug treats / as a path separator and silently truncates titles. This is a real bug.",
+      }, { projectRoot: blockRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      const blocked = await writeProjectEntry({
+        title: candTitle,
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: "Use slugify directly when the input is a free-text title; normalizeBareSlug is for path/wikilink/id inputs.",
+      }, {
+        projectRoot: blockRoot,
+        settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
+        dryRun: false,
+        policy: { disallowNearDuplicate: true },
+      });
+      assert(
+        blocked.status === "rejected" && blocked.reason === "near_duplicate",
+        `auto-write lane policy must reject near-dup: ${JSON.stringify(blocked)}`,
+      );
+      assert(blocked.duplicate?.nearDuplicate === true, `rejected result must surface nearDuplicate: ${JSON.stringify(blocked.duplicate)}`);
+
+      // (3) Different kind: soft signal must NOT fire even though the
+      //     rare token + char trigram are present. The pair is then
+      //     allowed to coexist.
+      const diffKindRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-neardup-kind-"));
+      fs.mkdirSync(path.join(diffKindRoot, ".pensieve"), { recursive: true });
+      await writeProjectEntry({
+        title: "normalizeBareSlug Breaks on Titles Containing Forward Slash",
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: "normalizeBareSlug treats / as a path separator and silently truncates titles. This is a real bug.",
+      }, { projectRoot: diffKindRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      const diffKind = await detectProjectDuplicate(diffKindRoot, candTitle, { kind: "smell" });
+      assert(
+        !diffKind.nearDuplicate,
+        `different kind must not trigger near-dup: ${JSON.stringify(diffKind)}`,
+      );
+
+      // (4) High char trigram from common tokens only (no rare shared
+      //     token) must NOT fire. Calibration case from the live
+      //     pensieve sweep: "memory-architecture.md" review rounds
+      //     share generic words like 'memory'/'architecture' but those
+      //     are not rare. We simulate by seeding 3 entries that all
+      //     share 'common' so its df grows beyond rareTokenMaxDf.
+      const commonRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-neardup-common-"));
+      fs.mkdirSync(path.join(commonRoot, ".pensieve"), { recursive: true });
+      // Use long common-prefix titles so char-trigram clears 0.20 even
+      // though the shared tokens are too widespread to be "rare".
+      const seedTitles = [
+        "common-prefix architecture review round one with details",
+        "common-prefix architecture review round two with details",
+        "common-prefix architecture review round three with details",
+      ];
+      for (const t of seedTitles) {
+        await writeProjectEntry({
+          title: t,
+          kind: "fact",
+          confidence: 5,
+          compiledTruth: `Body for ${t} that meets the minimum compiled truth length requirement.`,
+        }, { projectRoot: commonRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      }
+      const commonCand = await detectProjectDuplicate(
+        commonRoot,
+        "common-prefix architecture review round four with details",
+        { kind: "fact" },
+      );
+      assert(
+        !commonCand.nearDuplicate,
+        `entries with only common shared tokens (df>2) must not trigger near-dup: ${JSON.stringify(commonCand)}`,
+      );
+    }
+
     writeFile(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), JSON.stringify({
       timestamp: "2026-05-08T00:00:00Z",
       operation: "llm_dry_run",

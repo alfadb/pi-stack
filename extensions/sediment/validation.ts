@@ -41,14 +41,27 @@ export interface DraftLike {
  *                         These are sediment-state transitions that
  *                         should follow citation/curation flows, not
  *                         appear at first creation.
+ *   - `disallowNearDuplicate`  rejects writes that the dedupe layer
+ *                         flags as near-duplicates (char-trigram +
+ *                         shared rare token + same kind). Hard
+ *                         duplicates (slug_exact, word-trigram >=
+ *                         threshold) are ALWAYS rejected; this flag
+ *                         only controls the SOFT signal. Default
+ *                         off; the LLM auto-write lane turns it on
+ *                         because the LLM is more likely to mint a
+ *                         paraphrased restatement of an existing
+ *                         entry than the explicit-marker lane.
  *
  * The shape is intentionally a subset of `validateProjectEntryDraft`
- * concerns; nothing here changes default (no-opts) behavior.
+ * concerns; nothing here changes default (no-opts) behavior. The
+ * dedupe overlay is enforced by the writer (which has the store
+ * scan), not by `validateProjectEntryDraft` (which is pure).
  */
 export interface DraftPolicy {
   disallowMaxim?: boolean;
   maxConfidence?: number;
   disallowArchived?: boolean;
+  disallowNearDuplicate?: boolean;
 }
 
 const NON_INITIAL_STATUSES: ReadonlySet<EntryStatus> = new Set([

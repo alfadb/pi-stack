@@ -222,6 +222,12 @@
           "description": "Cap on `confidence` for LLM auto-written entries. Confidence in [7, 10] is reserved for human-attested entries that have survived peer review or repeated citation. Default 6 keeps auto-written entries clearly second-tier."
         },
 
+        "autoWriteDisallowNearDuplicate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reject LLM auto-write candidates flagged by the soft near-duplicate signal: char-trigram jaccard >= 0.20 AND a shared rare technical token (df <= 2) AND same kind as an existing entry. Catches paraphrased restatements that the strict word-trigram dedupe misses (e.g. two entries about `normalizeBareSlug` with no shared 3-token windows). Hard duplicates (slug_exact, word-trigram >= 0.7) are always rejected regardless of this flag. Explicit MEMORY: blocks bypass this gate (user-attested writes can still record refined restatements)."
+        },
+
         "autoWriteSampleEveryNRuns": {
           "type": "number",
           "default": 1,

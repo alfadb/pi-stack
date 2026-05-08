@@ -34,6 +34,13 @@ export interface SedimentSettings {
   autoWriteDisallowMaxim: boolean;
   autoWriteDisallowArchived: boolean;
   autoWriteMaxConfidence: number;
+  // Soft near-duplicate gate (added 2026-05-08). When true, the LLM
+  // auto-write lane rejects candidates whose title shares a rare
+  // technical token + high char-trigram overlap + same kind with an
+  // existing entry, even if word-trigram jaccard < 0.7. Hard
+  // duplicates (slug_exact, word-trigram >= 0.7) are always rejected
+  // regardless of this flag. See dedupe.ts for the full rule.
+  autoWriteDisallowNearDuplicate: boolean;
   // Operational throttles for the auto-write lane. These all live
   // *after* the readiness gate (autoLlmWriteEnabled + dry-run pass
   // rate) and the content gates (autoWrite*). They cap how often the
@@ -73,6 +80,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoWriteDisallowMaxim: true,
   autoWriteDisallowArchived: true,
   autoWriteMaxConfidence: 6,
+  autoWriteDisallowNearDuplicate: true,
   autoWriteSampleEveryNRuns: 1,
   autoWriteMaxPerHour: 6,
   // Window raised from 20 to 30 (2026-05-08): a single auto_write
@@ -119,6 +127,7 @@ export function resolveSedimentSettings(): SedimentSettings {
     autoWriteDisallowMaxim: asBoolean(cfg.autoWriteDisallowMaxim, DEFAULT_SEDIMENT_SETTINGS.autoWriteDisallowMaxim),
     autoWriteDisallowArchived: asBoolean(cfg.autoWriteDisallowArchived, DEFAULT_SEDIMENT_SETTINGS.autoWriteDisallowArchived),
     autoWriteMaxConfidence: Math.min(10, Math.max(0, asNumber(cfg.autoWriteMaxConfidence, DEFAULT_SEDIMENT_SETTINGS.autoWriteMaxConfidence))),
+    autoWriteDisallowNearDuplicate: asBoolean(cfg.autoWriteDisallowNearDuplicate, DEFAULT_SEDIMENT_SETTINGS.autoWriteDisallowNearDuplicate),
     autoWriteSampleEveryNRuns: Math.max(1, Math.floor(asNumber(cfg.autoWriteSampleEveryNRuns, DEFAULT_SEDIMENT_SETTINGS.autoWriteSampleEveryNRuns))),
     autoWriteMaxPerHour: Math.max(0, Math.floor(asNumber(cfg.autoWriteMaxPerHour, DEFAULT_SEDIMENT_SETTINGS.autoWriteMaxPerHour))),
     autoWriteRollingWindowSamples: Math.max(1, Math.floor(asNumber(cfg.autoWriteRollingWindowSamples, DEFAULT_SEDIMENT_SETTINGS.autoWriteRollingWindowSamples))),
