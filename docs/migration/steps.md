@@ -43,6 +43,7 @@
 - graph/backlink dead links / symmetric backlink
 - generated `_index.md` 是否可构建
 - migration pending count
+- migration backup count / state（`restorable_remove_target`、`target_modified`、`already_restored` 等）
 - sediment `llm_dry_run` pass/fail/pass-rate
 
 **验收**：

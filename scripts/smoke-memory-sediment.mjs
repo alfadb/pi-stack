@@ -252,6 +252,8 @@ Body.
 
     const doctor = await runDoctorLite(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(["pass", "warning", "error"].includes(doctor.status), "doctor-lite invalid status");
+    assert(doctor.migrationBackups.total >= 1, "doctor-lite should report migration backups");
+    assert(doctor.migrationBackups.stateCounts.already_restored >= 1, "doctor-lite should report restored backup state");
 
     execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: root });
