@@ -4,6 +4,8 @@ import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { MemorySettings } from "../memory/settings";
+import { rebuildGraphIndex } from "../memory/graph";
+import { rebuildMarkdownIndex } from "../memory/index-file";
 import {
   defaultConfidence,
   extractTitle,
@@ -24,6 +26,23 @@ const execFileAsync = promisify(execFile);
 
 type MigrateOneStatus = "applied" | "dry_run" | "rejected";
 
+export interface MigrateOneDerivedResult {
+  graph?: {
+    path: string;
+    nodeCount: number;
+    edgeCount: number;
+    deadLinkCount: number;
+    orphanCount: number;
+  };
+  index?: {
+    path: string;
+    entryCount: number;
+    kindCount: number;
+    orphanCount: number;
+  };
+  error?: string;
+}
+
 export interface MigrateOneResult {
   status: MigrateOneStatus;
   reason?: string;
@@ -35,6 +54,7 @@ export interface MigrateOneResult {
   lintWarnings?: number;
   gitCommit?: string | null;
   actions?: string[];
+  derived?: MigrateOneDerivedResult;
 }
 
 interface LockHandle {
@@ -146,15 +166,78 @@ async function atomicWrite(file: string, content: string) {
   await fs.rename(tmp, file);
 }
 
-async function gitCommitMigration(projectRoot: string, sourcePath: string, targetPath: string, slug: string): Promise<string | null> {
+function uniqueGitPaths(projectRoot: string, paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of paths) {
+    const rel = path.isAbsolute(p) ? path.relative(projectRoot, p) : p;
+    if (!rel || rel.startsWith("..") || path.isAbsolute(rel) || seen.has(rel)) continue;
+    seen.add(rel);
+    out.push(rel);
+  }
+  return out;
+}
+
+async function isIgnoredByGit(projectRoot: string, relPath: string): Promise<boolean> {
   try {
-    await execFileAsync("git", ["-C", projectRoot, "add", "-A", path.relative(projectRoot, sourcePath), path.relative(projectRoot, targetPath)], { timeout: 5_000, maxBuffer: 512 * 1024 });
+    await execFileAsync("git", ["-C", projectRoot, "check-ignore", "-q", "--", relPath], { timeout: 2_000, maxBuffer: 128 * 1024 });
+    return true;
+  } catch {
+    // Exit code 1 means "not ignored"; other failures are handled by the later best-effort git add.
+    return false;
+  }
+}
+
+async function stageableGitPaths(projectRoot: string, pathsToStage: string[]): Promise<string[]> {
+  const relPaths = uniqueGitPaths(projectRoot, pathsToStage);
+  const out: string[] = [];
+  for (const rel of relPaths) {
+    if (await isIgnoredByGit(projectRoot, rel)) continue;
+    out.push(rel);
+  }
+  return out;
+}
+
+async function gitCommitMigration(projectRoot: string, slug: string, pathsToStage: string[]): Promise<string | null> {
+  try {
+    const relPaths = await stageableGitPaths(projectRoot, pathsToStage);
+    if (relPaths.length === 0) return null;
+    await execFileAsync("git", ["-C", projectRoot, "add", "-A", "--", ...relPaths], { timeout: 5_000, maxBuffer: 512 * 1024 });
     await execFileAsync("git", ["-C", projectRoot, "commit", "-m", `memory: migrate ${slug}`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", projectRoot, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
     return stdout.trim() || null;
   } catch {
     return null;
   }
+}
+
+async function rebuildDerivedIndexes(projectRoot: string, memorySettings: MemorySettings): Promise<MigrateOneDerivedResult> {
+  try {
+    const target = path.join(projectRoot, ".pensieve");
+    const graph = await rebuildGraphIndex(target, memorySettings, undefined, projectRoot);
+    const index = await rebuildMarkdownIndex(target, memorySettings, undefined, projectRoot);
+    return {
+      graph: {
+        path: graph.graph_path,
+        nodeCount: graph.nodeCount,
+        edgeCount: graph.edgeCount,
+        deadLinkCount: graph.deadLinkCount,
+        orphanCount: graph.orphanCount,
+      },
+      index: {
+        path: index.index_path,
+        entryCount: index.entryCount,
+        kindCount: index.kindCount,
+        orphanCount: index.orphanCount,
+      },
+    };
+  } catch (e: unknown) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+function derivedGitPaths(derived: MigrateOneDerivedResult): string[] {
+  return [derived.graph?.path, derived.index?.path].filter((p): p is string => !!p);
 }
 
 function buildMigratedMarkdown(args: {
@@ -287,7 +370,11 @@ export async function migrateOne(
     await fs.copyFile(sourcePath, backup);
     await atomicWrite(built.targetPath, markdown);
     if (!samePath) await fs.unlink(sourcePath);
-    const git = opts.sedimentSettings.gitCommit ? await gitCommitMigration(projectRoot, sourcePath, built.targetPath, built.slug) : null;
+
+    const derived = await rebuildDerivedIndexes(projectRoot, opts.memorySettings);
+    const git = opts.sedimentSettings.gitCommit
+      ? await gitCommitMigration(projectRoot, built.slug, [sourcePath, built.targetPath, ...derivedGitPaths(derived)])
+      : null;
     await appendAudit(projectRoot, {
       operation: "migrate_one",
       source: relPath,
@@ -296,6 +383,7 @@ export async function migrateOne(
       slug: built.slug,
       lintErrors,
       lintWarnings,
+      derived,
       git_commit: git,
       duration_ms: Date.now() - started,
     });
@@ -310,6 +398,7 @@ export async function migrateOne(
       lintWarnings,
       gitCommit: git,
       actions: built.actions,
+      derived,
     };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);

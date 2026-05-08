@@ -21,11 +21,11 @@
 **验收标准**：
 - [ ] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）
 - [x] 10 条 Lint 规则实现（T1-T10；`/memory lint [path]` slash command，CLI wrapper 未实现；另有 `/memory doctor-lite [path]` 聚合报告）
-- [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 计划生成；实际写入迁移仍待 sediment/migration writer
+- [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 计划生成 + `/sediment migrate-one --apply --yes <file>` 单文件 apply；batch apply 仍待实现
 - [x] `memory_search` grep-based 实现（rg 文件发现 + per-file tf-idf + title/slug boost；project 层 + 可选 world 只读）
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
-- [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`；sediment 写入后自动触发仍待接入）
-- [x] graph 派生索引：已实现 `buildGraphSnapshot` + `/memory check-backlinks [path]` + `/memory rebuild --graph [path]` 写入 gitignored derived index
+- [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`；`/sediment migrate-one` 成功后自动重建）
+- [x] graph 派生索引：已实现 `buildGraphSnapshot` + `/memory check-backlinks [path]` + `/memory rebuild --graph [path]`；`/sediment migrate-one` 成功后自动重建 `.pensieve/.index/graph.json`
 - [ ] Sediment project-only pipeline：writer substrate 已实现（validate → sanitize → deterministic dedupe → lint → lock → atomic write md → git best-effort → audit）；extract/classify/agent_end 自动写仍待实现
 - [x] Project scope 的 file lock + 错误恢复（writer substrate）
 - [x] 最小脱敏：credential pattern → 写入拒绝（fail-closed）；$HOME 路径替换
@@ -67,7 +67,7 @@
 
 ### Phase 1.2 — 旧格式迁移
 
-**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pensieve/.state/migration-report.md`。实际条目迁移仍需后续 sediment/migration writer 承接，以保持主会话只读边界。
+**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pensieve/.state/migration-report.md`。实际条目迁移由 `extensions/sediment/migration.ts` 的 `/sediment migrate-one --apply --yes <file>` 承接：一次只迁移单文件，以保持 staged/reversible；batch apply 尚未实现。
 
 - 识别旧格式条目：无 `schema_version` 或无 `---` 分隔符
 - 自动映射：旧 `short-term/` → 条目移入同级目录 + `lifetime.kind: ttl`
@@ -85,12 +85,14 @@
 # → 写入 .pensieve/.state/migration-report.md，便于人工审查
 ```
 
-**待实现验收**：
+**apply 验收（单文件）**：
 ```text
 # 由 sediment/migration writer 执行，非当前 read-only extension
-/memory migrate --apply .pensieve
-# → 完成迁移，report 输出到 .state/migration-report.md
+/sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
+# → 备份 source，写入 schema v1/canonical path，并重建 .pensieve/.index/graph.json + .pensieve/_index.md
 ```
+
+**待实现验收**：batch apply（不绕过单文件安全约束）。
 
 ### Phase 1.3 — memory_search（grep-based）
 
@@ -193,6 +195,7 @@ memory_search(query: "dispatch agent prompt")
 - 生成 schema v1 markdown 后先 lint，error 则拒绝
 - tmp → rename 原子写入；移动场景写 target 后删除 source；不删除空目录
 - audit 到 `.pensieve/.state/sediment-events.jsonl`
+- 成功后自动重建 `.pensieve/.index/graph.json` 与 `.pensieve/_index.md`；derived rebuild 失败不会回滚已完成迁移，但会写入返回值/audit
 
 待实现完整 pipeline：
 - batch migration apply（当前只支持单文件）
@@ -223,7 +226,7 @@ memory_search(query: "dispatch agent prompt")
 # → 返回将写入的 slug/path/lint/dedupe 结果，但不写 markdown
 
 /sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
-# → 备份 source，迁移单个 legacy 文件到 schema v1/canonical path
+# → 备份 source，迁移单个 legacy 文件到 schema v1/canonical path，并重建 graph/index derived artifacts
 ```
 
 **待实现验收**：

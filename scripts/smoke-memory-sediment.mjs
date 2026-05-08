@@ -187,8 +187,11 @@ Body.
       yes: true,
     });
     assert(migrateApplied.status === "applied", `migrate-one failed: ${migrateApplied.reason}`);
+    assert(!migrateApplied.derived?.error, `migrate-one derived rebuild failed: ${migrateApplied.derived?.error}`);
     assert(fs.existsSync(path.join(root, ".pensieve", "maxims", "legacy.md")), "migrate-one target not written");
     assert(fs.existsSync(path.join(root, migrateApplied.backup_path)), "migrate-one backup not written");
+    assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "migrate-one graph index not rebuilt");
+    assert(fs.existsSync(path.join(root, ".pensieve", "_index.md")), "migrate-one markdown index not rebuilt");
 
     const doctor = await runDoctorLite(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(["pass", "warning", "error"].includes(doctor.status), "doctor-lite invalid status");
