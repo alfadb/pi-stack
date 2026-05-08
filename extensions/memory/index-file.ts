@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { MemorySettings } from "./settings";
 import type { MemoryEntry, Scope } from "./types";
@@ -14,15 +15,39 @@ export interface MarkdownIndexRebuildReport {
   orphanCount: number;
 }
 
+function abrainRoot(): string {
+  return path.resolve(
+    process.env.ABRAIN_ROOT
+      ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+      : path.join(os.homedir(), ".abrain"),
+  );
+}
+
+function isInside(root: string, abs: string): boolean {
+  const rel = path.relative(root, abs);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
 function inferScope(root: string): Scope {
-  return root.includes(`${path.sep}.abrain`) || root.endsWith(`${path.sep}.abrain`) ? "world" : "project";
+  return isInside(abrainRoot(), path.resolve(root)) ? "world" : "project";
+}
+
+function pensieveRootForFile(abs: string): string | null {
+  const parts = path.resolve(abs).split(path.sep);
+  const idx = parts.lastIndexOf(".pensieve");
+  if (idx < 0) return null;
+  return parts.slice(0, idx + 1).join(path.sep) || path.sep;
 }
 
 async function targetRoot(target: string): Promise<string> {
   const abs = path.resolve(target);
   try {
     const stat = await fs.stat(abs);
-    if (stat.isFile()) return path.dirname(abs);
+    if (stat.isFile()) {
+      const abrain = abrainRoot();
+      if (isInside(abrain, abs)) return abrain;
+      return pensieveRootForFile(abs) ?? path.dirname(abs);
+    }
   } catch {
     return abs;
   }

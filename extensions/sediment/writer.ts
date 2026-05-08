@@ -215,22 +215,33 @@ export async function writeProjectEntry(
     };
   }
 
-  const sanitize = sanitizeForMemory(`${draft.title}\n${draft.compiledTruth}\n${draft.timelineNote ?? ""}`);
-  if (!sanitize.ok) {
+  const titleSanitize = sanitizeForMemory(draft.title);
+  const bodySanitize = sanitizeForMemory(draft.compiledTruth);
+  const noteSanitize = draft.timelineNote
+    ? sanitizeForMemory(draft.timelineNote)
+    : { ok: true, text: undefined, replacements: [] as string[] };
+  const failedSanitize = [titleSanitize, bodySanitize, noteSanitize].find((result) => !result.ok);
+  if (failedSanitize) {
     const auditPath = await appendAudit(projectRoot, {
       operation: "reject",
-      reason: sanitize.error,
+      reason: failedSanitize.error,
       title: draft.title,
       duration_ms: Date.now() - started,
     });
-    return { slug: normalizeBareSlug(draft.title), path: pensieveRoot, status: "rejected", reason: sanitize.error, auditPath };
+    return { slug: normalizeBareSlug(draft.title), path: pensieveRoot, status: "rejected", reason: failedSanitize.error, auditPath };
   }
+
+  const sanitizedReplacements = [
+    ...titleSanitize.replacements,
+    ...bodySanitize.replacements,
+    ...noteSanitize.replacements,
+  ];
 
   const safeDraft: ProjectEntryDraft = {
     ...draft,
-    title: sanitize.text!.split("\n")[0] || draft.title,
-    compiledTruth: sanitize.text!.split("\n").slice(1, -1).join("\n") || draft.compiledTruth,
-    timelineNote: draft.timelineNote ? sanitizeForMemory(draft.timelineNote).text : draft.timelineNote,
+    title: titleSanitize.text ?? draft.title,
+    compiledTruth: bodySanitize.text ?? draft.compiledTruth,
+    timelineNote: draft.timelineNote ? noteSanitize.text : draft.timelineNote,
   };
 
   const { slug, markdown } = buildMarkdown(safeDraft, projectRoot);
@@ -278,7 +289,7 @@ export async function writeProjectEntry(
       status: "dry_run",
       lintErrors,
       lintWarnings,
-      sanitizedReplacements: sanitize.replacements,
+      sanitizedReplacements,
     };
   }
 
@@ -321,7 +332,7 @@ export async function writeProjectEntry(
       lintWarnings,
       gitCommit: git,
       auditPath,
-      sanitizedReplacements: sanitize.replacements,
+      sanitizedReplacements,
     };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);

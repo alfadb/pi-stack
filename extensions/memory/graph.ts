@@ -69,21 +69,31 @@ const execFileAsync = promisify(execFile);
 
 const SYMMETRIC_RELATIONS = new Set(["relates_to", "contested_with"]);
 
-function inferScopeFromTarget(target: string): Scope {
-  const abs = path.resolve(target);
-  const abrain = path.resolve(
+function abrainRoot(): string {
+  return path.resolve(
     process.env.ABRAIN_ROOT
       ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
       : path.join(os.homedir(), ".abrain"),
   );
-  return abs === abrain || abs.startsWith(`${abrain}${path.sep}`) ? "world" : "project";
+}
+
+function isInside(root: string, abs: string): boolean {
+  const rel = path.relative(root, abs);
+  return rel === "" || (!!rel && !rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+function inferScopeFromTarget(target: string): Scope {
+  return isInside(abrainRoot(), path.resolve(target)) ? "world" : "project";
 }
 
 function storeRootForFile(abs: string): string {
-  const parts = abs.split(path.sep);
+  const resolved = path.resolve(abs);
+  const abrain = abrainRoot();
+  if (isInside(abrain, resolved)) return abrain;
+  const parts = resolved.split(path.sep);
   const idx = parts.lastIndexOf(".pensieve");
   if (idx >= 0) return parts.slice(0, idx + 1).join(path.sep) || path.sep;
-  return path.dirname(abs);
+  return path.dirname(resolved);
 }
 
 async function graphRootForTarget(target: string): Promise<string> {

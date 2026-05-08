@@ -53,16 +53,17 @@ export function resolveStores(cwdRaw: string | undefined, settings: MemorySettin
 }
 
 export function splitFrontmatter(raw: string): { frontmatterText: string; body: string } {
-  if (!raw.startsWith("---\n") && !raw.startsWith("---\r\n")) {
+  const normalized = raw.replace(/\r\n/g, "\n");
+  if (!normalized.startsWith("---\n")) {
     return { frontmatterText: "", body: raw };
   }
-  const normalized = raw.replace(/\r\n/g, "\n");
-  const end = normalized.indexOf("\n---\n", 4);
-  if (end < 0) return { frontmatterText: "", body: raw };
-  return {
-    frontmatterText: normalized.slice(4, end),
-    body: normalized.slice(end + "\n---\n".length),
-  };
+
+  // Accept both common forms:
+  //   ---\nfrontmatter\n---\nbody
+  //   ---\nfrontmatter\n---        (empty body / EOF after closing fence)
+  const match = normalized.match(/^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/);
+  if (!match) return { frontmatterText: "", body: raw };
+  return { frontmatterText: match[1], body: match[2] ?? "" };
 }
 
 function stripInlineComment(line: string): string {
