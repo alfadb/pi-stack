@@ -69,7 +69,7 @@ alfadb/pi-astack/
 │   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor
 │   │   ├── llm-extractor.ts           # /sediment llm --dry-run prompt + model call
 │   │   ├── report.ts                  # llm_dry_run audit report
-│   │   ├── migration.ts               # /sediment migrate-one 单文件 legacy migration plan/apply/restore
+│   │   ├── migration.ts               # /sediment migrate-one/migration-backups legacy migration plan/apply/restore/list
 │   │   ├── validation.ts              # draft runtime validation
 │   │   ├── dedupe.ts                  # deterministic slug/title duplicate detection
 │   │   ├── sanitizer.ts               # 最小写前脱敏/fail-closed
@@ -94,7 +94,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b |
-| `extensions/sediment/` | ✅ 部分实现（explicit extractor + LLM dry-run + migrate-one plan/apply/restore；自动 LLM 写入未启用） | Phase 1.4a |
+| `extensions/sediment/` | ✅ 部分实现（explicit extractor + LLM dry-run + migrate-one plan/apply/restore + migration-backups；自动 LLM 写入未启用） | Phase 1.4a |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |
@@ -194,7 +194,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | `extensions/model-curator/` | alfadb（C 类迁入） | ✅ 已实现 | ✅ |
 | `extensions/model-fallback/` | alfadb（A 类永久 own） | ✅ 已实现 | ✅ |
 | `extensions/memory/` | alfadb（v7 新建） | ✅ 已实现（只读 Facade） | ✅ |
-| `extensions/sediment/` | alfadb（A 类改造） | ✅ 部分实现（explicit extractor + LLM dry-run + migrate-one plan/apply/restore；自动 LLM 写入未启用） | ✅ |
+| `extensions/sediment/` | alfadb（A 类改造） | ✅ 部分实现（explicit extractor + LLM dry-run + migrate-one plan/apply/restore + migration-backups；自动 LLM 写入未启用） | ✅ |
 | `extensions/browse/` | alfadb（C 类迁入） | [计划] | ✅ |
 | `skills/` | alfadb（B 类端口） | [计划] | ✅ |
 | `prompts/` | alfadb（A 类 + B 类） | [计划] | ✅ |

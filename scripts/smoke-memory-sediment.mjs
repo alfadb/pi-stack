@@ -122,7 +122,7 @@ async function main() {
     const { runDoctorLite } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { writeProjectEntry } = req("./sediment/writer.js");
-    const { migrateOne, restoreMigrationBackup } = req("./sediment/migration.js");
+    const { listMigrationBackups, migrateOne, restoreMigrationBackup } = req("./sediment/migration.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     const { buildRunWindow, saveCheckpoint, loadCheckpoint } = req("./sediment/checkpoint.js");
     const { detectProjectDuplicate } = req("./sediment/dedupe.js");
@@ -214,6 +214,12 @@ Body.
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "migrate-one graph index not rebuilt");
     assert(fs.existsSync(path.join(root, ".pensieve", "_index.md")), "migrate-one markdown index not rebuilt");
 
+    const backups = await listMigrationBackups(root, DEFAULT_SETTINGS, 10);
+    const listedBackup = backups.items.find((item) => item.backup_path === migrateApplied.backup_path);
+    assert(listedBackup, "migration-backups should list applied backup");
+    assert(listedBackup.restore_command === migrateApplied.restore_command, "migration-backups restore command mismatch");
+    assert(listedBackup.state === "restorable_remove_target", `migration-backups state mismatch: ${listedBackup.state}`);
+
     const migratedTarget = path.join(root, ".pensieve", "maxims", "legacy.md");
     const migratedTargetText = fs.readFileSync(migratedTarget, "utf-8");
     fs.writeFileSync(migratedTarget, `${migratedTargetText}\nmanual edit after migration\n`);
@@ -226,6 +232,9 @@ Body.
     assert(restoreConflict.status === "rejected" && restoreConflict.reason === "target_modified", `restore conflict should reject target_modified, got ${restoreConflict.reason}`);
     assert(!fs.existsSync(path.join(root, ".pensieve", "short-term", "maxims", "legacy.md")), "restore conflict should not restore source");
     assert(fs.readFileSync(migratedTarget, "utf-8").includes("manual edit after migration"), "restore conflict should preserve modified target");
+    const conflictBackups = await listMigrationBackups(root, DEFAULT_SETTINGS, 10);
+    const listedConflict = conflictBackups.items.find((item) => item.backup_path === migrateApplied.backup_path);
+    assert(listedConflict?.state === "target_modified", `migration-backups conflict state mismatch: ${listedConflict?.state}`);
     fs.writeFileSync(migratedTarget, migratedTargetText);
 
     const restored = await restoreMigrationBackup(migrateApplied.backup_path, {

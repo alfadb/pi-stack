@@ -13,7 +13,7 @@ import { buildRunWindow, checkpointSummary, hasPensieve, loadCheckpoint, saveChe
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun } from "./llm-extractor";
-import { migrateOne, restoreMigrationBackup } from "./migration";
+import { listMigrationBackups, migrateOne, restoreMigrationBackup } from "./migration";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { evaluateLlmAutoWriteReadiness, formatLlmAutoWriteReadiness, formatLlmDryRunReport, readLlmDryRunReport } from "./report";
 import { appendAudit, writeProjectEntry, type WriteProjectEntryResult } from "./writer";
@@ -40,9 +40,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window/extract/dedupe/report/readiness/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment llm --dry-run, /sediment llm-report, /sediment readiness, /sediment dedupe --title <title>, /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
+    description: "Sediment writer status/window/extract/dedupe/report/readiness/migration-backups/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment llm --dry-run, /sediment llm-report, /sediment readiness, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "extract --dry-run", "llm --dry-run", "llm-report", "readiness", "dedupe --title ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "extract --dry-run", "llm --dry-run", "llm-report", "readiness", "dedupe --title ", "migration-backups", "migration-backups --limit ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -154,6 +154,14 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
+      if (subcommand === "migration-backups") {
+        const limitFlagIndex = rest.indexOf("--limit");
+        const limitRaw = limitFlagIndex >= 0 ? Number(rest[limitFlagIndex + 1]) : undefined;
+        const result = await listMigrationBackups(cwd, resolveMemorySettings(), limitRaw);
+        ctx.ui.notify(JSON.stringify(result, null, 2), result.returned > 0 ? "info" : "warning");
+        return;
+      }
+
       if (subcommand === "dedupe") {
         const titleFlagIndex = rest.indexOf("--title");
         const title = titleFlagIndex >= 0 ? rest.slice(titleFlagIndex + 1).join(" ").trim() : rest.join(" ").trim();
@@ -217,7 +225,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment llm --dry-run OR /sediment llm-report [--limit N] OR /sediment readiness OR /sediment dedupe --title <title> OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment llm --dry-run OR /sediment llm-report [--limit N] OR /sediment readiness OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
     },
   });
 }

@@ -81,6 +81,35 @@ export interface RestoreMigrationBackupResult {
   derived?: MigrateOneDerivedResult;
 }
 
+export type MigrationBackupState =
+  | "restorable"
+  | "restorable_remove_target"
+  | "already_restored"
+  | "target_modified"
+  | "source_exists"
+  | "source_modified"
+  | "source_missing"
+  | "invalid";
+
+export interface MigrationBackupItem {
+  backup_path: string;
+  restore_command: string;
+  created_at: string;
+  source_path?: string;
+  target_path?: string;
+  slug?: string;
+  title?: string;
+  state: MigrationBackupState;
+  reason?: string;
+}
+
+export interface ListMigrationBackupsResult {
+  backup_root: string;
+  total: number;
+  returned: number;
+  items: MigrationBackupItem[];
+}
+
 interface LockHandle {
   release(): Promise<void>;
 }
@@ -291,6 +320,12 @@ async function readTextIfExists(file: string): Promise<string | undefined> {
   }
 }
 
+function backupTimestampFromPath(projectRoot: string, backupPath: string): string {
+  const backupsRoot = path.join(projectRoot, ".pensieve", ".state", "migration-backups");
+  const rel = path.relative(backupsRoot, backupPath);
+  return rel.split(path.sep).filter(Boolean)[0] || "unknown";
+}
+
 function backupRestorePaths(projectRoot: string, backupInput: string): { backupPath: string; originalRel: string; originalPath: string } {
   const pensieveRoot = path.join(projectRoot, ".pensieve");
   const backupsRoot = path.join(pensieveRoot, ".state", "migration-backups");
@@ -432,6 +467,118 @@ async function restorePreflight(args: {
     samePath,
     targetExists,
     alreadyRestored: !samePath && originalIsBackup && !targetExists,
+  };
+}
+
+async function walkBackupMarkdownFiles(root: string): Promise<Array<{ file: string; mtimeMs: number }>> {
+  const out: Array<{ file: string; mtimeMs: number }> = [];
+
+  async function walk(dir: string) {
+    let entries: fsSync.Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(abs);
+      } else if (entry.isFile() && entry.name.endsWith(".md")) {
+        const stat = await fs.stat(abs).catch(() => undefined);
+        out.push({ file: abs, mtimeMs: stat?.mtimeMs ?? 0 });
+      }
+    }
+  }
+
+  await walk(root);
+  return out.sort((a, b) => b.mtimeMs - a.mtimeMs || a.file.localeCompare(b.file));
+}
+
+function stateFromRestoreError(message: string): MigrationBackupState {
+  if (["target_modified", "source_exists", "source_modified", "source_missing"].includes(message)) {
+    return message as MigrationBackupState;
+  }
+  return "invalid";
+}
+
+async function describeMigrationBackup(
+  projectRoot: string,
+  backupPath: string,
+  memorySettings: MemorySettings,
+): Promise<MigrationBackupItem> {
+  const backupRel = path.relative(projectRoot, backupPath);
+  const base: MigrationBackupItem = {
+    backup_path: backupRel,
+    restore_command: restoreCommand(backupRel),
+    created_at: backupTimestampFromPath(projectRoot, backupPath),
+    state: "invalid",
+  };
+
+  try {
+    const paths = backupRestorePaths(projectRoot, backupRel);
+    base.source_path = path.relative(projectRoot, paths.originalPath) || paths.originalPath;
+    const raw = await fs.readFile(paths.backupPath, "utf-8");
+    const preflight = await restorePreflight({
+      raw,
+      originalPath: paths.originalPath,
+      originalRel: paths.originalRel,
+      projectRoot,
+      memorySettings,
+    });
+    return {
+      ...base,
+      target_path: preflight.displayTarget,
+      slug: preflight.built.slug,
+      title: preflight.built.title,
+      state: preflight.alreadyRestored
+        ? "already_restored"
+        : preflight.targetExists
+          ? "restorable_remove_target"
+          : "restorable",
+    };
+  } catch (e: unknown) {
+    const reason = e instanceof Error ? e.message : String(e);
+    try {
+      const paths = backupRestorePaths(projectRoot, backupRel);
+      base.source_path = base.source_path ?? (path.relative(projectRoot, paths.originalPath) || paths.originalPath);
+      const raw = await fs.readFile(paths.backupPath, "utf-8").catch(() => undefined);
+      if (raw !== undefined) {
+        const built = buildMigratedMarkdown({
+          raw,
+          sourcePath: paths.originalPath,
+          relPath: paths.originalRel,
+          projectRoot,
+          memorySettings,
+        });
+        base.target_path = path.relative(projectRoot, built.targetPath) || built.targetPath;
+        base.slug = built.slug;
+        base.title = built.title;
+      }
+    } catch {}
+    return { ...base, state: stateFromRestoreError(reason), reason };
+  }
+}
+
+export async function listMigrationBackups(
+  projectRootRaw: string,
+  memorySettings: MemorySettings,
+  limit = 20,
+): Promise<ListMigrationBackupsResult> {
+  const projectRoot = path.resolve(projectRootRaw);
+  const backupsRoot = path.join(projectRoot, ".pensieve", ".state", "migration-backups");
+  const backupRootDisplay = path.relative(projectRoot, backupsRoot) || backupsRoot;
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(Number.isFinite(limit) ? limit : 20)));
+  const files = await walkBackupMarkdownFiles(backupsRoot);
+  const items: MigrationBackupItem[] = [];
+  for (const { file } of files.slice(0, safeLimit)) {
+    items.push(await describeMigrationBackup(projectRoot, file, memorySettings));
+  }
+  return {
+    backup_root: backupRootDisplay,
+    total: files.length,
+    returned: items.length,
+    items,
   };
 }
 

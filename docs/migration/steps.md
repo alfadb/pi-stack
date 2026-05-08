@@ -21,7 +21,7 @@
 **验收标准**：
 - [ ] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）
 - [x] 10 条 Lint 规则实现（T1-T10；`/memory lint [path]` slash command，CLI wrapper 未实现；另有 `/memory doctor-lite [path]` 聚合报告）
-- [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 全库计划生成 + `/sediment migrate-one --plan <file>` 单文件预览 + `/sediment migrate-one --apply --yes <file>` 单文件 apply + `/sediment migrate-one --restore <backup> --yes` 单文件恢复；batch apply 仍待实现
+- [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 全库计划生成 + `/sediment migrate-one --plan <file>` 单文件预览 + `/sediment migrate-one --apply --yes <file>` 单文件 apply + `/sediment migrate-one --restore <backup> --yes` 单文件恢复 + `/sediment migration-backups` 恢复点列表；batch apply 仍待实现
 - [x] `memory_search` grep-based 实现（rg 文件发现 + per-file tf-idf + title/slug boost；project 层 + 可选 world 只读）
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
 - [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`；`/sediment migrate-one` 成功后自动重建）
@@ -67,7 +67,7 @@
 
 ### Phase 1.2 — 旧格式迁移
 
-**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pensieve/.state/migration-report.md`。实际条目迁移由 `extensions/sediment/migration.ts` 的 `/sediment migrate-one --plan <file>` / `/sediment migrate-one --apply --yes <file>` / `/sediment migrate-one --restore <backup> --yes` 承接：一次只预览、迁移或恢复单文件，以保持 staged/reversible；batch apply 尚未实现。
+**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pensieve/.state/migration-report.md`。实际条目迁移由 `extensions/sediment/migration.ts` 的 `/sediment migrate-one --plan <file>` / `/sediment migrate-one --apply --yes <file>` / `/sediment migrate-one --restore <backup> --yes` 承接；`/sediment migration-backups [--limit N]` 可列出最近 backup 与 restore 命令。一次只预览、迁移或恢复单文件，以保持 staged/reversible；batch apply 尚未实现。
 
 - 识别旧格式条目：无 `schema_version` 或无 `---` 分隔符
 - 自动映射：旧 `short-term/` → 条目移入同级目录 + `lifetime.kind: ttl`
@@ -94,6 +94,10 @@
 # 由 sediment/migration writer 执行，非当前 read-only extension
 /sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
 # → 备份 source，写入 schema v1/canonical path，返回 restore_command，并重建 .pensieve/.index/graph.json + .pensieve/_index.md
+
+# 列出最近 migration backups 与对应 restore_command
+/sediment migration-backups --limit 20
+# → 返回 backup_path/source_path/target_path/state/restore_command
 
 # 从 apply 产生的 backup 恢复原 source；仅在 target 未被手改时自动删除 target
 /sediment migrate-one --restore .pensieve/.state/migration-backups/<timestamp>/short-term/maxims/example.md --yes
@@ -199,6 +203,7 @@ memory_search(query: "dispatch agent prompt")
 - `/sediment migrate-one --plan <file>`：只预览单文件迁移结果，不写入、不 audit、不重建 derived artifacts
 - `/sediment migrate-one --apply --yes <file>`：只允许单文件迁移
 - `/sediment migrate-one --restore <backup> --yes`：只允许从 `.pensieve/.state/migration-backups/` 恢复单文件；若 target 已被手改则拒绝 `target_modified`，不恢复 source、不删除 target
+- `/sediment migration-backups [--limit N]`：只读列出最近 backup、restore command 与当前 state（restorable / target_modified / already_restored 等）
 - source 必须位于 `.pensieve/` 内且不是 `.state/.index/pipelines`
 - target 已存在则拒绝
 - 迁移前 backup 到 `.pensieve/.state/migration-backups/<timestamp>/...`
@@ -241,6 +246,9 @@ memory_search(query: "dispatch agent prompt")
 
 /sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
 # → 备份 source，迁移单个 legacy 文件到 schema v1/canonical path，并重建 graph/index derived artifacts
+
+/sediment migration-backups --limit 20
+# → 列出最近 backup、当前 state 与可复制 restore_command
 
 /sediment migrate-one --restore .pensieve/.state/migration-backups/<timestamp>/short-term/maxims/example.md --yes
 # → 从 backup 恢复原 source；若 target 与迁移生成内容一致则删除 target，并重建 graph/index
