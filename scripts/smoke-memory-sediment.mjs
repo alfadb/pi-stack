@@ -339,6 +339,41 @@ Body.
     assert(cpDiskRaw.sessions && cpDiskRaw.sessions["session-A"]?.lastProcessedEntryId === "entryA-99", "on-disk session A slot missing");
     assert(cpDiskRaw.sessions["session-B"]?.lastProcessedEntryId === "entryB-42", "on-disk session B slot missing");
 
+    // Regression: legacy audit file merge produces exactly one `\n`
+    // between rows, not zero (which would fuse JSONL lines) and not two
+    // (which would inject blank rows). Specifically reproduces the bug
+    // where ensureSedimentLegacyMigrated added an unconditional `\n`
+    // separator on top of canonical's existing trailing `\n`.
+    const mergeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-merge-"));
+    fs.mkdirSync(path.join(mergeRoot, ".pensieve", ".state"), { recursive: true });
+    fs.mkdirSync(path.join(mergeRoot, ".pi-astack", "sediment"), { recursive: true });
+    // Canonical already has a row (terminated by \n).
+    fs.writeFileSync(
+      path.join(mergeRoot, ".pi-astack", "sediment", "audit.jsonl"),
+      JSON.stringify({ timestamp: "2026-05-08T15:00:00.000+08:00", operation: "canonical" }) + "\n",
+    );
+    // Legacy has one row (also terminated by \n).
+    fs.writeFileSync(
+      path.join(mergeRoot, ".pensieve", ".state", "sediment-events.jsonl"),
+      JSON.stringify({ timestamp: "2026-05-08T14:55:00.000+08:00", operation: "legacy" }) + "\n",
+    );
+    // Trigger migration via any audit-touching call.
+    await req("./sediment/writer.js").appendAudit(mergeRoot, { operation: "new", timestamp: "2026-05-08T15:01:00.000+08:00" });
+    const mergedRaw = fs.readFileSync(path.join(mergeRoot, ".pi-astack", "sediment", "audit.jsonl"), "utf-8");
+    const mergedLines = mergedRaw.split("\n");
+    // Expect exactly: canonical, legacy, new, "" (trailing) — total 4.
+    assert(mergedLines.length === 4, `expected 4 lines (3 rows + trailing newline), got ${mergedLines.length}: ${JSON.stringify(mergedLines)}`);
+    assert(mergedLines[3] === "", `last element after split should be empty (trailing newline), got: ${JSON.stringify(mergedLines[3])}`);
+    for (let i = 0; i < 3; i++) {
+      assert(mergedLines[i].length > 0, `merged line ${i} should be non-empty, got: ${JSON.stringify(mergedLines[i])}`);
+      const parsed = JSON.parse(mergedLines[i]);
+      assert(parsed.operation, `merged line ${i} should be parseable JSONL with operation`);
+    }
+    assert(JSON.parse(mergedLines[0]).operation === "canonical", "merged: existing canonical row preserved at top");
+    assert(JSON.parse(mergedLines[1]).operation === "legacy", "merged: legacy row appended after canonical");
+    assert(JSON.parse(mergedLines[2]).operation === "new", "merged: new appendAudit landed after migration");
+    assert(!fs.existsSync(path.join(mergeRoot, ".pensieve", ".state", "sediment-events.jsonl")), "legacy audit file removed after merge");
+
     // Regression: v1 schema (raw {lastProcessedEntryId}) auto-upgrades on
     // first read. v1 with no sessionId lands in the LEGACY slot and is
     // adopted by the first session that writes (then cleared).

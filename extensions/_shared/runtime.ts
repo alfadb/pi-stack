@@ -136,8 +136,10 @@ export async function ensureSedimentLegacyMigrated(projectRoot: string): Promise
   /**
    * Move legacy audit file to canonical location. If both exist (e.g.,
    * a stray write happened between two restarts of mixed code paths),
-   * APPEND the legacy content to canonical and remove legacy. This is
-   * append-only audit data so concatenation is safe.
+   * APPEND the legacy content to canonical and remove legacy. Care is
+   * taken to produce exactly one `\n` between rows: never zero (would
+   * fuse two JSONL lines) and never two+ (would inject blank rows that
+   * pass `if (!line.trim()) continue` filters but waste readers' time).
    */
   async function migrateAuditFile(oldPath: string, newPath: string): Promise<void> {
     const oldExists = fsSync.existsSync(oldPath);
@@ -145,7 +147,6 @@ export async function ensureSedimentLegacyMigrated(projectRoot: string): Promise
     const newExists = fsSync.existsSync(newPath);
     await fs.mkdir(path.dirname(newPath), { recursive: true });
     if (!newExists) {
-      // Simple rename when canonical doesn't exist yet.
       try {
         await fs.rename(oldPath, newPath);
         return;
@@ -159,13 +160,32 @@ export async function ensureSedimentLegacyMigrated(projectRoot: string): Promise
       }
     }
     // Both exist: append legacy content to canonical, then remove legacy.
-    const legacyContent = await fs.readFile(oldPath, "utf-8");
-    if (legacyContent.length > 0) {
-      // Ensure trailing newline boundary so we don't fuse two JSONL lines.
-      const sep = legacyContent.startsWith("\n") ? "" : "\n";
-      await fs.appendFile(newPath, sep + legacyContent, "utf-8");
+    const legacyRaw = await fs.readFile(oldPath, "utf-8");
+    // Strip leading/trailing whitespace, collapse internal blank lines.
+    // Each non-empty line must end with exactly one `\n` in the output.
+    const lines = legacyRaw.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+    if (lines.length > 0) {
+      // Ensure canonical ends with `\n` so the appended block doesn't
+      // accidentally fuse onto the previous final row. Standard JSONL
+      // append-writes always close with `\n`, so this is usually a no-op.
+      const newEndsWithNL = await fileEndsWithNewline(newPath);
+      const prefix = newEndsWithNL ? "" : "\n";
+      await fs.appendFile(newPath, prefix + lines.join("\n") + "\n", "utf-8");
     }
     await fs.unlink(oldPath);
+  }
+
+  async function fileEndsWithNewline(file: string): Promise<boolean> {
+    const stat = await fs.stat(file);
+    if (stat.size === 0) return true;
+    const fd = await fs.open(file, "r");
+    try {
+      const buf = Buffer.alloc(1);
+      await fd.read(buf, 0, 1, stat.size - 1);
+      return buf[0] === 0x0a;
+    } finally {
+      await fd.close();
+    }
   }
 
   /**
