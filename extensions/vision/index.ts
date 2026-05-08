@@ -24,8 +24,8 @@ import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { Model } from "@mariozechner/pi-ai";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 // ── pi-astack settings loader ──────────────────────────────
@@ -306,7 +306,7 @@ async function analyzeImage(
           maxRetries?: number;
         },
       ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }>; usage?: unknown }> };
-    } = await import("@mariozechner/pi-ai");
+    } = await import("@earendil-works/pi-ai");
 
     const userMsg = {
       role: "user" as const,

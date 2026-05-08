@@ -30,6 +30,24 @@ function writeFile(file, content) {
   fs.writeFileSync(file, content);
 }
 
+function assertNoLegacyPackageScope() {
+  const legacyScope = ["@mariozechner", "pi-"].join("/");
+  const roots = ["extensions", "docs", "package.json", "README.md"];
+  const offenders = [];
+  function visit(file) {
+    const stat = fs.statSync(file);
+    if (stat.isDirectory()) {
+      for (const child of fs.readdirSync(file)) visit(path.join(file, child));
+      return;
+    }
+    if (!/\.(ts|md|json)$/.test(file)) return;
+    const raw = fs.readFileSync(file, "utf-8");
+    if (raw.includes(legacyScope)) offenders.push(path.relative(repoRoot, file));
+  }
+  for (const root of roots) visit(path.join(repoRoot, root));
+  assert(offenders.length === 0, `legacy pi package scope remains: ${offenders.join(", ")}`);
+}
+
 function transpileExtensions(outRoot) {
   const extRoot = path.join(repoRoot, "extensions");
   const dirs = ["memory", "sediment"];
@@ -88,6 +106,7 @@ ${body}
 }
 
 async function main() {
+  assertNoLegacyPackageScope();
   const outRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-"));
   const count = transpileExtensions(outRoot);
   const req = createRequire(path.join(outRoot, "runner.cjs"));

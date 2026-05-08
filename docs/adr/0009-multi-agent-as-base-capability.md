@@ -270,7 +270,7 @@ ADR 0009 的核心命题是"multi-agent 是基础能力",前提是**它真并发
 | 运行时层 | Node.js async IO | LLM 调用是 network-bound,不是 CPU-bound 时间片模拟 |
 | provider 层 | N 个 provider request | 远端模型各自独立计算,跨 provider 可分摊 rate limit |
 
-**验收标准**:总时长 ≈ max(各 task 时长),不是 sum。长期 ADR 不绑定 `@mariozechner/pi-ai/dist/*` 或具体 provider 内部实现;底层实现变化由 P3/P4 并发性测试捕获。
+**验收标准**:总时长 ≈ max(各 task 时长),不是 sum。长期 ADR 不绑定 `@earendil-works/pi-ai/dist/*` 或具体 provider 内部实现;底层实现变化由 P3/P4 并发性测试捕获。
 
 ## 真并发的真实约束
 
