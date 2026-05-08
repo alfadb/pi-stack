@@ -59,6 +59,23 @@ function parseBlock(block: string, markerIndex: number): ExtractedMemoryDraft | 
 }
 
 /**
+ * Returns true iff the position `charIndex` falls inside an open fenced
+ * code block (``` or ~~~). Used to skip MEMORY: markers that the agent or
+ * user wrote as a literal example rather than as an explicit memory directive.
+ *
+ * Deliberately does NOT strip code regions before regex scanning (unlike
+ * extractBodyWikilinks): a legitimate top-level MEMORY: block may include
+ * fenced code samples in its body, and we must preserve that body intact.
+ * Instead, we only check whether the MEMORY: line itself sits inside a
+ * fence.
+ */
+function isInsideCodeFence(text: string, charIndex: number): boolean {
+  const before = text.slice(0, charIndex);
+  const fences = before.match(/^(?:```|~~~)/gm) || [];
+  return fences.length % 2 === 1;
+}
+
+/**
  * Deterministic extractor for explicit user/assistant markers only.
  *
  * Format:
@@ -72,6 +89,10 @@ function parseBlock(block: string, markerIndex: number): ExtractedMemoryDraft | 
  *
  * Compiled truth body...
  * END_MEMORY
+ *
+ * MEMORY: markers that appear inside fenced code blocks (``` or ~~~) are
+ * skipped — those are documentation/demonstration of the format, not
+ * directives to write memory.
  */
 export function parseExplicitMemoryBlocks(text: string): ExtractedMemoryDraft[] {
   const out: ExtractedMemoryDraft[] = [];
@@ -79,6 +100,7 @@ export function parseExplicitMemoryBlocks(text: string): ExtractedMemoryDraft[] 
   let match: RegExpExecArray | null;
   let markerIndex = 0;
   while ((match = re.exec(text))) {
+    if (isInsideCodeFence(text, match.index)) continue;
     markerIndex++;
     const draft = parseBlock(match[1], markerIndex);
     if (draft) out.push(draft);

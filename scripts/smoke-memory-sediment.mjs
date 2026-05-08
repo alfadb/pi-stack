@@ -324,6 +324,64 @@ This is a valid explicit marker body.
 END_MEMORY`;
     assert(parseExplicitMemoryBlocks(marker).length === 1, "explicit marker parse failed");
 
+    // Regression: MEMORY: blocks inside fenced code (``` or ~~~) must be
+    // skipped — those are docs/demos, not directives. Bare top-level blocks
+    // are still captured. A legitimate body MAY contain code samples without
+    // corrupting the parse.
+    const fencedDemo = [
+      "Here is the format I'd document for users:",
+      "",
+      "```",
+      "MEMORY:",
+      "title: Demo Inside Fence",
+      "kind: fact",
+      "confidence: 3",
+      "---",
+      "# Demo Inside Fence",
+      "This must NOT be captured.",
+      "END_MEMORY",
+      "```",
+      "",
+      "And same with tildes:",
+      "",
+      "~~~",
+      "MEMORY:",
+      "title: Demo Inside Tildes",
+      "kind: fact",
+      "---",
+      "# Demo Inside Tildes",
+      "Also NOT captured.",
+      "END_MEMORY",
+      "~~~",
+      "",
+      "But this real one at top level should be captured, even though",
+      "its body contains a fenced code sample:",
+      "",
+      "MEMORY:",
+      "title: Real Insight With Code Body",
+      "kind: fact",
+      "confidence: 4",
+      "---",
+      "# Real Insight With Code Body",
+      "",
+      "Example usage:",
+      "",
+      "```python",
+      "print('hello')",
+      "```",
+      "",
+      "That is the gist.",
+      "END_MEMORY",
+    ].join("\n");
+    const fencedDrafts = parseExplicitMemoryBlocks(fencedDemo);
+    assert(
+      fencedDrafts.length === 1 && fencedDrafts[0].title === "Real Insight With Code Body",
+      `expected exactly one captured draft ("Real Insight With Code Body"), got ${fencedDrafts.length}: ${fencedDrafts.map(d=>d.title).join(", ")}`,
+    );
+    for (const banned of ["Demo Inside Fence", "Demo Inside Tildes"]) {
+      assert(!fencedDrafts.some(d => d.title === banned), `fenced MEMORY block "${banned}" leaked into drafts`);
+    }
+
     const llmSummary = summarizeLlmExtractorDryRun({ ok: true, model: "x/y", rawText: "SKIP", extraction: { count: 0, drafts: [] } }, { maxCandidates: 3, rawPreviewChars: 10 });
     assert(llmSummary.quality.reason === "skip" && llmSummary.quality.passed, "llm summary skip gate failed");
 
