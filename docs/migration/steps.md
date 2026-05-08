@@ -50,18 +50,22 @@
 
 ### Phase 1.2 — 旧格式迁移
 
-**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写文件。实际写入迁移仍需后续 sediment/migration writer 承接，以保持主会话只读边界。
+**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pensieve/.state/migration-report.md`。实际条目迁移仍需后续 sediment/migration writer 承接，以保持主会话只读边界。
 
 - 识别旧格式条目：无 `schema_version` 或无 `---` 分隔符
 - 自动映射：旧 `short-term/` → 条目移入同级目录 + `lifetime.kind: ttl`
 - 缺失 timeline：迁移时生成初始 timeline 行
 - 迁移前自动 git commit 当前状态（可回滚）
 - 支持 `--dry-run`
+- 支持 `--report` 写入 `.pensieve/.state/migration-report.md`（generated artifact）
 
 **当前验收**：
 ```text
 /memory migrate --dry-run .pensieve
-# → 显示迁移计划，不修改文件
+# → 显示迁移计划，不修改 markdown 条目
+
+/memory migrate --dry-run --report .pensieve
+# → 写入 .pensieve/.state/migration-report.md，便于人工审查
 ```
 
 **待实现验收**：

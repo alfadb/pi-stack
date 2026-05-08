@@ -14,7 +14,7 @@ import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./ty
 import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, searchEntries, serializeEntry } from "./search";
 import { formatLintReport, lintTarget } from "./lint";
-import { formatMigrationPlan, planMigrationDryRun } from "./migrate";
+import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "./migrate";
 import { checkBacklinks, formatBacklinkReport, formatGraphRebuildReport, rebuildGraphIndex } from "./graph";
 import { formatMarkdownIndexRebuildReport, rebuildMarkdownIndex } from "./index-file";
 import { clamp, normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
@@ -30,11 +30,11 @@ function registerMemoryCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("memory", {
-    description: "Memory maintenance commands: /memory lint [path], /memory migrate --dry-run [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path]",
+    description: "Memory maintenance commands: /memory lint [path], /memory migrate --dry-run [--report] [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path]",
     getArgumentCompletions(prefix: string) {
       const items = [
         "lint", "lint .pensieve",
-        "migrate --dry-run", "migrate --dry-run .pensieve",
+        "migrate --dry-run", "migrate --dry-run --report", "migrate --dry-run .pensieve",
         "check-backlinks", "check-backlinks .pensieve",
         "rebuild --graph", "rebuild --graph .pensieve",
         "rebuild --index", "rebuild --index .pensieve",
@@ -59,15 +59,21 @@ function registerMemoryCommand(pi: ExtensionAPI) {
 
       if (subcommand === "migrate") {
         const dryRun = rest.includes("--dry-run") || rest.includes("-n");
+        const writeReport = rest.includes("--report");
         if (!dryRun) {
-          ctx.ui.notify("Usage: /memory migrate --dry-run [path]. Actual writes are reserved for the sediment/migration writer.", "warning");
+          ctx.ui.notify("Usage: /memory migrate --dry-run [--report] [path]. Actual markdown writes are reserved for the sediment/migration writer.", "warning");
           return;
         }
-        const targetParts = rest.filter((part) => part !== "--dry-run" && part !== "-n");
+        const targetParts = rest.filter((part) => part !== "--dry-run" && part !== "-n" && part !== "--report");
         const targetArg = targetParts.join(" ").trim();
         const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
         const report = await planMigrationDryRun(target, settings, undefined, cwd);
-        ctx.ui.notify(formatMigrationPlan(report), report.migrateCount > 0 ? "warning" : "info");
+        const messages = [formatMigrationPlan(report)];
+        if (writeReport) {
+          const written = await writeMigrationReport(target, report, cwd);
+          messages.push(`Migration report written: ${written.report_path}`);
+        }
+        ctx.ui.notify(messages.join("\n\n"), report.migrateCount > 0 ? "warning" : "info");
         return;
       }
 
@@ -105,7 +111,7 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate --dry-run [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]", "warning");
+      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate --dry-run [--report] [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]", "warning");
     },
   });
 }

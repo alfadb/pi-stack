@@ -42,6 +42,12 @@ export interface MigrationPlanReport {
   writeAvailable: false;
 }
 
+export interface MigrationReportWriteResult {
+  report_path: string;
+  migrateCount: number;
+  skippedCount: number;
+}
+
 function addDaysIso(dateLike: string | undefined, days: number): string {
   const base = dateLike && /^\d{4}-\d{2}-\d{2}/.test(dateLike)
     ? new Date(`${dateLike.slice(0, 10)}T00:00:00Z`)
@@ -208,6 +214,103 @@ export async function planMigrationDryRun(
     skipped,
     dryRun: true,
     writeAvailable: false,
+  };
+}
+
+function countValues(items: string[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const item of items) counts[item] = (counts[item] ?? 0) + 1;
+  return counts;
+}
+
+function markdownCell(value: string): string {
+  return value.replace(/\|/g, "\\|").replace(/\n/g, "<br>");
+}
+
+export function formatMigrationReportMarkdown(report: MigrationPlanReport): string {
+  const kindCounts = countValues(report.items.map((item) => item.kind));
+  const reasonCounts = countValues(report.items.flatMap((item) => item.reasons));
+  const lines: string[] = [
+    "# Memory Migration Dry-Run Report",
+    "",
+    `> Generated ${new Date().toISOString()} | target: \`${report.target}\``,
+    "",
+    "## Summary",
+    "",
+    `- Files scanned: ${report.filesScanned}`,
+    `- Need migration: ${report.migrateCount}`,
+    `- Skipped: ${report.skippedCount}`,
+    `- Dry run: ${report.dryRun}`,
+    `- Writes available: ${report.writeAvailable}`,
+    "",
+    "## By Kind",
+    "",
+  ];
+
+  for (const [kind, count] of Object.entries(kindCounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+    lines.push(`- ${kind}: ${count}`);
+  }
+  if (Object.keys(kindCounts).length === 0) lines.push("- None");
+
+  lines.push("", "## By Reason", "");
+  for (const [reason, count] of Object.entries(reasonCounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))) {
+    lines.push(`- ${reason}: ${count}`);
+  }
+  if (Object.keys(reasonCounts).length === 0) lines.push("- None");
+
+  lines.push("", "## Migration Items", "");
+  if (report.items.length === 0) {
+    lines.push("- None");
+  } else {
+    lines.push("| Source | Target | Title | Kind | Confidence | Reasons | Actions |");
+    lines.push("|---|---|---|---:|---:|---|---|");
+    for (const item of report.items) {
+      lines.push([
+        markdownCell(item.source_path),
+        markdownCell(item.target_path),
+        markdownCell(item.title),
+        markdownCell(item.kind),
+        String(item.confidence),
+        markdownCell(item.reasons.join(", ")),
+        markdownCell(item.actions.join("; ")),
+      ].join(" | ").replace(/^/, "| ").replace(/$/, " |"));
+    }
+  }
+
+  lines.push("", "## Skipped", "");
+  if (report.skipped.length === 0) {
+    lines.push("- None");
+  } else {
+    lines.push("| Source | Reason |");
+    lines.push("|---|---|");
+    for (const item of report.skipped) {
+      lines.push(`| ${markdownCell(item.source_path)} | ${markdownCell(item.reason)} |`);
+    }
+  }
+
+  lines.push("");
+  return lines.join("\n");
+}
+
+async function atomicWrite(file: string, content: string) {
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const tmp = path.join(path.dirname(file), `.tmp-${path.basename(file)}-${process.pid}-${Date.now()}`);
+  await fs.writeFile(tmp, content, "utf-8");
+  await fs.rename(tmp, file);
+}
+
+export async function writeMigrationReport(
+  target: string,
+  report: MigrationPlanReport,
+  cwd = process.cwd(),
+): Promise<MigrationReportWriteResult> {
+  const projectRoot = inferProjectRoot(path.resolve(target));
+  const reportPath = path.join(projectRoot, ".state", "migration-report.md");
+  await atomicWrite(reportPath, formatMigrationReportMarkdown(report));
+  return {
+    report_path: prettyPath(reportPath, cwd),
+    migrateCount: report.migrateCount,
+    skippedCount: report.skippedCount,
   };
 }
 
