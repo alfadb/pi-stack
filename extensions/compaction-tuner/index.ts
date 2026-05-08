@@ -66,8 +66,25 @@ interface CompactionTunerCtx {
  */
 const armedBySession = new Map<string, boolean>();
 
+/**
+ * Best-effort sessionId reader, with ephemeral-session filtering.
+ * Mirrors the sediment extension: a session is treated as ephemeral
+ * (returns undefined) when `getSessionFile()` is unavailable or
+ * returns no path. `--no-session`, `pi --print` without a session
+ * file, and dispatch_agent subprocesses without a persisted session
+ * all fall into this bucket. Their compaction would summarize
+ * messages no future turn will ever see, so we skip the work.
+ */
 function readSessionId(sm: CompactionTunerCtx["sessionManager"]): string | undefined {
   if (!sm || typeof sm.getSessionId !== "function") return undefined;
+  if (typeof sm.getSessionFile === "function") {
+    try {
+      const file = sm.getSessionFile();
+      if (!file || typeof file !== "string") return undefined;
+    } catch {
+      return undefined;
+    }
+  }
   try {
     const id = sm.getSessionId();
     return typeof id === "string" && id.trim() ? id : undefined;
@@ -124,11 +141,14 @@ export default function (pi: ExtensionAPI) {
 
     const settings = resolveCompactionTunerSettings();
     if (!settings.enabled) return;
+    // Ephemeral sessions: their compaction would summarize a transcript
+    // no future turn will read. Skip silently and don't even pollute
+    // hysteresis state with a throwaway slot.
+    if (!sessionId) return;
     if (!compact) return;
 
-    // Hysteresis state key: prefer sessionId; fall back to a stable
-    // per-process key so ephemeral sessions still have one slot.
-    const stateKey = sessionId ?? `pid:${process.pid}`;
+    // sessionId is guaranteed truthy past the ephemeral early-return.
+    const stateKey = sessionId;
     const wasArmed = armedBySession.get(stateKey) ?? true;
 
     const percent = usage?.percent ?? null;
@@ -180,7 +200,6 @@ export default function (pi: ExtensionAPI) {
             operation: "trigger",
             outcome: "completed",
             session_id: sessionId,
-            ephemeral_session: !sessionId,
             percent_at_trigger: percent,
             threshold_percent: settings.thresholdPercent,
             rearm_margin_percent: settings.rearmMarginPercent,
@@ -204,7 +223,6 @@ export default function (pi: ExtensionAPI) {
             outcome: "error",
             error_message: error.message,
             session_id: sessionId,
-            ephemeral_session: !sessionId,
             percent_at_trigger: percent,
             threshold_percent: settings.thresholdPercent,
             tokens_at_trigger: usage?.tokens ?? null,
@@ -226,7 +244,6 @@ export default function (pi: ExtensionAPI) {
         outcome: "sync_error",
         error_message: message,
         session_id: sessionId,
-        ephemeral_session: !sessionId,
         percent_at_trigger: percent,
         threshold_percent: settings.thresholdPercent,
         elapsed_ms: Date.now() - ts,
