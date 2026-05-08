@@ -313,6 +313,13 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
 
   const relPath = path.relative(store.root, file);
   const { frontmatterText, body } = splitFrontmatter(raw);
+  // Skip files without frontmatter. Canonical memory entries ALWAYS
+  // have schema v1 frontmatter (`---` ... `---`); plain markdown like
+  // README.md / CHANGELOG.md / docs would otherwise be coerced into
+  // degraded entries (kind=fact, status=active by default) and
+  // pollute search results. Discovered when initializing ~/.abrain/
+  // and finding the README.md indexed as a memory entry.
+  if (!frontmatterText.trim()) return null;
   const frontmatter = parseFrontmatter(frontmatterText);
   const { compiledTruth, timeline } = splitCompiledTruth(body);
 
