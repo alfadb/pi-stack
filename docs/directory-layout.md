@@ -62,8 +62,10 @@ alfadb/pi-astack/
 │   │   ├── index.ts                   # /sediment status/window/smoke；agent_end hook fail-closed
 │   │   ├── settings.ts                # sediment 配置读取
 │   │   ├── checkpoint.ts              # checkpoint + run window builder
+│   │   ├── validation.ts              # draft runtime validation
+│   │   ├── dedupe.ts                  # deterministic slug/title duplicate detection
 │   │   ├── sanitizer.ts               # 最小写前脱敏/fail-closed
-│   │   └── writer.ts                  # lock + atomic markdown write + audit + git best-effort
+│   │   └── writer.ts                  # validate + dedupe + lock + atomic write + audit + git best-effort
 │   └── browse/                        # [计划] from pi-gstack
 │
 ├── skills/                            # [计划] pi 技能（19 gstack skills + memory-wand）

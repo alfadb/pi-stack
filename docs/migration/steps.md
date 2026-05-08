@@ -26,7 +26,7 @@
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
 - [ ] `_index.md` 自动生成（sediment 写入后重建）
 - [x] graph 派生索引：已实现 `buildGraphSnapshot` + `/memory check-backlinks [path]` + `/memory rebuild --graph [path]` 写入 gitignored derived index
-- [ ] Sediment project-only pipeline：writer substrate 已实现（sanitize → lint → lock → atomic write md → git best-effort → audit）；extract/classify/dedupe/agent_end 自动写仍待实现
+- [ ] Sediment project-only pipeline：writer substrate 已实现（validate → sanitize → deterministic dedupe → lint → lock → atomic write md → git best-effort → audit）；extract/classify/agent_end 自动写仍待实现
 - [x] Project scope 的 file lock + 错误恢复（writer substrate）
 - [x] 最小脱敏：credential pattern → 写入拒绝（fail-closed）；$HOME 路径替换
 
@@ -123,7 +123,9 @@ memory_search(query: "dispatch agent prompt")
 - agent_end enabled 时 audit window stats，但 extractor 未实现所以不推进 checkpoint
 
 已完成 writer substrate：
+- validate：runtime 检查 title/kind/status/confidence/compiledTruth
 - sanitize：credential pattern 命中 fail-closed；`$HOME` 路径替换；IP/email redact
+- deterministic dedupe：slug 精确相等 + 标题 trigram Jaccard ≥ 0.7，命中则 reject duplicate
 - lint：写前调用 T1-T10 lint，error 阻断写入
 - lock：`.pensieve/.state/locks/sediment.lock`，超时可配置
 - write：tmp → rename 原子写入 markdown
@@ -133,7 +135,6 @@ memory_search(query: "dispatch agent prompt")
 待实现完整 pipeline：
 - checkpoint advance policy（SKIP / SKIP_DUPLICATE / write success 后推进）
 - extract + classify（单 agent + lookup tools，继承 ADR 0010 内核）
-- deterministic dedupe：slug 精确相等 + 标题 trigram Jaccard ≥ 0.7
 - 自动写入 project 条目
 
 **当前验收**：
@@ -141,8 +142,11 @@ memory_search(query: "dispatch agent prompt")
 /sediment window --dry-run
 # → 返回 checkpoint/run-window stats，不推进 checkpoint
 
+/sediment dedupe --title "Some Insight Title"
+# → 返回 deterministic duplicate 检查结果
+
 /sediment smoke --dry-run
-# → 返回将写入的 slug/path/lint 结果，但不写 markdown
+# → 返回将写入的 slug/path/lint/dedupe 结果，但不写 markdown
 ```
 
 **待实现验收**：

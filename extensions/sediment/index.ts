@@ -10,6 +10,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { resolveSedimentSettings } from "./settings";
 import { buildRunWindow, checkpointSummary, loadCheckpoint } from "./checkpoint";
+import { detectProjectDuplicate } from "./dedupe";
 import { appendAudit, writeProjectEntry } from "./writer";
 
 function registerSedimentCommand(pi: ExtensionAPI) {
@@ -23,9 +24,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window and smoke test: /sediment status, /sediment window --dry-run, /sediment smoke --dry-run",
+    description: "Sediment writer status/window/dedupe and smoke test: /sediment status, /sediment window --dry-run, /sediment dedupe --title <title>, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "dedupe --title ", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -63,6 +64,18 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
+      if (subcommand === "dedupe") {
+        const titleFlagIndex = rest.indexOf("--title");
+        const title = titleFlagIndex >= 0 ? rest.slice(titleFlagIndex + 1).join(" ").trim() : rest.join(" ").trim();
+        if (!title) {
+          ctx.ui.notify("Usage: /sediment dedupe --title <title>", "warning");
+          return;
+        }
+        const result = await detectProjectDuplicate(cwd, title);
+        ctx.ui.notify(JSON.stringify(result, null, 2), result.duplicate ? "warning" : "info");
+        return;
+      }
+
       if (subcommand === "smoke") {
         if (!rest.includes("--dry-run")) {
           ctx.ui.notify("Usage: /sediment smoke --dry-run (apply is intentionally not exposed)", "warning");
@@ -80,7 +93,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment dedupe --title <title> OR /sediment smoke --dry-run", "warning");
     },
   });
 }

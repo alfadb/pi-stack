@@ -4,14 +4,13 @@ import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
+import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
+import { type EntryKind, type EntryStatus, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
 import { normalizeBareSlug, slugify } from "../memory/utils";
 
 const execFileAsync = promisify(execFile);
-
-type EntryKind = "maxim" | "decision" | "anti-pattern" | "pattern" | "fact" | "preference" | "smell";
-type EntryStatus = "provisional" | "active" | "contested" | "deprecated" | "superseded" | "archived";
 
 export interface ProjectEntryDraft {
   title: string;
@@ -41,6 +40,8 @@ export interface WriteProjectEntryResult {
   gitCommit?: string | null;
   auditPath?: string;
   sanitizedReplacements?: string[];
+  duplicate?: DedupeResult;
+  validationErrors?: Array<{ field: string; message: string }>;
 }
 
 interface LockHandle {
@@ -195,6 +196,25 @@ export async function writeProjectEntry(
     return { slug: normalizeBareSlug(draft.title), path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
   }
 
+  const validationErrors = validateProjectEntryDraft(draft);
+  if (validationErrors.length > 0) {
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "reject",
+      reason: "validation_error",
+      title: draft.title,
+      validationErrors,
+      duration_ms: Date.now() - started,
+    });
+    return {
+      slug: normalizeBareSlug(draft.title),
+      path: pensieveRoot,
+      status: "rejected",
+      reason: "validation_error",
+      validationErrors,
+      auditPath,
+    };
+  }
+
   const sanitize = sanitizeForMemory(`${draft.title}\n${draft.compiledTruth}\n${draft.timelineNote ?? ""}`);
   if (!sanitize.ok) {
     const auditPath = await appendAudit(projectRoot, {
@@ -216,6 +236,26 @@ export async function writeProjectEntry(
   const { slug, markdown } = buildMarkdown(safeDraft, projectRoot);
   const status = safeDraft.status ?? "provisional";
   const target = path.join(pensieveRoot, kindDirectory(safeDraft.kind, status), `${slug}.md`);
+
+  const duplicate = await detectProjectDuplicate(projectRoot, safeDraft.title, { slug });
+  if (duplicate.duplicate) {
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "reject",
+      reason: duplicate.reason === "slug_exact" ? "duplicate_slug" : "duplicate_title",
+      target: `project:${slug}`,
+      duplicate,
+      duration_ms: Date.now() - started,
+    });
+    return {
+      slug,
+      path: target,
+      status: "rejected",
+      reason: duplicate.reason === "slug_exact" ? "duplicate_slug" : "duplicate_title",
+      duplicate,
+      auditPath,
+    };
+  }
+
   const lint = lintMarkdown(markdown, target);
   const lintErrors = lint.filter((issue) => issue.severity === "error").length;
   const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
@@ -246,13 +286,20 @@ export async function writeProjectEntry(
   try {
     lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
     if (fsSync.existsSync(target)) {
+      const duplicateRace: DedupeResult = {
+        duplicate: true,
+        reason: "slug_exact",
+        score: 1,
+        match: { slug, title: safeDraft.title, kind: safeDraft.kind, status, source_path: path.relative(projectRoot, target) },
+      };
       const auditPath = await appendAudit(projectRoot, {
         operation: "reject",
         reason: "duplicate_slug",
         target: `project:${slug}`,
+        duplicate: duplicateRace,
         duration_ms: Date.now() - started,
       });
-      return { slug, path: target, status: "rejected", reason: "duplicate_slug", auditPath };
+      return { slug, path: target, status: "rejected", reason: "duplicate_slug", duplicate: duplicateRace, auditPath };
     }
 
     await atomicWrite(target, markdown);
