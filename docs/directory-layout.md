@@ -63,18 +63,23 @@ alfadb/pi-astack/
 │   │   ├── migrate.ts                 # legacy migration dry-run planner
 │   │   ├── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
 │   │   └── index-file.ts              # generated _index.md rebuild writer
-│   ├── sediment/                      # ✅ 部分实现：project-only writer substrate（Phase 1.4a）
-│   │   ├── index.ts                   # /sediment status/window/smoke；agent_end hook fail-closed
+│   ├── sediment/                      # ✅ 实现：project-only writer + LLM auto-write lane（Phase 1.4 A1+A2+A3）
+│   │   ├── index.ts                   # /sediment 子命令 + agent_end hook + footer status FSM (idle/running/completed/failed) + bg promise tracking
 │   │   ├── settings.ts                # sediment 配置读取
-│   │   ├── checkpoint.ts              # checkpoint + run window builder
-│   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor
-│   │   ├── llm-extractor.ts           # /sediment llm --dry-run prompt + model call
-│   │   ├── report.ts                  # llm_dry_run audit report
+│   │   ├── checkpoint.ts              # per-session checkpoint + run window builder + RMW lock
+│   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor (fence-aware)
+│   │   ├── llm-extractor.ts           # LLM extractor prompt (Trust Boundary + durability test) + model call + parser
+│   │   ├── report.ts                  # llm_dry_run + auto_write audit reports + rolling gate evaluator
 │   │   ├── migration.ts               # /sediment migrate-one/migration-backups legacy migration plan/apply/restore/list
-│   │   ├── validation.ts              # draft runtime validation
-│   │   ├── dedupe.ts                  # deterministic slug/title duplicate detection
-│   │   ├── sanitizer.ts               # 最小写前脱敏/fail-closed
-│   │   └── writer.ts                  # validate + dedupe + lock + atomic write + audit + git best-effort
+│   │   ├── validation.ts              # draft runtime validation + DraftPolicy overlay (G3/G3.5/G4/G13)
+│   │   ├── dedupe.ts                  # HARD (slug/word-trigram≥0.7) + SOFT G13 (char-trigram + rare token + same kind) duplicate detection
+│   │   ├── sanitizer.ts               # G5 写前脱敏/fail-closed (jwt/pem/aws/url/email/ip/$HOME)
+│   │   └── writer.ts                  # validate + sanitize + dedupe + lint + lock + atomic write + audit + git best-effort
+│   ├── compaction-tuner/              # ✅ 实现：计划外落地（2026-05-08）
+│   │   ├── index.ts                   # agent_end hook 读 ctx.getContextUsage() 超阈 → ctx.compact()；/compaction-tuner [status|trigger]
+│   │   └── settings.ts                # thresholdPercent / rearmMarginPercent
+│   ├── _shared/                       # ✅ 跨扩展 helpers
+│   │   └── runtime.ts                 # local-tz timestamp / .pi-astack/<module>/ path / appendAudit
 │   └── browse/                        # [计划] from pi-gstack
 │
 ├── skills/                            # [计划] pi 技能（19 gstack skills + memory-wand）
@@ -95,7 +100,8 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b |
-| `extensions/sediment/` | ✅ 部分实现（explicit extractor + LLM dry-run + migrate-one plan/apply/restore + migration-backups；自动 LLM 写入未启用） | Phase 1.4a |
+| `extensions/sediment/` | ✅ 实现（explicit extractor + LLM dry-run + LLM auto-write lane LIVE + migrate-one + status FSM + G2-G13 闸门） | Phase 1.4 A1+A2+A3 |
+| `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |

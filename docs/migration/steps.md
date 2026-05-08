@@ -175,12 +175,18 @@ memory_search(query: "dispatch agent prompt")
 - `buildRunWindow(branch, checkpoint)`：从 `ctx.sessionManager.getBranch()` 取 checkpoint 之后的新 entries
 - compaction/branch fallback：checkpoint entry 找不到时只取最新 entry，避免重放全历史
 - window budget：`minWindowChars` / `maxWindowChars` / `maxWindowEntries`
-- agent_end enabled 时：无新窗口/无显式 `MEMORY:` marker → audit skip 并推进 checkpoint；有显式 marker → 走 deterministic extractor + writer；LLM 自动写入仍未接入
+- agent_end enabled 时：无新窗口/无显式 `MEMORY:` marker → audit skip 并推进 checkpoint；有显式 marker → 走 deterministic extractor + writer；无 marker + auto-write 诺动与 gates 放行 → 调度 bg LLM lane（fire-and-forget，见 A2/A3）
 
 已完成 writer substrate：
 - validate：runtime 检查 title/kind/status/confidence/compiledTruth
 - sanitize：credential pattern 命中 fail-closed；`$HOME` 路径替换；IP/email redact
-- deterministic dedupe：slug 精确相等 + 标题 trigram Jaccard ≥ 0.7，命中则 reject duplicate
+- deterministic dedupe：
+  - **HARD signal**（无条件 reject）：slug 精确相等 OR 标题 word-trigram Jaccard ≥ 0.7
+  - **SOFT signal G13**（`policy.disallowNearDuplicate` 控制）：char-trigram Jaccard ≥ 0.20 AND 共享 rare token (df ≤ 2，长度过滤后) AND 同 kind
+    - 校准：vs 真实 .pensieve/ (177 entries) flag 率 2/15576，零误伤
+    - LLM auto-write lane 默认开启 (`autoWriteDisallowNearDuplicate: true`)；explicit `MEMORY:` lane 默认关闭（用户亲手输入可记录改述）
+    - 触发理由：今天首批 auto-writes 出现 `normalizebareslug` 同义双 entry（word-trigram = 0.000，char-trigram = 0.267，shared rare token `normalizebareslug`）
+  - 命中 hard reject duplicate；命中 soft + 策略开 reject `near_duplicate`；都返回 `DedupeResult` 含 match metadata
 - lint：写前调用 T1-T10 lint，error 阻断写入
 - lock：`.pi-astack/sediment/locks/sediment.lock`，超时可配置
 - write：tmp → rename 原子写入 markdown
@@ -219,7 +225,7 @@ memory_search(query: "dispatch agent prompt")
 - audit 到 `.pi-astack/sediment/audit.jsonl`
 - 成功后自动重建 `.pensieve/.index/graph.json` 与 `.pensieve/_index.md`；derived rebuild 失败不会回滚已完成迁移/恢复，但会写入返回值/audit
 
-已完成 LLM auto-write lane（A1 + A2，2026-05-08）：
+已完成 LLM auto-write lane（A1 + A2 + A3，2026-05-08）：
 - A1（安全前置 G2-G8）：`writeProjectEntry.opts.policy` + `forceProvisional`；`validateProjectEntryDraft(draft, policy)` overlay（`disallowMaxim` / `disallowArchived` / `maxConfidence`）；sanitizer 扩 4 pattern（JWT / PEM / AWS / connection URL）；`normalizeCompiledTruth` 对 `^---$` body 行退转；triggerPhrases 过 sanitizer；extractor prompt 加 Trust Boundary 指令。
 - A2（接入 + G9-G12）：`agent_end` 在 `parseExplicitMemoryBlocks(window) === []` 之后调用 `tryAutoWriteLane`。闸门顺序：
   1. modelRegistry 存在 → `evaluateLlmAutoWriteReadiness(report, policy)` → `evaluateRollingGate(rollingReport, ...)` → `decideAutoWriteEligibility({sessionId, settings, readiness, rolling})`
@@ -229,6 +235,20 @@ memory_search(query: "dispatch agent prompt")
 - G10 rolling 闸门：`autoWriteRollingWindowSamples`/`autoWriteRollingPassRate` 两个 settings；跳闸是 **进程内** 状态，pi 重启重置（不改 settings.json，避免 “不可逆” 问题）。
 - G11 独立模型：复用现有 `extractorModel` settings（默认 deepseek-v4-pro）；不强制隔离主会话模型，仅靠 settings 表达意图。
 - G12 速率闸门：`autoWriteMaxPerHour` (默认 6) 滑动 1 小时窗口；`autoWriteSampleEveryNRuns` (默认 1) 确定性采样步进。两者进程内 Map，pi 重启重置。
+
+已完成 LLM auto-write lane A3（实战 burn-in + 修复，2026-05-08）：
+- 首日 6 次 fire 共 14 候选，落盘 12，被新 G13 + 手动 prune 后留存 7。
+- **Slug bug fix**：`writer.ts` + `dedupe.ts` 把 `normalizeBareSlug(title)` 换成 `slugify(title)`，因前者把 `/` 当 path 分隔符（看到 “by extractor/reason Combinations” 把 slug 截成 `reason-combinations`）。`normalizeBareSlug` 仅用于 path/wikilink/id 输入。
+- **Stale-ctx fix**：`agent_end` 在所有 await 之前同步快照 `cwd / branch / sessionId / notify / modelRegistry / signal`；late ctx invalidation 不再触发 “stale-ctx” 假警报。
+- **Fire-and-forget UX**：pi awaits hook handlers synchronously；同步等 LLM (~30s+) 主会话被 “Working” 卡死。改方案：drafts=0 时 optimistic advance checkpoint → 调度 bg promise 入 `autoWriteInFlight` Map → agent_end 立即返回 (<100ms)；bg 内部 try/catch 兜底所有错误（unhandled Promise rejection 在 pi 会 crash session）。
+- **Footer status FSM**（4 态：idle / running / completed / failed）：
+  - `session_start` 永远 → idle
+  - `agent_start` 当上轮终态 (completed/failed) → 重置 idle；当 running/idle 不动
+  - `agent_end` 进入 running，bg 完成后 → completed（`N entries` / `LLM returned skip` / `ineligible`）或 failed（`LLM error` / `bg threw`）
+  - 用户感知：`💪 sediment idle` / `📝 sediment running: auto-write (model=...)` / `✅ sediment completed: N entries` / `⚠️ sediment failed: <reason>`
+- **Rolling gate de-tuning**：`extractorMaxCandidates` 3→5（prompt 已 cap 2，3-4 是 benign overshoot 不算 runaway）；`autoWriteRollingWindowSamples` 20→30（单行影响 5%→3.3%，跨"半天"smooth）。
+- **G13 soft near-duplicate**：见 dedupe substrate 节；阻止 LLM 重复改述同一洞察（首日撞了 `normalizebareslug` 双 entry）。
+- **Extractor model 临时切换**（settings.json）：`deepseek/deepseek-v4-pro` → `openai/gpt-5.4-mini`，因 deepseek API 当日 hang（flash 和 pro 都 30s+ 无输出）；hot-reload 即刻生效。deepseek 恢复后回切。
 
 剩余待实现 pipeline：
 - batch migration apply（当前只支持单文件；设计上不加）
@@ -281,16 +301,17 @@ memory_search(query: "dispatch agent prompt")
 ## Phase 2：World 层接入
 
 **验收标准**：
-- [ ] `~/.abrain/` 目录结构落地，独立 git repo【运维一次性，未执行】
+- [x] `~/.abrain/` 目录结构落地，独立 git repo【2026-05-08 完成；layout：`maxims/ decisions/ knowledge/ staging/ archive/ pipelines/ .state/ .index/`，独立 `.git/`，README.md + .gitignore，1 init commit；目前空，等 promotion gates 落地后通过 sediment 填充】
 - [x] `ABRAIN_ROOT` 环境变量支持，默认 `~/.abrain`【`extensions/memory/parser.ts::resolveStores`】
-- [x] Memory Facade 跨 store dispatch + graceful degradation【`resolveStores` 在 world 不存在时仅返回 project store，不报错】
+- [x] Memory Facade 跨 store dispatch + graceful degradation【`resolveStores` 在 world 不存在时仅返回 project store，不报错；scope 是 internal routing concern，对 LLM 不暴露（§5.4 Facade）】
 - [x] `memory_search` 同时检索 project + world【smoke 覆盖 `ABRAIN_ROOT` 路径】
-- [ ] Sediment world lane（world 写入路径，决策树 logic）【被 `autoLlmWriteEnabled: false` 闸门挡住】
+- [x] **Parser frontmatter requirement**【`parseEntry` 在 `frontmatterText.trim() === ""` 时返回 null；通过 ~/.abrain/ 初始化时发现 README.md 被当 degraded entry 索引；2026-05-08 修复（`a49aed4`）】
+- [ ] Sediment world lane（world 写入路径，决策树 logic）【依赖 Phase 1.4 burn-in 数周稳定后开】
 - [ ] World scope 的 file lock【同上，sediment 写入路径依赖】
 - [ ] Promotion gate 1-5 基础版（keyword-based）【同上】
-- [ ] 跨机器同步脚本【运维脚本，路线漏洞】
+- [ ] 跨机器同步脚本【运维脚本，路线漏洞，未设计】
 
-**状态（2026-05-08）**：读侧（resolve / search / get / list）全部落地，且被 smoke 覆盖。只要本地存在 `~/.abrain/`（或设了 `ABRAIN_ROOT`），`memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 会自动合并 world 层结果，scope 字段在返回中区分。写侧（sediment world lane / promotion gate / sync）依然依赖 auto LLM write 闸门解除，本 phase 不推进。
+**状态（2026-05-08）**：读侧（resolve / search / get / list / neighbors）全部落地，且被 smoke 覆盖。`~/.abrain/` 已初始化（独立 git repo，empty），`memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 自动合并 project + world 层结果——但 scope 字段不返回给 LLM（per memory-architecture.md §5.4 Facade 模式：scope/backend 是 internal routing concern）。写侧（sediment world lane / promotion gate / sync）依然挡在 Phase 1.4 burn-in 之后，本 phase 不推进。
 
 ### Phase 2.1 — ~/.abrain 初始化
 
