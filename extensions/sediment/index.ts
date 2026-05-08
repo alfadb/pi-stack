@@ -13,7 +13,7 @@ import { buildRunWindow, checkpointSummary, hasPensieve, loadCheckpoint, saveChe
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun } from "./llm-extractor";
-import { migrateOne } from "./migration";
+import { migrateOne, restoreMigrationBackup } from "./migration";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { evaluateLlmAutoWriteReadiness, formatLlmAutoWriteReadiness, formatLlmDryRunReport, readLlmDryRunReport } from "./report";
 import { appendAudit, writeProjectEntry, type WriteProjectEntryResult } from "./writer";
@@ -40,9 +40,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window/extract/dedupe/report/readiness/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment llm --dry-run, /sediment llm-report, /sediment readiness, /sediment dedupe --title <title>, /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment smoke --dry-run",
+    description: "Sediment writer status/window/extract/dedupe/report/readiness/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment llm --dry-run, /sediment llm-report, /sediment readiness, /sediment dedupe --title <title>, /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "extract --dry-run", "llm --dry-run", "llm-report", "readiness", "dedupe --title ", "migrate-one --plan ", "migrate-one --apply --yes ", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "extract --dry-run", "llm --dry-run", "llm-report", "readiness", "dedupe --title ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -169,11 +169,23 @@ function registerSedimentCommand(pi: ExtensionAPI) {
       if (subcommand === "migrate-one") {
         const plan = rest.includes("--plan");
         const apply = rest.includes("--apply");
+        const restore = rest.includes("--restore");
         const yes = rest.includes("--yes");
-        const fileParts = rest.filter((part) => part !== "--plan" && part !== "--apply" && part !== "--yes");
+        const fileParts = rest.filter((part) => part !== "--plan" && part !== "--apply" && part !== "--restore" && part !== "--yes");
         const source = fileParts.join(" ").trim();
-        if (!source || (plan && apply) || (!plan && !apply)) {
-          ctx.ui.notify("Usage: /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file>", "warning");
+        const modeCount = [plan, apply, restore].filter(Boolean).length;
+        if (!source || modeCount !== 1) {
+          ctx.ui.notify("Usage: /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes", "warning");
+          return;
+        }
+        if (restore) {
+          const result = await restoreMigrationBackup(source, {
+            projectRoot: cwd,
+            sedimentSettings: settings,
+            memorySettings: resolveMemorySettings(),
+            yes,
+          });
+          ctx.ui.notify(JSON.stringify(result, null, 2), result.status === "restored" ? "info" : "warning");
           return;
         }
         const result = await migrateOne(source, {
@@ -205,7 +217,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment llm --dry-run OR /sediment llm-report [--limit N] OR /sediment readiness OR /sediment dedupe --title <title> OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment llm --dry-run OR /sediment llm-report [--limit N] OR /sediment readiness OR /sediment dedupe --title <title> OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
     },
   });
 }

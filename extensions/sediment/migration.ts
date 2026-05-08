@@ -25,6 +25,7 @@ import { appendAudit } from "./writer";
 const execFileAsync = promisify(execFile);
 
 type MigrateOneStatus = "applied" | "dry_run" | "rejected";
+type RestoreMigrationBackupStatus = "restored" | "rejected";
 
 export interface MigrateOneDerivedResult {
   graph?: {
@@ -63,6 +64,19 @@ export interface MigrateOneResult {
   gitCommit?: string | null;
   actions?: string[];
   preview?: MigrateOnePreview;
+  derived?: MigrateOneDerivedResult;
+}
+
+export interface RestoreMigrationBackupResult {
+  status: RestoreMigrationBackupStatus;
+  reason?: string;
+  slug?: string;
+  title?: string;
+  source_path?: string;
+  target_path?: string;
+  backup_path: string;
+  removed_target?: boolean;
+  gitCommit?: string | null;
   derived?: MigrateOneDerivedResult;
 }
 
@@ -207,12 +221,12 @@ async function stageableGitPaths(projectRoot: string, pathsToStage: string[]): P
   return out;
 }
 
-async function gitCommitMigration(projectRoot: string, slug: string, pathsToStage: string[]): Promise<string | null> {
+async function gitCommitMigration(projectRoot: string, slug: string, pathsToStage: string[], action = "migrate"): Promise<string | null> {
   try {
     const relPaths = await stageableGitPaths(projectRoot, pathsToStage);
     if (relPaths.length === 0) return null;
     await execFileAsync("git", ["-C", projectRoot, "add", "-A", "--", ...relPaths], { timeout: 5_000, maxBuffer: 512 * 1024 });
-    await execFileAsync("git", ["-C", projectRoot, "commit", "-m", `memory: migrate ${slug}`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+    await execFileAsync("git", ["-C", projectRoot, "commit", "-m", `memory: ${action} ${slug}`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", projectRoot, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
     return stdout.trim() || null;
   } catch {
@@ -261,6 +275,35 @@ function buildMigrationPreview(markdown: string): MigrateOnePreview {
     compiledTruthPreview: truncatePreview(split.compiledTruth.trim(), 1_200),
     timelinePreview: split.timeline.slice(0, 5),
   };
+}
+
+async function readTextIfExists(file: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(file, "utf-8");
+  } catch (e: any) {
+    if (e?.code === "ENOENT") return undefined;
+    throw e;
+  }
+}
+
+function backupRestorePaths(projectRoot: string, backupInput: string): { backupPath: string; originalRel: string; originalPath: string } {
+  const pensieveRoot = path.join(projectRoot, ".pensieve");
+  const backupsRoot = path.join(pensieveRoot, ".state", "migration-backups");
+  const backupPath = path.resolve(projectRoot, backupInput);
+  if (!isInside(backupsRoot, backupPath)) {
+    throw new Error("backup must be inside .pensieve/.state/migration-backups");
+  }
+
+  const rel = path.relative(backupsRoot, backupPath);
+  const parts = rel.split(path.sep).filter(Boolean);
+  if (parts.length < 2) throw new Error("backup path must include timestamp and original relative path");
+  const originalRel = parts.slice(1).join(path.sep);
+  const originalPath = path.join(pensieveRoot, originalRel);
+  if (!isInside(pensieveRoot, originalPath)) throw new Error("backup original path escapes .pensieve");
+  if (originalRel.startsWith(`.state${path.sep}`) || originalRel.startsWith(`.index${path.sep}`)) {
+    throw new Error("refusing to restore .state/.index files");
+  }
+  return { backupPath, originalRel, originalPath };
 }
 
 function buildMigratedMarkdown(args: {
@@ -321,6 +364,203 @@ function buildMigratedMarkdown(args: {
   if (area.shortTerm) actions.push(`add ttl lifetime until ${expires}`);
   if (targetPath !== args.sourcePath) actions.push("move to canonical path");
   return { slug, title, markdown, shortTerm: area.shortTerm, targetPath, actions };
+}
+
+interface RestorePreflightOk {
+  expectedMarkdown: string;
+  built: ReturnType<typeof buildMigratedMarkdown>;
+  displaySource: string;
+  displayTarget: string;
+  samePath: boolean;
+  targetExists: boolean;
+  alreadyRestored: boolean;
+}
+
+async function restorePreflight(args: {
+  raw: string;
+  originalPath: string;
+  originalRel: string;
+  projectRoot: string;
+  memorySettings: MemorySettings;
+}): Promise<RestorePreflightOk> {
+  const built = buildMigratedMarkdown({
+    raw: args.raw,
+    sourcePath: args.originalPath,
+    relPath: args.originalRel,
+    projectRoot: args.projectRoot,
+    memorySettings: args.memorySettings,
+  });
+  const sanitize = sanitizeForMemory(built.markdown);
+  if (!sanitize.ok) throw new Error(`cannot verify migrated target: ${sanitize.error}`);
+
+  const expectedMarkdown = sanitize.text ?? built.markdown;
+  const samePath = path.resolve(args.originalPath) === path.resolve(built.targetPath);
+  const originalRaw = await readTextIfExists(args.originalPath);
+  const targetRaw = samePath ? originalRaw : await readTextIfExists(built.targetPath);
+  const originalIsBackup = originalRaw === args.raw;
+  const targetIsExpected = targetRaw === expectedMarkdown;
+  const targetExists = targetRaw !== undefined;
+
+  if (samePath) {
+    if (originalIsBackup) {
+      return {
+        expectedMarkdown,
+        built,
+        displaySource: path.relative(args.projectRoot, args.originalPath) || args.originalPath,
+        displayTarget: path.relative(args.projectRoot, built.targetPath) || built.targetPath,
+        samePath,
+        targetExists,
+        alreadyRestored: true,
+      };
+    }
+    if (!targetIsExpected) throw new Error(originalRaw === undefined ? "source_missing" : "source_modified");
+  } else {
+    if (originalRaw !== undefined && !originalIsBackup) throw new Error("source_exists");
+    if (targetRaw !== undefined && !targetIsExpected) throw new Error("target_modified");
+  }
+
+  return {
+    expectedMarkdown,
+    built,
+    displaySource: path.relative(args.projectRoot, args.originalPath) || args.originalPath,
+    displayTarget: path.relative(args.projectRoot, built.targetPath) || built.targetPath,
+    samePath,
+    targetExists,
+    alreadyRestored: !samePath && originalIsBackup && !targetExists,
+  };
+}
+
+export async function restoreMigrationBackup(
+  backupInput: string,
+  opts: {
+    projectRoot: string;
+    sedimentSettings: SedimentSettings;
+    memorySettings: MemorySettings;
+    yes: boolean;
+  },
+): Promise<RestoreMigrationBackupResult> {
+  const started = Date.now();
+  const projectRoot = path.resolve(opts.projectRoot);
+  const displayBackup = path.relative(projectRoot, path.resolve(projectRoot, backupInput)) || backupInput;
+  if (!opts.yes) return { status: "rejected", reason: "--yes required", backup_path: displayBackup };
+
+  let paths: { backupPath: string; originalRel: string; originalPath: string };
+  try {
+    paths = backupRestorePaths(projectRoot, backupInput);
+  } catch (e: unknown) {
+    return { status: "rejected", reason: e instanceof Error ? e.message : String(e), backup_path: displayBackup };
+  }
+
+  let raw: string;
+  try {
+    raw = await fs.readFile(paths.backupPath, "utf-8");
+  } catch (e: unknown) {
+    return { status: "rejected", reason: e instanceof Error ? e.message : String(e), backup_path: path.relative(projectRoot, paths.backupPath) };
+  }
+
+  let preflight: RestorePreflightOk;
+  try {
+    preflight = await restorePreflight({
+      raw,
+      originalPath: paths.originalPath,
+      originalRel: paths.originalRel,
+      projectRoot,
+      memorySettings: opts.memorySettings,
+    });
+  } catch (e: unknown) {
+    return { status: "rejected", reason: e instanceof Error ? e.message : String(e), backup_path: path.relative(projectRoot, paths.backupPath) };
+  }
+
+  if (preflight.alreadyRestored) {
+    return {
+      status: "restored",
+      reason: "already_restored",
+      slug: preflight.built.slug,
+      title: preflight.built.title,
+      source_path: preflight.displaySource,
+      target_path: preflight.displayTarget,
+      backup_path: path.relative(projectRoot, paths.backupPath),
+      removed_target: false,
+    };
+  }
+
+  let lock: LockHandle | undefined;
+  try {
+    lock = await acquireLock(projectRoot, opts.sedimentSettings.lockTimeoutMs);
+    preflight = await restorePreflight({
+      raw,
+      originalPath: paths.originalPath,
+      originalRel: paths.originalRel,
+      projectRoot,
+      memorySettings: opts.memorySettings,
+    });
+    if (preflight.alreadyRestored) {
+      return {
+        status: "restored",
+        reason: "already_restored",
+        slug: preflight.built.slug,
+        title: preflight.built.title,
+        source_path: preflight.displaySource,
+        target_path: preflight.displayTarget,
+        backup_path: path.relative(projectRoot, paths.backupPath),
+        removed_target: false,
+      };
+    }
+
+    await atomicWrite(paths.originalPath, raw);
+    let removedTarget = false;
+    if (!preflight.samePath && preflight.targetExists) {
+      await fs.unlink(preflight.built.targetPath);
+      removedTarget = true;
+    }
+
+    const derived = await rebuildDerivedIndexes(projectRoot, opts.memorySettings);
+    const git = opts.sedimentSettings.gitCommit
+      ? await gitCommitMigration(projectRoot, preflight.built.slug, [paths.originalPath, preflight.built.targetPath, ...derivedGitPaths(derived)], "restore")
+      : null;
+    await appendAudit(projectRoot, {
+      operation: "migrate_one_restore",
+      source: paths.originalRel,
+      target: preflight.displayTarget,
+      backup: path.relative(projectRoot, paths.backupPath),
+      slug: preflight.built.slug,
+      removed_target: removedTarget,
+      derived,
+      git_commit: git,
+      duration_ms: Date.now() - started,
+    });
+
+    return {
+      status: "restored",
+      slug: preflight.built.slug,
+      title: preflight.built.title,
+      source_path: preflight.displaySource,
+      target_path: preflight.displayTarget,
+      backup_path: path.relative(projectRoot, paths.backupPath),
+      removed_target: removedTarget,
+      gitCommit: git,
+      derived,
+    };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    await appendAudit(projectRoot, {
+      operation: "migrate_one_restore_error",
+      backup: path.relative(projectRoot, paths.backupPath),
+      reason: message,
+      duration_ms: Date.now() - started,
+    });
+    return {
+      status: "rejected",
+      reason: message,
+      slug: preflight.built.slug,
+      title: preflight.built.title,
+      source_path: preflight.displaySource,
+      target_path: preflight.displayTarget,
+      backup_path: path.relative(projectRoot, paths.backupPath),
+    };
+  } finally {
+    await lock?.release();
+  }
 }
 
 export async function migrateOne(

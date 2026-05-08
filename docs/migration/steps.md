@@ -21,7 +21,7 @@
 **验收标准**：
 - [ ] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）
 - [x] 10 条 Lint 规则实现（T1-T10；`/memory lint [path]` slash command，CLI wrapper 未实现；另有 `/memory doctor-lite [path]` 聚合报告）
-- [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 全库计划生成 + `/sediment migrate-one --plan <file>` 单文件预览 + `/sediment migrate-one --apply --yes <file>` 单文件 apply；batch apply 仍待实现
+- [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 全库计划生成 + `/sediment migrate-one --plan <file>` 单文件预览 + `/sediment migrate-one --apply --yes <file>` 单文件 apply + `/sediment migrate-one --restore <backup> --yes` 单文件恢复；batch apply 仍待实现
 - [x] `memory_search` grep-based 实现（rg 文件发现 + per-file tf-idf + title/slug boost；project 层 + 可选 world 只读）
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
 - [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`；`/sediment migrate-one` 成功后自动重建）
@@ -67,7 +67,7 @@
 
 ### Phase 1.2 — 旧格式迁移
 
-**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pensieve/.state/migration-report.md`。实际条目迁移由 `extensions/sediment/migration.ts` 的 `/sediment migrate-one --plan <file>` / `/sediment migrate-one --apply --yes <file>` 承接：一次只预览或迁移单文件，以保持 staged/reversible；batch apply 尚未实现。
+**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pensieve/.state/migration-report.md`。实际条目迁移由 `extensions/sediment/migration.ts` 的 `/sediment migrate-one --plan <file>` / `/sediment migrate-one --apply --yes <file>` / `/sediment migrate-one --restore <backup> --yes` 承接：一次只预览、迁移或恢复单文件，以保持 staged/reversible；batch apply 尚未实现。
 
 - 识别旧格式条目：无 `schema_version` 或无 `---` 分隔符
 - 自动映射：旧 `short-term/` → 条目移入同级目录 + `lifetime.kind: ttl`
@@ -85,7 +85,7 @@
 # → 写入 .pensieve/.state/migration-report.md，便于人工审查；每项都带 plan/apply 单文件命令
 ```
 
-**plan/apply 验收（单文件）**：
+**plan/apply/restore 验收（单文件）**：
 ```text
 # 预览单文件迁移结果，不写入、不 audit、不重建 derived artifacts
 /sediment migrate-one --plan .pensieve/short-term/maxims/example.md
@@ -94,6 +94,10 @@
 # 由 sediment/migration writer 执行，非当前 read-only extension
 /sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
 # → 备份 source，写入 schema v1/canonical path，并重建 .pensieve/.index/graph.json + .pensieve/_index.md
+
+# 从 apply 产生的 backup 恢复原 source；仅在 target 未被手改时自动删除 target
+/sediment migrate-one --restore .pensieve/.state/migration-backups/<timestamp>/short-term/maxims/example.md --yes
+# → 恢复原 legacy source，删除可验证的迁移 target，并重建 graph/index
 ```
 
 **待实现验收**：batch apply（不绕过单文件安全约束）。
@@ -194,13 +198,14 @@ memory_search(query: "dispatch agent prompt")
 已完成 migration apply 安全入口：
 - `/sediment migrate-one --plan <file>`：只预览单文件迁移结果，不写入、不 audit、不重建 derived artifacts
 - `/sediment migrate-one --apply --yes <file>`：只允许单文件迁移
+- `/sediment migrate-one --restore <backup> --yes`：只允许从 `.pensieve/.state/migration-backups/` 恢复单文件；若 target 已被手改则拒绝删除
 - source 必须位于 `.pensieve/` 内且不是 `.state/.index/pipelines`
 - target 已存在则拒绝
 - 迁移前 backup 到 `.pensieve/.state/migration-backups/<timestamp>/...`
 - 生成 schema v1 markdown 后先 lint，error 则拒绝
 - tmp → rename 原子写入；移动场景写 target 后删除 source；不删除空目录
 - audit 到 `.pensieve/.state/sediment-events.jsonl`
-- 成功后自动重建 `.pensieve/.index/graph.json` 与 `.pensieve/_index.md`；derived rebuild 失败不会回滚已完成迁移，但会写入返回值/audit
+- 成功后自动重建 `.pensieve/.index/graph.json` 与 `.pensieve/_index.md`；derived rebuild 失败不会回滚已完成迁移/恢复，但会写入返回值/audit
 
 待实现完整 pipeline：
 - batch migration apply（当前只支持单文件）
@@ -235,6 +240,9 @@ memory_search(query: "dispatch agent prompt")
 
 /sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
 # → 备份 source，迁移单个 legacy 文件到 schema v1/canonical path，并重建 graph/index derived artifacts
+
+/sediment migrate-one --restore .pensieve/.state/migration-backups/<timestamp>/short-term/maxims/example.md --yes
+# → 从 backup 恢复原 source；若 target 与迁移生成内容一致则删除 target，并重建 graph/index
 ```
 
 **待实现验收**：

@@ -122,7 +122,7 @@ async function main() {
     const { runDoctorLite } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { writeProjectEntry } = req("./sediment/writer.js");
-    const { migrateOne } = req("./sediment/migration.js");
+    const { migrateOne, restoreMigrationBackup } = req("./sediment/migration.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     const { buildRunWindow, saveCheckpoint, loadCheckpoint } = req("./sediment/checkpoint.js");
     const { detectProjectDuplicate } = req("./sediment/dedupe.js");
@@ -212,6 +212,19 @@ Body.
     assert(fs.existsSync(path.join(root, migrateApplied.backup_path)), "migrate-one backup not written");
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "migrate-one graph index not rebuilt");
     assert(fs.existsSync(path.join(root, ".pensieve", "_index.md")), "migrate-one markdown index not rebuilt");
+
+    const restored = await restoreMigrationBackup(migrateApplied.backup_path, {
+      projectRoot: root,
+      sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
+      memorySettings: DEFAULT_SETTINGS,
+      yes: true,
+    });
+    assert(restored.status === "restored", `restore migration backup failed: ${restored.reason}`);
+    assert(restored.removed_target, "restore should remove migrated target");
+    assert(fs.existsSync(path.join(root, ".pensieve", "short-term", "maxims", "legacy.md")), "restore did not restore original source");
+    assert(!fs.existsSync(path.join(root, ".pensieve", "maxims", "legacy.md")), "restore did not remove migrated target");
+    assert(fs.readFileSync(path.join(root, ".pensieve", "short-term", "maxims", "legacy.md"), "utf-8").includes("type: maxim"), "restore source content mismatch");
+    assert(!restored.derived?.error, `restore derived rebuild failed: ${restored.derived?.error}`);
 
     const doctor = await runDoctorLite(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(["pass", "warning", "error"].includes(doctor.status), "doctor-lite invalid status");

@@ -98,7 +98,7 @@ pi install git:github.com/alfadb/pi-astack
 ### Extensions（pi 行为扩展）
 - `dispatch/` — subprocess-based `dispatch_agent` / `dispatch_agents`（主会话自由组合）；每个子 agent 是独立 pi 进程，OS 级隔离（ADR 0009）
 - `memory/` — ✅ 主会话记忆 read tool（`memory_search/get/list/neighbors`），Facade 模式封装；只读扫描 `.pensieve/` + 可选 `~/.abrain/`；另含 human slash commands `/memory doctor-lite`、`/memory lint`、`/memory migrate --dry-run [--report]`、`/memory check-backlinks`、`/memory rebuild --graph`、`/memory rebuild --index`
-- `sediment/` — ✅ 部分实现：checkpoint/run-window + deterministic explicit `MEMORY:` extractor + `/sediment llm --dry-run`（audit + quality gate + `/sediment llm-report` + `/sediment readiness`）+ project-only writer substrate（validate/sanitize/dedupe/lint/lock/atomic write/audit/git best-effort）+ `/sediment migrate-one --plan/--apply --yes` 单文件迁移（成功后自动重建 graph/index derived artifacts）；自动 LLM 写入仍计划中
+- `sediment/` — ✅ 部分实现：checkpoint/run-window + deterministic explicit `MEMORY:` extractor + `/sediment llm --dry-run`（audit + quality gate + `/sediment llm-report` + `/sediment readiness`）+ project-only writer substrate（validate/sanitize/dedupe/lint/lock/atomic write/audit/git best-effort）+ `/sediment migrate-one --plan/--apply --yes/--restore --yes` 单文件迁移与恢复（成功后自动重建 graph/index derived artifacts）；自动 LLM 写入仍计划中
 - `model-curator/` — 模型能力快照与选择建议
 - `model-fallback/` — 非对称多模型 fallback：初始模型走 pi 内建指数退避重试，耗尽后按 `modelFallback.fallbackModels` 切下一个。alfadb 当前 pi 配置：claude-code parity，1+9=10 次尝试。（旧名 retry-stream-eof → retry-all-errors；**自有功能，不向上游 PR**）
 
