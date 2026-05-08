@@ -56,7 +56,15 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   extractorModel: "deepseek/deepseek-v4-pro",
   extractorTimeoutMs: 180_000,
   extractorMaxRetries: 0,
-  extractorMaxCandidates: 3,
+  // Cap raised from 3 to 5 (2026-05-08): the LLM extractor prompt
+  // now requests “at most TWO MEMORY blocks per response”, so a
+  // healthy run produces 1–2 candidates and a slightly noisy run
+  // produces 3–4. Cap=3 was tripping `too_many_candidates` on those
+  // mildly-noisy runs and pushing the rolling-quality gate below
+  // threshold for no real reason. Cap=5 still catches true runaway
+  // (LLM ignoring the prompt entirely) without flagging benign
+  // overshoot.
+  extractorMaxCandidates: 5,
   extractorAuditRawChars: 1_000,
   autoLlmWriteEnabled: false,
   minDryRunSamples: 20,
@@ -67,7 +75,13 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoWriteMaxConfidence: 6,
   autoWriteSampleEveryNRuns: 1,
   autoWriteMaxPerHour: 6,
-  autoWriteRollingWindowSamples: 20,
+  // Window raised from 20 to 30 (2026-05-08): a single auto_write
+  // failure swung the rolling rate by 5% on a 20-window, which made
+  // the gate trip after 4 imperfect rows even when the prior 14 dry-
+  // runs were all clean. 30-window halves single-row impact and
+  // smooths the signal across roughly the most-recent agent-end day
+  // of activity.
+  autoWriteRollingWindowSamples: 30,
   autoWriteRollingPassRate: 0.85,
   autoWriteRawAuditChars: 8_000,
 };

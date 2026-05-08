@@ -163,9 +163,9 @@
 
         "extractorMaxCandidates": {
           "type": "number",
-          "default": 3,
+          "default": 5,
           "minimum": 1,
-          "description": "Quality gate for /sediment llm --dry-run: outputs with more candidates than this are marked too_many_candidates."
+          "description": "Runaway-detection cap: outputs with more candidates than this are marked too_many_candidates and fail the quality gate. The extractor prompt asks the LLM for at most two MEMORY blocks per response; a healthy run produces 1–2, a slightly noisy run produces 3–4. Default 5 catches true runaway (LLM ignoring the prompt) without flagging benign overshoot — raised from 3 after live observation showed the lower cap tripping the rolling-quality gate on borderline runs."
         },
 
         "extractorAuditRawChars": {
@@ -238,9 +238,9 @@
 
         "autoWriteRollingWindowSamples": {
           "type": "number",
-          "default": 20,
+          "default": 30,
           "minimum": 1,
-          "description": "Size of the rolling-quality window. The most recent N llm_dry_run + auto_write audit rows are evaluated against `autoWriteRollingPassRate`; if pass rate falls below the threshold the lane is circuit-broken in-process for the rest of this pi run."
+          "description": "Size of the rolling-quality window. The most recent N llm_dry_run + auto_write audit rows are evaluated against `autoWriteRollingPassRate`; if pass rate falls below the threshold the lane is circuit-broken in-process for the rest of this pi run. Default 30 (raised from 20 after live observation): a single failed row in a 20-window moves the rate by 5%, which over-weights individual fires; 30 halves that impact and smooths across roughly one day of activity."
         },
 
         "autoWriteRollingPassRate": {
