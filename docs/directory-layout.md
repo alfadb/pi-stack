@@ -62,6 +62,7 @@ alfadb/pi-astack/
 │   │   ├── index.ts                   # /sediment status/window/smoke；agent_end hook fail-closed
 │   │   ├── settings.ts                # sediment 配置读取
 │   │   ├── checkpoint.ts              # checkpoint + run window builder
+│   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor
 │   │   ├── validation.ts              # draft runtime validation
 │   │   ├── dedupe.ts                  # deterministic slug/title duplicate detection
 │   │   ├── sanitizer.ts               # 最小写前脱敏/fail-closed

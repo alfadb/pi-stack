@@ -9,9 +9,21 @@
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { resolveSedimentSettings } from "./settings";
-import { buildRunWindow, checkpointSummary, loadCheckpoint } from "./checkpoint";
+import { buildRunWindow, checkpointSummary, hasPensieve, loadCheckpoint, saveCheckpoint } from "./checkpoint";
 import { detectProjectDuplicate } from "./dedupe";
-import { appendAudit, writeProjectEntry } from "./writer";
+import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
+import { appendAudit, writeProjectEntry, type WriteProjectEntryResult } from "./writer";
+
+function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
+  const terminalReasons = new Set([
+    "duplicate_slug", "duplicate_title", "validation_error", "lint_error",
+  ]);
+  return results.every((result) => {
+    if (result.status === "created" || result.status === "dry_run") return true;
+    if (!result.reason) return false;
+    return terminalReasons.has(result.reason) || result.reason.startsWith("credential pattern detected");
+  });
+}
 
 function registerSedimentCommand(pi: ExtensionAPI) {
   const maybePi = pi as unknown as {
@@ -24,9 +36,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window/dedupe and smoke test: /sediment status, /sediment window --dry-run, /sediment dedupe --title <title>, /sediment smoke --dry-run",
+    description: "Sediment writer status/window/extract/dedupe and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment dedupe --title <title>, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "dedupe --title ", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "extract --dry-run", "dedupe --title ", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -64,6 +76,22 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
+      if (subcommand === "extract") {
+        if (!rest.includes("--dry-run")) {
+          ctx.ui.notify("Usage: /sediment extract --dry-run", "warning");
+          return;
+        }
+        if (!ctx.sessionManager?.getBranch) {
+          ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
+          return;
+        }
+        const checkpoint = await loadCheckpoint(cwd);
+        const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
+        const drafts = window.skipReason ? [] : parseExplicitMemoryBlocks(window.text);
+        ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), extraction: previewExtraction(drafts) }, null, 2), drafts.length > 0 ? "warning" : "info");
+        return;
+      }
+
       if (subcommand === "dedupe") {
         const titleFlagIndex = rest.indexOf("--title");
         const title = titleFlagIndex >= 0 ? rest.slice(titleFlagIndex + 1).join(" ").trim() : rest.join(" ").trim();
@@ -93,7 +121,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment dedupe --title <title> OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment dedupe --title <title> OR /sediment smoke --dry-run", "warning");
     },
   });
 }
@@ -106,20 +134,60 @@ export default function (pi: ExtensionAPI) {
     if (!settings.enabled) return;
 
     const cwd = path.resolve(ctx.cwd || process.cwd());
-    if (!ctx.sessionManager?.getBranch) return;
+    if (!hasPensieve(cwd) || !ctx.sessionManager?.getBranch) return;
 
     const checkpoint = await loadCheckpoint(cwd);
     const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
+    const summary = checkpointSummary(window);
+
+    if (window.skipReason || !window.lastEntryId) {
+      if (window.lastEntryId) await saveCheckpoint(cwd, { lastProcessedEntryId: window.lastEntryId });
+      await appendAudit(cwd, {
+        operation: "skip",
+        reason: window.skipReason ?? "no_last_entry",
+        ...summary,
+        extractor: "explicit_marker",
+        checkpoint_advanced: !!window.lastEntryId,
+      });
+      return;
+    }
+
+    const drafts = parseExplicitMemoryBlocks(window.text);
+    if (drafts.length === 0) {
+      await saveCheckpoint(cwd, { lastProcessedEntryId: window.lastEntryId });
+      await appendAudit(cwd, {
+        operation: "skip",
+        reason: "no_explicit_memory_markers",
+        ...summary,
+        extractor: "explicit_marker",
+        checkpoint_advanced: true,
+      });
+      return;
+    }
+
+    const results: WriteProjectEntryResult[] = [];
+    for (const draft of drafts) {
+      results.push(await writeProjectEntry({
+        ...draft,
+        sessionId: "sediment",
+        timelineNote: draft.timelineNote || "captured from explicit MEMORY block",
+      }, { projectRoot: cwd, settings, dryRun: false }));
+    }
+
+    const shouldAdvance = shouldAdvanceAfterResults(results);
+    if (shouldAdvance) await saveCheckpoint(cwd, { lastProcessedEntryId: window.lastEntryId });
     await appendAudit(cwd, {
-      operation: "window",
-      ...checkpointSummary(window),
-      extractor: "not_implemented",
-      checkpoint_advanced: false,
+      operation: "explicit_extract",
+      ...summary,
+      extractor: "explicit_marker",
+      candidate_count: drafts.length,
+      results: results.map((result) => ({ status: result.status, slug: result.slug, reason: result.reason })),
+      checkpoint_advanced: shouldAdvance,
     });
 
-    // The writer substrate and windowing are ready, but automatic
-    // extract/classify/dedupe is deliberately deferred to the next slice. Do
-    // not advance checkpoint here; future extractor must see this window.
-    ctx.ui?.notify?.("Sediment is enabled; window captured/audited, but extractor is not implemented yet. Checkpoint not advanced.", "warning");
+    ctx.ui?.notify?.(
+      `Sediment explicit marker extraction: ${results.map((r) => `${r.slug}:${r.status}${r.reason ? `(${r.reason})` : ""}`).join(", ")}`,
+      shouldAdvance ? "info" : "warning",
+    );
   });
 }

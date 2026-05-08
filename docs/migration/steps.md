@@ -113,7 +113,7 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 1.4 — Sediment project-only pipeline
 
-**实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/checkpoint.ts` 已实现 checkpoint + run window builder；`extensions/sediment/index.ts` 注册 `/sediment status`、`/sediment window --dry-run` 与 `/sediment smoke --dry-run`。`agent_end` hook 默认 disabled，且即使启用也 fail-closed（只 audit window，不写记忆、不推进 checkpoint）。
+**实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/checkpoint.ts` 已实现 checkpoint + run window builder；`extensions/sediment/extractor.ts` 已实现 deterministic explicit `MEMORY:` block extractor；`extensions/sediment/index.ts` 注册 `/sediment status`、`/sediment window --dry-run`、`/sediment extract --dry-run`、`/sediment dedupe --title` 与 `/sediment smoke --dry-run`。`agent_end` hook 默认 disabled；启用后仅处理显式 `MEMORY:` block，成功/terminal skip 后推进 checkpoint。
 
 已完成 checkpoint/window substrate：
 - checkpoint path：`.pensieve/.state/sediment-checkpoint.json`
@@ -132,15 +132,24 @@ memory_search(query: "dispatch agent prompt")
 - git：best-effort `git add` + `git commit`，失败不回滚 markdown
 - audit：追加 `.pensieve/.state/sediment-events.jsonl`
 
+已完成 deterministic extractor stub：
+- 仅识别显式 block，不从普通对话中猜测
+- 格式：`MEMORY:` header + `---` + compiled truth body + `END_MEMORY`
+- no marker → SKIP 并推进 checkpoint
+- created / duplicate / validation/lint/credential terminal reject → 推进 checkpoint
+- transient writer error → 不推进 checkpoint，留待下轮重试
+
 待实现完整 pipeline：
-- checkpoint advance policy（SKIP / SKIP_DUPLICATE / write success 后推进）
-- extract + classify（单 agent + lookup tools，继承 ADR 0010 内核）
-- 自动写入 project 条目
+- LLM extract + classify（单 agent + lookup tools，继承 ADR 0010 内核）
+- 自动从普通对话候选中写入 project 条目
 
 **当前验收**：
 ```text
 /sediment window --dry-run
 # → 返回 checkpoint/run-window stats，不推进 checkpoint
+
+/sediment extract --dry-run
+# → 对当前 checkpoint window 解析显式 MEMORY blocks，但不写 markdown/不推进 checkpoint
 
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果
