@@ -1,0 +1,216 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { MemorySettings } from "./settings";
+import type { MemoryEntry, Scope } from "./types";
+import { parseEntry, scanStore } from "./parser";
+import { prettyPath } from "./utils";
+
+interface GraphNode {
+  title: string;
+  scope: Scope;
+  kind: string;
+  status: string;
+  confidence: number;
+  in_degree: number;
+  out_degree: number;
+}
+
+interface GraphEdge {
+  from: string;
+  to: string;
+  type: string;
+  source: "frontmatter" | "body_wikilink";
+}
+
+export interface GraphSnapshot {
+  built_at: string;
+  stale: false;
+  nodes: Record<string, GraphNode>;
+  edges: GraphEdge[];
+  stats: {
+    node_count: number;
+    edge_count: number;
+    orphans: string[];
+    dead_links: Array<{ from: string; to: string; type: string }>;
+  };
+}
+
+interface BacklinkIssue {
+  from: string;
+  to: string;
+  type: string;
+  problem: "missing_symmetric_backlink" | "dead_link";
+}
+
+export interface BacklinkReport {
+  target: string;
+  nodeCount: number;
+  edgeCount: number;
+  deadLinkCount: number;
+  missingSymmetricCount: number;
+  issues: BacklinkIssue[];
+}
+
+const SYMMETRIC_RELATIONS = new Set(["relates_to", "contested_with"]);
+
+function inferScopeFromTarget(target: string): Scope {
+  const abs = path.resolve(target);
+  const abrain = path.resolve(
+    process.env.ABRAIN_ROOT
+      ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+      : path.join(os.homedir(), ".abrain"),
+  );
+  return abs === abrain || abs.startsWith(`${abrain}${path.sep}`) ? "world" : "project";
+}
+
+function storeRootForFile(abs: string): string {
+  const parts = abs.split(path.sep);
+  const idx = parts.lastIndexOf(".pensieve");
+  if (idx >= 0) return parts.slice(0, idx + 1).join(path.sep) || path.sep;
+  return path.dirname(abs);
+}
+
+async function entriesForGraphTarget(
+  target: string,
+  settings: MemorySettings,
+  signal?: AbortSignal,
+  cwd = process.cwd(),
+): Promise<MemoryEntry[]> {
+  const abs = path.resolve(target);
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    stat = await fs.stat(abs);
+  } catch {
+    return [];
+  }
+
+  if (stat.isFile()) {
+    const storeRoot = storeRootForFile(abs);
+    const entry = await parseEntry(abs, { scope: inferScopeFromTarget(storeRoot), root: storeRoot, label: "target" }, cwd);
+    return entry ? [entry] : [];
+  }
+
+  return scanStore(
+    { scope: inferScopeFromTarget(abs), root: abs, label: "target" },
+    cwd,
+    settings,
+    signal,
+  );
+}
+
+export async function buildGraphSnapshot(
+  target: string,
+  settings: MemorySettings,
+  signal?: AbortSignal,
+  cwd = process.cwd(),
+): Promise<GraphSnapshot> {
+  const entries = await entriesForGraphTarget(target, settings, signal, cwd);
+  const nodes: Record<string, GraphNode> = {};
+  const edges: GraphEdge[] = [];
+
+  for (const entry of entries) {
+    nodes[entry.slug] = {
+      title: entry.title,
+      scope: entry.scope,
+      kind: entry.kind,
+      status: entry.status,
+      confidence: entry.confidence,
+      in_degree: 0,
+      out_degree: 0,
+    };
+  }
+
+  for (const entry of entries) {
+    for (const relation of entry.relations) {
+      edges.push({
+        from: entry.slug,
+        to: relation.to,
+        type: relation.type,
+        source: relation.source,
+      });
+    }
+  }
+
+  const dead_links: Array<{ from: string; to: string; type: string }> = [];
+  for (const edge of edges) {
+    if (nodes[edge.from]) nodes[edge.from].out_degree += 1;
+    if (nodes[edge.to]) nodes[edge.to].in_degree += 1;
+    else dead_links.push({ from: edge.from, to: edge.to, type: edge.type });
+  }
+
+  const orphans = Object.entries(nodes)
+    .filter(([, node]) => node.in_degree === 0 && node.out_degree === 0)
+    .map(([slug]) => slug)
+    .sort();
+
+  return {
+    built_at: new Date().toISOString(),
+    stale: false,
+    nodes,
+    edges,
+    stats: {
+      node_count: Object.keys(nodes).length,
+      edge_count: edges.length,
+      orphans,
+      dead_links,
+    },
+  };
+}
+
+export async function checkBacklinks(
+  target: string,
+  settings: MemorySettings,
+  signal?: AbortSignal,
+  cwd = process.cwd(),
+): Promise<BacklinkReport> {
+  const graph = await buildGraphSnapshot(target, settings, signal, cwd);
+  const edgeSet = new Set(graph.edges.map((edge) => `${edge.from}\0${edge.to}\0${edge.type}`));
+  const issues: BacklinkIssue[] = [];
+
+  for (const dead of graph.stats.dead_links) {
+    issues.push({ ...dead, problem: "dead_link" });
+  }
+
+  for (const edge of graph.edges) {
+    if (!SYMMETRIC_RELATIONS.has(edge.type)) continue;
+    if (!graph.nodes[edge.to]) continue;
+    if (!edgeSet.has(`${edge.to}\0${edge.from}\0${edge.type}`)) {
+      issues.push({
+        from: edge.from,
+        to: edge.to,
+        type: edge.type,
+        problem: "missing_symmetric_backlink",
+      });
+    }
+  }
+
+  return {
+    target: prettyPath(path.resolve(target), cwd),
+    nodeCount: graph.stats.node_count,
+    edgeCount: graph.stats.edge_count,
+    deadLinkCount: graph.stats.dead_links.length,
+    missingSymmetricCount: issues.filter((issue) => issue.problem === "missing_symmetric_backlink").length,
+    issues,
+  };
+}
+
+export function formatBacklinkReport(report: BacklinkReport, maxIssues = 20): string {
+  const lines: string[] = [
+    `Memory backlinks: ${report.deadLinkCount} dead link(s), ${report.missingSymmetricCount} missing symmetric backlink(s), ${report.nodeCount} node(s), ${report.edgeCount} edge(s)`,
+  ];
+  if (report.issues.length === 0) return `${lines[0]} — passed`;
+
+  lines.push("");
+  for (const issue of report.issues.slice(0, maxIssues)) {
+    if (issue.problem === "dead_link") {
+      lines.push(`- [error] ${issue.from} --${issue.type}--> ${issue.to}: target slug not found`);
+    } else {
+      lines.push(`- [warning] ${issue.from} --${issue.type}--> ${issue.to}: missing reverse ${issue.to} --${issue.type}--> ${issue.from}`);
+    }
+  }
+  if (report.issues.length > maxIssues) {
+    lines.push(`- ... ${report.issues.length - maxIssues} more backlink issue(s) omitted`);
+  }
+  return lines.join("\n");
+}

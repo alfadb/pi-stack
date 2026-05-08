@@ -86,6 +86,56 @@
       }
     },
 
+    "memory": {
+      "type": "object",
+      "description": "Read-only markdown memory Facade (extensions/memory/). Registers memory_search/get/list/neighbors over project .pensieve/ and optional world ~/.abrain/ stores. The extension never writes memory; sediment remains the sole writer.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "includeWorld": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether memory_* read tools should also scan ABRAIN_ROOT (default ~/.abrain) when it exists. Missing world store degrades to project-only without error."
+        },
+
+        "defaultLimit": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "description": "Default result count for memory_search and memory_list."
+        },
+
+        "maxLimit": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "description": "Hard cap on per-call result count."
+        },
+
+        "maxEntries": {
+          "type": "number",
+          "default": 2000,
+          "minimum": 10,
+          "description": "Maximum markdown files scanned per store to keep read tools bounded."
+        },
+
+        "projectBoost": {
+          "type": "number",
+          "default": 1.5,
+          "minimum": 0.1,
+          "description": "Internal ranking multiplier for current-project results. Not exposed in memory_search output."
+        },
+
+        "shortTermTtlDays": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "description": "Dry-run migration policy for legacy .pensieve/short-term/* entries: planned lifetime.expires_at = created + shortTermTtlDays. The read-only extension only reports this plan; it does not write files."
+        }
+      }
+    },
+
     "vision": {
       "type": "object",
       "description": "Vision tool model selection (extensions/vision/). Auto-selects the strongest vision-capable model from the registry, excluding the caller's own model.",

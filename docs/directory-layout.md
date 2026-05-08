@@ -1,7 +1,7 @@
 # pi-astack 目录布局与所有权
 
 > **v7 更新提示**（[memory-architecture.md](./memory-architecture.md)）：记忆基础设施从 gbrain (postgres+pgvector) 整
-> 体替换为纯 markdown+git。本文件反映 **当前实际实现状态**（2026-05-07）。标注 `[计划]` 的目录尚未实现。
+> 体替换为纯 markdown+git。本文件反映 **当前实际实现状态**（2026-05-08）。标注 `[计划]` 的目录尚未实现。
 
 ## 实际文件树
 
@@ -48,8 +48,17 @@ alfadb/pi-astack/
 │   │   └── index.ts
 │   ├── model-fallback/                # ✅ 已实现：多模型 fallback 链（旧名 retry-stream-eof）
 │   │   └── index.ts
+│   ├── memory/                        # ✅ 已实现：v7 主会话只读工具 Facade（Phase 1.1-1.3b）
+│   │   ├── index.ts                   # tool/command 注册入口
+│   │   ├── settings.ts                # pi-astack memory 配置读取
+│   │   ├── types.ts                   # 共享类型
+│   │   ├── utils.ts                   # slug/filter/path helpers
+│   │   ├── parser.ts                  # markdown/frontmatter/parser + store scan
+│   │   ├── search.ts                  # search/list/get/neighbors 逻辑
+│   │   ├── lint.ts                    # T1-T10 lint engine
+│   │   ├── migrate.ts                 # legacy migration dry-run planner
+│   │   └── graph.ts                   # graph snapshot + check-backlinks
 │   ├── sediment/                      # [计划] v7 单 agent + markdown 写入（Phase 1.4）
-│   ├── memory/                        # [计划] v7 主会话只读工具 Facade（Phase 1.3）
 │   └── browse/                        # [计划] from pi-gstack
 │
 ├── skills/                            # [计划] pi 技能（19 gstack skills + memory-wand）
@@ -69,8 +78,8 @@ alfadb/pi-astack/
 | `extensions/imagine/` | ✅ 已实现 | — |
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
+| `extensions/memory/` | ✅ 已实现（只读 Facade + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b |
 | `extensions/sediment/` | [计划] | Phase 1.4 |
-| `extensions/memory/` | [计划] | Phase 1.3 |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |
@@ -78,6 +87,26 @@ alfadb/pi-astack/
 | `defaults/` | [计划] | 低优先级 |
 
 ## 已实现扩展详情
+
+### extensions/memory/
+
+v7 markdown+git 记忆架构的只读 Facade。注册 4 个 LLM-facing 工具：
+
+| 工具 | 说明 |
+|------|------|
+| `memory_search(query, filters?)` | grep/tf-idf markdown 搜索；返回 bare slug/title/summary/score/kind/status/confidence，不暴露 backend/source_path |
+| `memory_get(slug, options?)` | bare slug 精确读取；返回完整 canonical entry（含 timeline/source_path/scope） |
+| `memory_list(filters?)` | 分页浏览条目 metadata，主要用于人工/debug |
+| `memory_neighbors(slug, options?)` | 只读遍历 frontmatter relations + `[[wikilink]]`，不写关系 |
+
+读取范围：当前项目 `.pensieve/` + 可选 `ABRAIN_ROOT`（默认 `~/.abrain`，存在才扫描）。写入仍由计划中的 `extensions/sediment/` 独占。
+
+Human-facing 命令：
+- `/memory lint [path]`：执行 T1-T10 Timeline/frontmatter lint，不注册为 LLM tool
+- `/memory migrate --dry-run [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划，不写文件
+- `/memory check-backlinks [path]`：in-memory 构建 graph snapshot，报告 dead links 与缺失 symmetric backlinks，不写 `.index/graph.json`
+
+配置：`pi-astack-settings.json → memory.{includeWorld, defaultLimit, maxLimit, maxEntries, projectBoost, shortTermTtlDays}`
 
 ### extensions/dispatch/
 
@@ -133,6 +162,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 |------|--------|
 | modelCurator | `providers`, `hints`, `imageGen` |
 | modelFallback | `fallbackModels` |
+| memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays` |
 | vision | `modelPreferences` |
 
 ## 所有权矩阵
@@ -144,8 +174,8 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | `extensions/imagine/` | alfadb（C 类迁入） | ✅ 已实现 | ✅ |
 | `extensions/model-curator/` | alfadb（C 类迁入） | ✅ 已实现 | ✅ |
 | `extensions/model-fallback/` | alfadb（A 类永久 own） | ✅ 已实现 | ✅ |
+| `extensions/memory/` | alfadb（v7 新建） | ✅ 已实现（只读 Facade） | ✅ |
 | `extensions/sediment/` | alfadb（A 类改造） | [计划] Phase 1.4 | ✅ |
-| `extensions/memory/` | alfadb（v7 新建） | [计划] Phase 1.3 | ✅ |
 | `extensions/browse/` | alfadb（C 类迁入） | [计划] | ✅ |
 | `skills/` | alfadb（B 类端口） | [计划] | ✅ |
 | `prompts/` | alfadb（A 类 + B 类） | [计划] | ✅ |
@@ -164,7 +194,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
         │            │            │
         ▼            ▼            ▼
   extensions/    skills/    prompts/
-  (5 已实现)    (待迁入)   (待迁入)
+  (6 已实现)    (待迁入)   (待迁入)
 
   dispatch/ ─── 子进程 spawn ─── pi（独立实例，OS 级隔离）
   vision/   ─── 进程内 streamSimple
@@ -172,11 +202,10 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
   model-curator/ ─── pi.registerProvider() + before_agent_start 注入
   model-fallback/ ─── agent_end 拦截 + pi 内建 retry 对齐
 
-  未来（Phase 1+）:
-  memory/   ──→ markdown + git (source of truth)
+  memory/   ──→ markdown + git (source of truth, read-only)
                  ├── <project>/.pensieve/     (项目级)
-                 └── ~/.abrain/               (世界级)
-  sediment/ ──→ markdown + git (唯一写入者)
+                 └── ~/.abrain/               (世界级，可选)
+  sediment/ ──→ markdown + git (唯一写入者，计划)
 ```
 
 **严禁的引用关系**:

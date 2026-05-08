@@ -20,12 +20,12 @@
 
 **验收标准**：
 - [ ] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）
-- [ ] 10 条 Lint 规则实现（T1-T10）
-- [ ] 旧格式迁移工具 `pi memory migrate`，现有 `.pensieve/` 全部迁移
-- [ ] `memory_search` grep-based 实现（rg 召回 + per-file tf-idf + title boost；仅 project 层）
-- [ ] `memory_get` / `memory_list` 实现
+- [x] 10 条 Lint 规则实现（T1-T10；`/memory lint [path]` slash command，CLI wrapper 未实现）
+- [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 计划生成；实际写入迁移仍待 sediment/migration writer
+- [x] `memory_search` grep-based 实现（rg 文件发现 + per-file tf-idf + title/slug boost；project 层 + 可选 world 只读）
+- [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
 - [ ] `_index.md` 自动生成（sediment 写入后重建）
-- [ ] graph.json 构建脚本 + `memory check-backlinks`（只读报告）
+- [ ] graph 派生索引：已实现 in-memory `buildGraphSnapshot` + `/memory check-backlinks [path]` 只读报告；`graph.json` 文件写入仍待 sediment/index writer
 - [ ] Sediment project-only pipeline：extract → sanitize → classify → dedupe（确定性：slug + trigram Jaccard）→ lint → lock → write md → git commit → release → audit
 - [ ] Project scope 的 file lock + 错误恢复
 - [ ] 最小脱敏：credential pattern → 写入拒绝（fail-closed）；$HOME 路径替换
@@ -34,19 +34,23 @@
 
 ### Phase 1.1 — 条目格式标准化
 
+**实现状态（2026-05-08）**：`extensions/memory/lint.ts` 已实现 T1-T10 lint engine，`extensions/memory/index.ts` 注册 human-facing slash command `/memory lint [path]`。CLI wrapper（`pi memory lint ...`）尚未实现。
+
 - 定义 frontmatter schema v1（scope/kind/status/confidence/created/updated/schema_version）
 - 实现 compiled truth + `## Timeline` 格式
 - 实现 10 条 Lint 规则（T1-T10）
-- 编写 `pi memory lint` 命令
+- 编写 `/memory lint [path]` 命令（slash command，不暴露为 LLM tool）
 
 **验收**：
-```bash
+```text
 # 创建示例条目，lint 通过
-pi memory lint .pensieve/knowledge/test-entry.md
-# → "10/10 rules passed"
+/memory lint .pensieve/knowledge/test-entry.md
+# → "Memory lint: 0 error(s), 0 warning(s), 1 file(s) checked — passed"
 ```
 
 ### Phase 1.2 — 旧格式迁移
+
+**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写文件。实际写入迁移仍需后续 sediment/migration writer 承接，以保持主会话只读边界。
 
 - 识别旧格式条目：无 `schema_version` 或无 `---` 分隔符
 - 自动映射：旧 `short-term/` → 条目移入同级目录 + `lifetime.kind: ttl`
@@ -54,26 +58,57 @@ pi memory lint .pensieve/knowledge/test-entry.md
 - 迁移前自动 git commit 当前状态（可回滚）
 - 支持 `--dry-run`
 
-**验收**：
-```bash
-pi memory migrate --dry-run
+**当前验收**：
+```text
+/memory migrate --dry-run .pensieve
 # → 显示迁移计划，不修改文件
-pi memory migrate
+```
+
+**待实现验收**：
+```text
+# 由 sediment/migration writer 执行，非当前 read-only extension
+/memory migrate --apply .pensieve
 # → 完成迁移，report 输出到 .state/migration-report.md
 ```
 
 ### Phase 1.3 — memory_search（grep-based）
 
-- rg 召回 + per-file tf-idf 评分 + title boost
-- 仅 project 层
+**实现状态（2026-05-08）**：`extensions/memory/search.ts` + `parser.ts` 已实现检索/读取逻辑，`extensions/memory/index.ts` 注册 `memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 四个只读工具。
+
+- rg 文件发现 + per-file tf-idf 评分 + title/slug boost
+- project 层为主；`ABRAIN_ROOT` / `~/.abrain` 存在时可选只读扫描 world 层
 - 默认排除 status=archived
-- 返回 LLM-facing schema（bare slug, 不含 scope/backend/source_path）
+- `memory_search` 返回 LLM-facing schema（bare slug, 不含 scope/backend/source_path）
 
 **验收**：
-```bash
-# 写入几条测试条目后
-pi memory search "dispatch agent prompt"
+```text
+# 写入几条测试条目后，在 pi 会话中调用 LLM-facing tool：
+memory_search(query: "dispatch agent prompt")
 # → 返回相关条目，含 score / kind / status / confidence
+```
+
+> CLI wrapper（`pi memory search ...`）尚未实现；当前完成的是 extension tool surface。
+
+### Phase 1.3b — graph snapshot + check-backlinks（read-only）
+
+**实现状态（2026-05-08）**：`extensions/memory/graph.ts` 已实现 in-memory `buildGraphSnapshot()` / `checkBacklinks()`，`extensions/memory/index.ts` 注册 human-facing slash command `/memory check-backlinks [path]`。
+
+- 从 markdown frontmatter relations + body `[[wikilink]]` 构建 graph snapshot
+- 统计 node/edge/orphan/dead link
+- 检查 symmetric relations（`relates_to` / `contested_with`）是否缺反向边
+- 只读报告，不写 `.pensieve/.index/graph.json`
+
+**当前验收**：
+```text
+/memory check-backlinks .pensieve
+# → 返回 dead link / missing symmetric backlink 报告
+```
+
+**待实现验收**：
+```text
+# 由 sediment/index writer 执行，非当前 read-only extension
+/memory rebuild --graph .pensieve
+# → 写入 .pensieve/.index/graph.json
 ```
 
 ### Phase 1.4 — Sediment project-only pipeline
