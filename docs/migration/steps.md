@@ -147,6 +147,7 @@ memory_search(query: "dispatch agent prompt")
 - quality gate：`skip` / `valid_candidates` pass；`model_error` / `unparseable_output` / `validation_errors` / `too_many_candidates` fail/warn
 - raw output 只存 SHA-256 + 截断 preview（默认 1000 chars）
 - `/sediment llm-report [--limit N]` 汇总最近 `llm_dry_run` 质量样本
+- `/sediment readiness` 根据 `autoLlmWriteEnabled` / `minDryRunSamples` / `requiredDryRunPassRate` 评估未来自动 LLM 写入是否可放行（当前仍不自动写）
 
 待实现完整 pipeline：
 - LLM extract + classify 的 lookup tools 版本（继承 ADR 0010 内核）
@@ -165,6 +166,9 @@ memory_search(query: "dispatch agent prompt")
 
 /sediment llm-report --limit 20
 # → 汇总 llm_dry_run pass/fail、reason 分布、候选数量和最近 preview/hash
+
+/sediment readiness
+# → 检查 dry-run 样本数/通过率/autoLlmWriteEnabled 是否满足未来自动写入门禁
 
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果

@@ -20,6 +20,9 @@ export interface SedimentSettings {
   extractorMaxRetries: number;
   extractorMaxCandidates: number;
   extractorAuditRawChars: number;
+  autoLlmWriteEnabled: boolean;
+  minDryRunSamples: number;
+  requiredDryRunPassRate: number;
 }
 
 export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
@@ -35,6 +38,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   extractorMaxRetries: 0,
   extractorMaxCandidates: 3,
   extractorAuditRawChars: 1_000,
+  autoLlmWriteEnabled: false,
+  minDryRunSamples: 20,
+  requiredDryRunPassRate: 0.9,
 };
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -63,5 +69,8 @@ export function resolveSedimentSettings(): SedimentSettings {
     extractorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.extractorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.extractorMaxRetries))),
     extractorMaxCandidates: Math.max(1, Math.floor(asNumber(cfg.extractorMaxCandidates, DEFAULT_SEDIMENT_SETTINGS.extractorMaxCandidates))),
     extractorAuditRawChars: Math.max(0, Math.floor(asNumber(cfg.extractorAuditRawChars, DEFAULT_SEDIMENT_SETTINGS.extractorAuditRawChars))),
+    autoLlmWriteEnabled: asBoolean(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
+    minDryRunSamples: Math.max(1, Math.floor(asNumber(cfg.minDryRunSamples, DEFAULT_SEDIMENT_SETTINGS.minDryRunSamples))),
+    requiredDryRunPassRate: Math.min(1, Math.max(0, asNumber(cfg.requiredDryRunPassRate, DEFAULT_SEDIMENT_SETTINGS.requiredDryRunPassRate))),
   };
 }

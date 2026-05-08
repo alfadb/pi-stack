@@ -173,6 +173,27 @@
           "default": 1000,
           "minimum": 0,
           "description": "Number of raw LLM output characters stored in the llm_dry_run audit preview. SHA-256 is stored for full raw output when present."
+        },
+
+        "autoLlmWriteEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Policy gate for future automatic LLM writes. Current code does not auto-write LLM candidates; /sediment readiness reports whether this flag and quality thresholds are satisfied."
+        },
+
+        "minDryRunSamples": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "description": "Minimum llm_dry_run audit samples required before future automatic LLM writing may be considered ready."
+        },
+
+        "requiredDryRunPassRate": {
+          "type": "number",
+          "default": 0.9,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Required pass rate over llm_dry_run samples before future automatic LLM writing may be considered ready."
         }
       }
     },

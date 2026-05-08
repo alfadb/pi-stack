@@ -26,6 +26,24 @@ export interface LlmDryRunReport {
   recent: LlmDryRunReportItem[];
 }
 
+export interface LlmAutoWritePolicy {
+  autoLlmWriteEnabled: boolean;
+  minDryRunSamples: number;
+  requiredDryRunPassRate: number;
+}
+
+export interface LlmAutoWriteReadiness {
+  autoLlmWriteEnabled: boolean;
+  ready: boolean;
+  policyPassed: boolean;
+  sampleCount: number;
+  minDryRunSamples: number;
+  passRate: number;
+  requiredDryRunPassRate: number;
+  blockers: string[];
+  reasons: Record<string, number>;
+}
+
 export function auditPath(projectRoot: string): string {
   return path.join(projectRoot, ".pensieve", ".state", "sediment-events.jsonl");
 }
@@ -108,6 +126,58 @@ export async function readLlmDryRunReport(projectRoot: string, limit?: number): 
     reasons,
     recent: items.slice(-max).reverse(),
   };
+}
+
+export function evaluateLlmAutoWriteReadiness(
+  report: LlmDryRunReport,
+  policy: LlmAutoWritePolicy,
+): LlmAutoWriteReadiness {
+  const passRate = report.total === 0 ? 0 : report.passCount / report.total;
+  const blockers: string[] = [];
+  if (!policy.autoLlmWriteEnabled) blockers.push("auto LLM write disabled");
+  if (report.total < policy.minDryRunSamples) blockers.push(`insufficient dry-run samples (${report.total}/${policy.minDryRunSamples})`);
+  if (passRate < policy.requiredDryRunPassRate) blockers.push(`pass rate below threshold (${passRate.toFixed(3)} < ${policy.requiredDryRunPassRate})`);
+
+  const policyPassed =
+    report.total >= policy.minDryRunSamples &&
+    passRate >= policy.requiredDryRunPassRate;
+
+  return {
+    autoLlmWriteEnabled: policy.autoLlmWriteEnabled,
+    ready: policy.autoLlmWriteEnabled && policyPassed,
+    policyPassed,
+    sampleCount: report.total,
+    minDryRunSamples: policy.minDryRunSamples,
+    passRate,
+    requiredDryRunPassRate: policy.requiredDryRunPassRate,
+    blockers,
+    reasons: report.reasons,
+  };
+}
+
+export function formatLlmAutoWriteReadiness(readiness: LlmAutoWriteReadiness): string {
+  const lines: string[] = [
+    `Sediment LLM auto-write readiness: ${readiness.ready ? "READY" : "NOT READY"}`,
+    `Auto LLM write enabled: ${readiness.autoLlmWriteEnabled}`,
+    `Dry-run samples: ${readiness.sampleCount}/${readiness.minDryRunSamples}`,
+    `Pass rate: ${readiness.passRate.toFixed(3)} (required ${readiness.requiredDryRunPassRate})`,
+    `Policy passed: ${readiness.policyPassed}`,
+  ];
+
+  if (readiness.blockers.length > 0) {
+    lines.push("");
+    lines.push("Blockers:");
+    for (const blocker of readiness.blockers) lines.push(`- ${blocker}`);
+  }
+
+  const reasonEntries = Object.entries(readiness.reasons).sort((a, b) => b[1] - a[1]);
+  if (reasonEntries.length > 0) {
+    lines.push("");
+    lines.push("Dry-run reasons:");
+    for (const [reason, count] of reasonEntries) lines.push(`- ${reason}: ${count}`);
+  }
+
+  return lines.join("\n");
 }
 
 export function formatLlmDryRunReport(report: LlmDryRunReport): string {

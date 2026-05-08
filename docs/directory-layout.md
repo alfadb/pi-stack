@@ -174,7 +174,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | modelCurator | `providers`, `hints`, `imageGen` |
 | modelFallback | `fallbackModels` |
 | memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays` |
-| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries`, `extractorModel`, `extractorTimeoutMs`, `extractorMaxRetries`, `extractorMaxCandidates`, `extractorAuditRawChars` |
+| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries`, `extractorModel`, `extractorTimeoutMs`, `extractorMaxRetries`, `extractorMaxCandidates`, `extractorAuditRawChars`, `autoLlmWriteEnabled`, `minDryRunSamples`, `requiredDryRunPassRate` |
 | vision | `modelPreferences` |
 
 ## 所有权矩阵
