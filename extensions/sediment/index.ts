@@ -62,6 +62,24 @@ const autoWriteRecentFires = new Map<string, number[]>();
  */
 const autoWriteDisabledBySession = new Map<string, string>();
 
+/**
+ * sessionId -> in-flight Promise of the background LLM-extraction work.
+ *
+ * agent_end intentionally does NOT await this promise. The handler
+ * captures everything it needs synchronously, schedules the bg work,
+ * and returns immediately so the user's main session is not blocked
+ * on a 30s LLM call (observed live post-A2: pi shows "Working" for
+ * the entire LLM duration if we await here).
+ *
+ * If a NEW agent_end fires while the previous turn's bg work is
+ * still running, we skip the LLM lane for the new turn and audit
+ * with reason 'auto_write_inflight_skip'.
+ */
+const autoWriteInFlight = new Map<string, Promise<void>>();
+
+/** Status key for ctx.ui.setStatus(). */
+const SEDIMENT_STATUS_KEY = "sediment";
+
 const HOUR_MS = 60 * 60 * 1000;
 
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
@@ -285,7 +303,10 @@ export default function (pi: ExtensionAPI) {
     sessionManager?: { getBranch(): unknown[]; getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null };
     modelRegistry?: unknown;
     signal?: AbortSignal;
-    ui?: { notify(message: string, type?: string): void };
+    ui?: {
+      notify(message: string, type?: string): void;
+      setStatus?(extId: string, message?: string): void;
+    };
   }) => {
     const settings = resolveSedimentSettings();
     if (!settings.enabled) return;
@@ -306,6 +327,13 @@ export default function (pi: ExtensionAPI) {
     }
     const sessionId = readSessionId(ctx.sessionManager);
     const notify = ctx.ui?.notify?.bind(ctx.ui);
+    // setStatus is ctx.ui.setStatus; we need to bind it AND tolerate
+    // older pi versions where the method is missing. Wrap in a
+    // try/catch so a stale-ctx late call cannot throw out of bg work.
+    const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
+    const setStatus = setStatusRaw
+      ? (msg?: string) => { try { setStatusRaw(SEDIMENT_STATUS_KEY, msg); } catch {} }
+      : undefined;
     // Capture EVERY ctx field we'll need post-await synchronously.
     // pi may invalidate ctx ("stale ctx") between any await pair if a
     // newSession/fork/reload/process-shutdown race fires; touching
@@ -377,90 +405,137 @@ export default function (pi: ExtensionAPI) {
     const drafts = parseExplicitMemoryBlocks(window.text);
     const tParseEnd = Date.now();
     if (drafts.length === 0) {
-      // Phase 1.4 A2: LLM auto-write lane.
+      // Phase 1.4 A2 + UX fix: LLM auto-write lane is FIRE-AND-FORGET.
       //
-      // The lane fires only when ALL of these hold:
-      //   - autoLlmWriteEnabled (master switch)
-      //   - readiness gate (sample count + dry-run pass rate)
-      //   - rolling-quality circuit not tripped
-      //   - rate limit not exceeded for this session
-      //   - sampling stride aligns with current run count
-      //   - modelRegistry is available on ctx (it isn't on agent_end
-      //     in some pi versions; we treat absence as ineligible)
+      // pi awaits agent_end synchronously; if we await the LLM call
+      // here, the user's main session shows "Working" for the full
+      // LLM duration (~30s+). Instead:
+      //   1. Optimistically advance the checkpoint past this window
+      //      (we KNOW explicit-marker found 0 hits; bg work is
+      //      best-effort over the same window).
+      //   2. Schedule the LLM lane as background work, tracked in
+      //      autoWriteInFlight Map so a re-fire on the next prompt
+      //      doesn't double-spend.
+      //   3. Show a footer status (ctx.ui.setStatus) while bg work
+      //      runs, cleared on completion.
       //
-      // When ineligible we fall through to the same skip-and-advance
-      // path the previous implementation used, just with a richer
-      // audit reason explaining *why* the lane skipped.
-      const auto = await tryAutoWriteLane({
-        cwd,
-        sessionId,
-        settings,
-        window,
-        modelRegistry,
-        signal,
-      });
-      const tAutoEnd = Date.now();
-
-      if (auto.kind === "wrote") {
-        const shouldAdvance = shouldAdvanceAfterResults(auto.results);
-        if (shouldAdvance) await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
+      // Tradeoffs:
+      //   - Optimistic checkpoint advance: if bg work fails, that
+      //     window is gone (LLM extraction is best-effort, not
+      //     authoritative). Explicit MEMORY: blocks always go
+      //     through the synchronous path above so user-attested
+      //     writes are never optimistically dropped.
+      //   - In pi --print, the process exits after agent_end and bg
+      //     work is cancelled. Acceptable: --print is one-shot.
+      if (autoWriteInFlight.has(sessionId)) {
+        await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
         await appendAudit(cwd, {
-          operation: "auto_write",
+          operation: "skip",
+          reason: "auto_write_inflight_skip",
           session_id: sessionId,
           ...summary,
           extractor: "llm_extractor",
           parser_version: PARSER_VERSION,
           settings_snapshot: settingsSnapshot,
           entry_breakdown: entryBreakdown,
-          candidate_count: auto.drafts.length,
-          candidates: auto.drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
-          results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, gitCommit: r.gitCommit })),
-          llm: auto.llmAuditSummary,
-          rolling: auto.rollingState,
-          // G9: persist the full extractor raw output for forensic
-          // replay. `extractorAuditRawChars` (preview field used by
-          // dry-run) is intentionally distinct from
-          // `autoWriteRawAuditChars` (this field).
-          raw_text: auto.rawTextStored,
-          raw_text_truncated: auto.rawTextTruncated,
-          stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, llm_total: auto.llmDurationMs, write_total: tAutoEnd - auto.writeStart, total: Date.now() - tStart },
-          checkpoint_advanced: shouldAdvance,
+          stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: 0, total: Date.now() - tStart },
+          checkpoint_advanced: true,
         });
-        if (notify) {
-          try {
-            notify(
-              `Sediment auto-write: ${auto.results.map((r) => `${r.slug}:${r.status}${r.reason ? `(${r.reason})` : ""}`).join(", ")}`,
-              shouldAdvance ? "info" : "warning",
-            );
-          } catch {}
-        }
         return;
       }
 
-      // Lane was ineligible OR LLM call failed OR LLM returned SKIP /
-      // unparseable / validation-rejected. Either way we still advance
-      // the checkpoint (we *did* see the window) and record why.
+      // Optimistic checkpoint advance before launching bg work.
       await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
-      await appendAudit(cwd, {
-        operation: "skip",
-        reason: auto.kind === "ineligible" ? auto.eligibility.reason ?? "auto_write_ineligible"
-              : auto.kind === "llm_skip"   ? "llm_returned_skip"
-              : auto.kind === "llm_error"  ? "llm_extraction_error"
-              : "no_explicit_memory_markers",
-        session_id: sessionId,
-        ...summary,
-        extractor: auto.kind === "ineligible" ? "explicit_marker" : "llm_extractor",
-        parser_version: PARSER_VERSION,
-        settings_snapshot: settingsSnapshot,
-        entry_breakdown: entryBreakdown,
-        eligibility: auto.kind === "ineligible" ? auto.eligibility : undefined,
-        llm: auto.kind === "ineligible" ? undefined : auto.llmAuditSummary,
-        rolling: auto.kind === "ineligible" ? undefined : auto.rollingState,
-        raw_text: auto.kind === "llm_error" || auto.kind === "llm_skip" ? auto.rawTextStored : undefined,
-        raw_text_truncated: auto.kind === "llm_error" || auto.kind === "llm_skip" ? auto.rawTextTruncated : undefined,
-        stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, llm_total: auto.kind === "ineligible" ? 0 : auto.llmDurationMs, write_total: 0, total: Date.now() - tStart },
-        checkpoint_advanced: true,
-      });
+
+      const bgPromise = (async () => {
+        try {
+          if (setStatus) setStatus(`📝 sediment extracting (model=${settings.extractorModel})...`);
+          const auto = await tryAutoWriteLane({
+            cwd,
+            sessionId,
+            settings,
+            window,
+            modelRegistry,
+            signal,
+          });
+          const tAutoEnd = Date.now();
+
+          if (auto.kind === "wrote") {
+            await appendAudit(cwd, {
+              operation: "auto_write",
+              session_id: sessionId,
+              ...summary,
+              extractor: "llm_extractor",
+              parser_version: PARSER_VERSION,
+              settings_snapshot: settingsSnapshot,
+              entry_breakdown: entryBreakdown,
+              candidate_count: auto.drafts.length,
+              candidates: auto.drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
+              results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, gitCommit: r.gitCommit })),
+              llm: auto.llmAuditSummary,
+              rolling: auto.rollingState,
+              raw_text: auto.rawTextStored,
+              raw_text_truncated: auto.rawTextTruncated,
+              stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, llm_total: auto.llmDurationMs, write_total: tAutoEnd - auto.writeStart, total: Date.now() - tStart, background: true },
+              checkpoint_advanced: true,
+              background_async: true,
+            });
+            if (notify) {
+              try {
+                notify(
+                  `Sediment auto-write (bg): ${auto.results.map((r) => `${r.slug}:${r.status}${r.reason ? `(${r.reason})` : ""}`).join(", ")}`,
+                  "info",
+                );
+              } catch {}
+            }
+            return;
+          }
+
+          await appendAudit(cwd, {
+            operation: "skip",
+            reason: auto.kind === "ineligible" ? auto.eligibility.reason ?? "auto_write_ineligible"
+                  : auto.kind === "llm_skip"   ? "llm_returned_skip"
+                  : auto.kind === "llm_error"  ? "llm_extraction_error"
+                  : "no_explicit_memory_markers",
+            session_id: sessionId,
+            ...summary,
+            extractor: auto.kind === "ineligible" ? "explicit_marker" : "llm_extractor",
+            parser_version: PARSER_VERSION,
+            settings_snapshot: settingsSnapshot,
+            entry_breakdown: entryBreakdown,
+            eligibility: auto.kind === "ineligible" ? auto.eligibility : undefined,
+            llm: auto.kind === "ineligible" ? undefined : auto.llmAuditSummary,
+            rolling: auto.kind === "ineligible" ? undefined : auto.rollingState,
+            raw_text: auto.kind === "llm_error" || auto.kind === "llm_skip" ? auto.rawTextStored : undefined,
+            raw_text_truncated: auto.kind === "llm_error" || auto.kind === "llm_skip" ? auto.rawTextTruncated : undefined,
+            stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, llm_total: auto.kind === "ineligible" ? 0 : auto.llmDurationMs, write_total: 0, total: Date.now() - tStart, background: true },
+            checkpoint_advanced: true,
+            background_async: true,
+          });
+        } catch (err: any) {
+          // Last-resort failure path. Never let bg work throw out of
+          // the Promise (uncaught rejection in pi can crash the
+          // session).
+          try {
+            await appendAudit(cwd, {
+              operation: "skip",
+              reason: "auto_write_bg_threw",
+              session_id: sessionId,
+              error: err?.message ?? String(err),
+              checkpoint_advanced: true,
+              background_async: true,
+            });
+          } catch {}
+        } finally {
+          if (setStatus) setStatus(undefined);
+          if (autoWriteInFlight.get(sessionId) === bgPromise) {
+            autoWriteInFlight.delete(sessionId);
+          }
+        }
+      })();
+      autoWriteInFlight.set(sessionId, bgPromise);
+      // DO NOT await bgPromise. agent_end returns immediately so the
+      // main session is unblocked.
       return;
     }
 
@@ -847,6 +922,18 @@ export function _resetAutoWriteStateForTests(): void {
   autoWriteRunCount.clear();
   autoWriteRecentFires.clear();
   autoWriteDisabledBySession.clear();
+  autoWriteInFlight.clear();
+}
+
+/**
+ * Test-only hook to await any background auto-write work to settle.
+ * Smoke tests that exercise the bg path call this before asserting
+ * on audit rows produced asynchronously.
+ */
+export async function _waitForAutoWriteIdleForTests(): Promise<void> {
+  while (autoWriteInFlight.size > 0) {
+    await Promise.allSettled([...autoWriteInFlight.values()]);
+  }
 }
 
 /** Tally entry types within the included window for at-a-glance diagnostics. */
