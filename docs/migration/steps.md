@@ -93,7 +93,7 @@
 
 # 由 sediment/migration writer 执行，非当前 read-only extension
 /sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
-# → 备份 source，写入 schema v1/canonical path，并重建 .pensieve/.index/graph.json + .pensieve/_index.md
+# → 备份 source，写入 schema v1/canonical path，返回 restore_command，并重建 .pensieve/.index/graph.json + .pensieve/_index.md
 
 # 从 apply 产生的 backup 恢复原 source；仅在 target 未被手改时自动删除 target
 /sediment migrate-one --restore .pensieve/.state/migration-backups/<timestamp>/short-term/maxims/example.md --yes
@@ -202,6 +202,7 @@ memory_search(query: "dispatch agent prompt")
 - source 必须位于 `.pensieve/` 内且不是 `.state/.index/pipelines`
 - target 已存在则拒绝
 - 迁移前 backup 到 `.pensieve/.state/migration-backups/<timestamp>/...`
+- apply 成功返回可复制的 `restore_command: /sediment migrate-one --restore <backup> --yes`
 - 生成 schema v1 markdown 后先 lint，error 则拒绝
 - tmp → rename 原子写入；移动场景写 target 后删除 source；不删除空目录
 - audit 到 `.pensieve/.state/sediment-events.jsonl`

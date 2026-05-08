@@ -207,6 +207,7 @@ Body.
       yes: true,
     });
     assert(migrateApplied.status === "applied", `migrate-one failed: ${migrateApplied.reason}`);
+    assert(migrateApplied.restore_command === `/sediment migrate-one --restore ${migrateApplied.backup_path} --yes`, "migrate-one restore command missing");
     assert(!migrateApplied.derived?.error, `migrate-one derived rebuild failed: ${migrateApplied.derived?.error}`);
     assert(fs.existsSync(path.join(root, ".pensieve", "maxims", "legacy.md")), "migrate-one target not written");
     assert(fs.existsSync(path.join(root, migrateApplied.backup_path)), "migrate-one backup not written");

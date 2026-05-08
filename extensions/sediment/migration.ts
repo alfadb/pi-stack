@@ -58,6 +58,7 @@ export interface MigrateOneResult {
   source_path: string;
   target_path?: string;
   backup_path?: string;
+  restore_command?: string;
   target_exists?: boolean;
   lintErrors?: number;
   lintWarnings?: number;
@@ -160,6 +161,10 @@ function isInside(root: string, abs: string): boolean {
 function backupPath(pensieveRoot: string, sourcePath: string): string {
   const rel = path.relative(pensieveRoot, sourcePath);
   return path.join(pensieveRoot, ".state", "migration-backups", timestampSlug(), rel);
+}
+
+function restoreCommand(backupRelPath: string): string {
+  return `/sediment migrate-one --restore ${backupRelPath} --yes`;
 }
 
 async function acquireLock(projectRoot: string, timeoutMs: number): Promise<LockHandle> {
@@ -658,11 +663,14 @@ export async function migrateOne(
     const git = opts.sedimentSettings.gitCommit
       ? await gitCommitMigration(projectRoot, built.slug, [sourcePath, built.targetPath, ...derivedGitPaths(derived)])
       : null;
+    const backupRel = path.relative(projectRoot, backup);
+    const restore_command = restoreCommand(backupRel);
     await appendAudit(projectRoot, {
       operation: "migrate_one",
       source: relPath,
       target: displayTarget,
-      backup: path.relative(projectRoot, backup),
+      backup: backupRel,
+      restore_command,
       slug: built.slug,
       lintErrors,
       lintWarnings,
@@ -677,7 +685,8 @@ export async function migrateOne(
       title: built.title,
       source_path: displaySource,
       target_path: displayTarget,
-      backup_path: path.relative(projectRoot, backup),
+      backup_path: backupRel,
+      restore_command,
       target_exists: false,
       lintErrors,
       lintWarnings,
