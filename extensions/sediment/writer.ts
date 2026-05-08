@@ -8,7 +8,17 @@ import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type DraftPolicy, type EntryKind, type EntryStatus, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
-import { normalizeBareSlug, slugify } from "../memory/utils";
+// `slugify` is the free-text-to-bare-slug normalizer. We deliberately
+// do NOT use `normalizeBareSlug` here, because that one is designed
+// for path/wikilink/id inputs (`[[X]]`, `project:foo:bar`,
+// `path/to/file.md`) and treats `/` as a path separator, taking only
+// the last component. For a free-text TITLE that happens to contain
+// `/` as punctuation (e.g. "Distinguished by extractor/reason
+// Combinations"), normalizeBareSlug would silently truncate to just
+// the last segment ("reason-combinations"). Auto-write produced
+// exactly this bug on first production fire (2026-05-08); we now
+// always slugify titles directly.
+import { slugify } from "../memory/utils";
 import { ensureSedimentLegacyMigrated, formatLocalIsoTimestamp, sedimentAuditPath, sedimentLocksDir } from "../_shared/runtime";
 
 const AUDIT_SCHEMA_VERSION = 2;
@@ -132,7 +142,7 @@ function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: s
   const date = todayIso();
   const status = draft.status ?? "provisional";
   const confidence = Math.min(10, Math.max(0, Math.round(draft.confidence ?? 3)));
-  const slug = normalizeBareSlug(draft.title);
+  const slug = slugify(draft.title);
   const compiledTruth = normalizeCompiledTruth(draft.title, draft.compiledTruth);
   const timelineSession = draft.sessionId || "sediment";
   const timelineNote = draft.timelineNote || "created by sediment project writer";
@@ -237,7 +247,7 @@ export async function writeProjectEntry(
   const projectRoot = path.resolve(opts.projectRoot);
   const pensieveRoot = path.join(projectRoot, ".pensieve");
   if (!fsSync.existsSync(pensieveRoot)) {
-    return { slug: normalizeBareSlug(draft.title), path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
+    return { slug: slugify(draft.title), path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
   }
 
   const validationErrors = validateProjectEntryDraft(draft, opts.policy);
@@ -250,7 +260,7 @@ export async function writeProjectEntry(
       duration_ms: Date.now() - started,
     });
     return {
-      slug: normalizeBareSlug(draft.title),
+      slug: slugify(draft.title),
       path: pensieveRoot,
       status: "rejected",
       reason: "validation_error",
@@ -278,7 +288,7 @@ export async function writeProjectEntry(
       title: draft.title,
       duration_ms: Date.now() - started,
     });
-    return { slug: normalizeBareSlug(draft.title), path: pensieveRoot, status: "rejected", reason: failedSanitize.error, auditPath };
+    return { slug: slugify(draft.title), path: pensieveRoot, status: "rejected", reason: failedSanitize.error, auditPath };
   }
 
   const sanitizedReplacements = [

@@ -1,7 +1,13 @@
 import * as path from "node:path";
 import { DEFAULT_SETTINGS } from "../memory/settings";
 import { scanStore } from "../memory/parser";
-import { normalizeBareSlug, slugify } from "../memory/utils";
+// Title-derived slug uses `slugify` directly, NOT `normalizeBareSlug`,
+// because the input is a free-text title where `/` is punctuation.
+// `normalizeBareSlug` would treat `/` as a path separator and only
+// keep the trailing segment, which both (a) silently truncates titles
+// like "distinguished by extractor/reason combinations" and (b)
+// breaks dedupe consistency vs. writer.ts which now also uses slugify.
+import { slugify } from "../memory/utils";
 
 export interface DedupeMatch {
   slug: string;
@@ -65,7 +71,7 @@ export async function detectProjectDuplicate(
   opts?: { slug?: string; threshold?: number; signal?: AbortSignal },
 ): Promise<DedupeResult> {
   const pensieveRoot = path.join(projectRoot, ".pensieve");
-  const slug = opts?.slug ?? normalizeBareSlug(title);
+  const slug = opts?.slug ?? slugify(title);
   const threshold = opts?.threshold ?? TITLE_TRIGRAM_THRESHOLD;
   const entries = await scanStore(
     { scope: "project", root: pensieveRoot, label: "project" },

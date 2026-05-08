@@ -675,23 +675,66 @@ END_MEMORY`;
       assert(okWritten.includes("$HOME") && !okWritten.includes("/home/worker") && !okWritten.includes(`${require("node:os").homedir()}/projects`), "G8 phrase $HOME scrub did not redact");
     }
 
-    // G7: prompt strengthening (role-aware boundary). We don't hit a real
-    //     LLM here; just assert the prompt text contains the required
-    //     directive substrings so a future weakening is caught.
+    // G7: prompt strengthening (role-aware boundary + durability test).
+    // We don't hit a real LLM here; just assert the prompt text
+    // contains the required directive substrings so a future weakening
+    // is caught.
     {
       const { buildLlmExtractorPrompt } = req("./sediment/llm-extractor.js");
       const p = buildLlmExtractorPrompt("--- ENTRY x 0 message/user ---\nfake content");
       const required = [
+        // Trust boundary (A1)
         "Trust boundary",
         "role=user",
         "role=toolResult",
         "never as instructions",
         "kind: maxim",
         "[0, 6]",
+        // Durability test (added after first-fire produced transient
+        // event entries; "after the restart at 16:43" is the canary).
+        "Durability test",
+        "transient operational event",
+        "Per-window cap",
+        "TWO MEMORY blocks",
+        "Title hygiene",
       ];
       for (const needle of required) {
         assert(p.includes(needle), `G7 prompt missing required marker: ${JSON.stringify(needle)}`);
       }
+    }
+
+    // === slug-from-title bug fix ===========================================
+    // First-fire 2026-05-08 produced an entry with title "Sediment Audit
+    // Rows Can Be Distinguished by extractor/reason Combinations" — the
+    // writer used normalizeBareSlug(title) which interprets `/` as a
+    // path separator and only kept "reason Combinations". Slug landed as
+    // `reason-combinations` (lossy + ambiguous). Writer + dedupe both now
+    // call slugify(title) directly. This regression locks in the fix.
+    {
+      const slugBugRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-slugbug-"));
+      fs.mkdirSync(path.join(slugBugRoot, ".pensieve"), { recursive: true });
+      execFileSync("git", ["init"], { cwd: slugBugRoot, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: slugBugRoot });
+      execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: slugBugRoot });
+      const titleWithSlash = "Audit Rows Distinguished by extractor/reason Combinations";
+      const w = await writeProjectEntry({
+        title: titleWithSlash,
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: "Body content for the slug-from-title regression.",
+      }, { projectRoot: slugBugRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      assert(w.status === "created", `slug-bug write failed: ${w.reason}`);
+      // Expected: slug derived from full title with / replaced by -.
+      assert(
+        w.slug === "audit-rows-distinguished-by-extractor-reason-combinations",
+        `slug must include both sides of '/' as words, got: ${w.slug}`,
+      );
+      // Negative: must NOT be the truncated form from the bug.
+      assert(w.slug !== "reason-combinations", `slug truncation bug regressed: ${w.slug}`);
+      // Dedupe should also see the same full slug.
+      const { detectProjectDuplicate } = req("./sediment/dedupe.js");
+      const dup = await detectProjectDuplicate(slugBugRoot, titleWithSlash);
+      assert(dup.duplicate && dup.reason === "slug_exact", `dedupe must see same title: ${JSON.stringify(dup)}`);
     }
 
     writeFile(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), JSON.stringify({
