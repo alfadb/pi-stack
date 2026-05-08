@@ -158,6 +158,38 @@ async function main() {
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "graph.json not written");
     assert(graph.nodeCount === 2, "graph node count mismatch");
 
+    // Regression: code-span / fenced-block [[X]] tokens must NOT become graph edges.
+    // Only the real wikilink to `beta` should yield a body_wikilink edge from `gamma`.
+    writeFile(path.join(root, ".pensieve", "knowledge", "gamma.md"), makeEntry({
+      title: "Gamma Wikilink Cases",
+      body: [
+        "Real link: [[beta]].",
+        "",
+        "Inline example: `[[example-in-code]]` should not become an edge.",
+        "",
+        "Another inline: `[[wikilink]]` is a placeholder.",
+        "",
+        "Fenced sample (must be skipped):",
+        "",
+        "```",
+        "see also [[fence-link-1]] and [[fence-link-2]]",
+        "```",
+      ].join("\n"),
+    }));
+    const graph2 = await rebuildGraphIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
+    assert(graph2.nodeCount === 3, `graph rebuild should pick up gamma (got ${graph2.nodeCount})`);
+    const graphJson = JSON.parse(fs.readFileSync(path.join(root, ".pensieve", ".index", "graph.json"), "utf-8"));
+    const gammaEdges = graphJson.edges.filter((e) => e.from === "gamma");
+    const gammaWikilinkTargets = gammaEdges.filter((e) => e.source === "body_wikilink").map((e) => e.to);
+    assert(
+      gammaWikilinkTargets.length === 1 && gammaWikilinkTargets[0] === "beta",
+      `gamma should have exactly one body_wikilink edge to beta, got: ${JSON.stringify(gammaWikilinkTargets)}`,
+    );
+    for (const banned of ["example-in-code", "wikilink", "fence-link-1", "fence-link-2"]) {
+      assert(!gammaWikilinkTargets.includes(banned), `code-span/fenced wikilink "${banned}" leaked into graph edges`);
+    }
+    fs.unlinkSync(path.join(root, ".pensieve", "knowledge", "gamma.md"));
+
     const idx = await rebuildMarkdownIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(fs.existsSync(path.join(root, ".pensieve", "_index.md")), "_index.md not written");
     assert(idx.orphanCount === 1, "index orphan count mismatch");
