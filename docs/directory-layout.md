@@ -14,6 +14,8 @@ alfadb/pi-astack/
 ├── UPSTREAM.md                        # 上游跟踪（B 类 vendor）+ 三分类说明
 ├── LICENSE                            # MIT
 ├── .gitignore
+├── scripts/
+│   └── smoke-memory-sediment.mjs      # memory + sediment smoke 回归
 │                                      # （无 .gitmodules — vendor/gstack 尚未挂载）
 │
 ├── docs/                              # ✅ 已实现

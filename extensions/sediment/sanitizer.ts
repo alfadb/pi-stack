@@ -19,13 +19,16 @@ export function sanitizeForMemory(input: string): SanitizeResult {
   let text = input;
 
   for (const pattern of CREDENTIAL_PATTERNS) {
+    pattern.re.lastIndex = 0;
     if (pattern.re.test(text)) {
+      pattern.re.lastIndex = 0;
       return {
         ok: false,
         error: `credential pattern detected: ${pattern.name}`,
         replacements,
       };
     }
+    pattern.re.lastIndex = 0;
   }
 
   const home = os.homedir();
@@ -35,13 +38,17 @@ export function sanitizeForMemory(input: string): SanitizeResult {
   }
 
   const ipRe = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
+  ipRe.lastIndex = 0;
   if (ipRe.test(text)) {
+    ipRe.lastIndex = 0;
     text = text.replace(ipRe, "[HOST]");
     replacements.push("ip_address");
   }
 
   const emailRe = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+  emailRe.lastIndex = 0;
   if (emailRe.test(text)) {
+    emailRe.lastIndex = 0;
     text = text.replace(emailRe, "[EMAIL]");
     replacements.push("email");
   }

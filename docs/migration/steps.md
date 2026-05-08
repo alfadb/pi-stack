@@ -302,6 +302,16 @@ echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
 
 ## 必补测试
 
+### Smoke 回归入口
+
+**实现状态（2026-05-08）**：新增 `scripts/smoke-memory-sediment.mjs`，package script：
+
+```bash
+npm run smoke:memory
+```
+
+覆盖 memory + sediment 的关键路径：tool/command 注册、frontmatter EOF parsing、lint、search、graph/index rebuild、migration dry-run report、doctor-lite、sanitize、writer、dedupe、checkpoint window、explicit extractor、LLM dry-run summary/report/readiness、world `ABRAIN_ROOT` generated paths。
+
 ### 安全测试
 - memory_write/update/deprecate 工具仅 sediment 可见
 - 主会话调 memory_write → 工具不存在

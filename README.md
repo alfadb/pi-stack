@@ -75,6 +75,7 @@ mkdir -p .pensieve/{maxims,decisions,knowledge,staging,archive,schemas}
 ```bash
 cd ~/.pi/agent/skills/pi-astack
 $EDITOR extensions/dispatch/index.ts    # 直接改
+npm run smoke:memory                    # memory/sediment 回归（改记忆基础设施时跑）
 git add . && git commit -m "fix: ..."
 git push                                    # 推到 GitHub
 

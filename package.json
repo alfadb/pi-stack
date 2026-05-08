@@ -19,6 +19,9 @@
     "type": "git",
     "url": "git@github.com:alfadb/pi-astack.git"
   },
+  "scripts": {
+    "smoke:memory": "node scripts/smoke-memory-sediment.mjs"
+  },
   "pi": {
     "extensions": ["./extensions"],
     "skills": ["./skills"],
