@@ -34,6 +34,8 @@
 
 ## 1. Asymmetric Trust（从 Phase 1.4 burn-in 学到）
 
+> 本节原则已升为正式架构决策：[ADR 0013 — Asymmetric Trust 三段式](../adr/0013-asymmetric-trust-three-lanes.md)。本设计稿是 ADR 0013 中 **Lane B (manual promote)** 的详细实施展开。
+
 | Lane | 触发 | 信任度 | 闸门 |
 |---|---|---|---|
 | 显式 `MEMORY:` block | 用户亲手输入 | 高 | 仅 hard validation |

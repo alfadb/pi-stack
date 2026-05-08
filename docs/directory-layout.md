@@ -33,7 +33,8 @@ alfadb/pi-astack/
 │   │   ├── 0009-multi-agent-as-base-capability.md
 │   │   ├── 0010-sediment-single-agent-with-lookup-tools.md # 内核保留，tools 过时
 │   │   ├── 0011-sediment-two-track-pipeline.md           # superseded by memory-architecture.md
-│   │   └── 0012-sediment-pensieve-gbrain-dual-target.md  # superseded by memory-architecture.md
+│   │   ├── 0012-sediment-pensieve-gbrain-dual-target.md  # superseded by memory-architecture.md
+│   │   └── 0013-asymmetric-trust-three-lanes.md          # ✅ Lane A/B/C/D trust tier formalization (2026-05-08)
 │   └── migration/
 │       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6
 │       ├── apply-checklist.md         # 单文件 migration apply/restore 操作手册
