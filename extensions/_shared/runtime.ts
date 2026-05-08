@@ -90,6 +90,15 @@ export function memoryMigrationReportPath(projectRoot: string): string {
   return path.join(memoryDir(projectRoot), "migration-report.md");
 }
 
+/* -------- compaction-tuner -------------------------------------------- */
+
+export function compactionTunerDir(projectRoot: string): string {
+  return piAstackModuleDir(projectRoot, "compaction-tuner");
+}
+export function compactionTunerAuditPath(projectRoot: string): string {
+  return path.join(compactionTunerDir(projectRoot), "audit.jsonl");
+}
+
 /* -------- legacy fallback paths ---------------------------------------- *
  * Returned alongside the canonical paths so consumers can read either
  * location during the transition window. Once existing data is migrated,

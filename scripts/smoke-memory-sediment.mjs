@@ -50,7 +50,7 @@ function assertNoLegacyPackageScope() {
 
 function transpileExtensions(outRoot) {
   const extRoot = path.join(repoRoot, "extensions");
-  const dirs = ["_shared", "memory", "sediment"];
+  const dirs = ["_shared", "memory", "sediment", "compaction-tuner"];
   let count = 0;
   for (const dir of dirs) {
     const srcDir = path.join(extRoot, dir);
@@ -130,13 +130,89 @@ async function main() {
     const { summarizeLlmExtractorDryRun } = req("./sediment/llm-extractor.js");
     const { readLlmDryRunReport, evaluateLlmAutoWriteReadiness } = req("./sediment/report.js");
     const { sanitizeForMemory } = req("./sediment/sanitizer.js");
+    const compactionTunerExt = req("./compaction-tuner/index.js").default;
+    const { classifyDecision, DEFAULT_COMPACTION_TUNER_SETTINGS } = req("./compaction-tuner/index.js");
+    const { resolveCompactionTunerSettings } = req("./compaction-tuner/settings.js");
 
     const tools = new Map();
     const commands = new Map();
     memoryExt({ registerTool(t) { tools.set(t.name, t); }, registerCommand(n, o) { commands.set(n, o); } });
     sedimentExt({ registerCommand(n, o) { commands.set(n, o); }, on() {} });
+    compactionTunerExt({ registerCommand(n, o) { commands.set(n, o); }, on() {} });
     assert(tools.size === 4, `expected 4 memory tools, got ${tools.size}`);
-    assert(commands.has("memory") && commands.has("sediment"), "expected memory and sediment commands");
+    assert(commands.has("memory") && commands.has("sediment") && commands.has("compaction-tuner"), "expected memory, sediment, and compaction-tuner commands");
+
+    // === compaction-tuner: settings parsing + decision logic ===
+    {
+      // Defaults
+      const def = DEFAULT_COMPACTION_TUNER_SETTINGS;
+      assert(def.enabled === false, "compaction-tuner default enabled must be false (opt-in)");
+      assert(def.thresholdPercent === 75, "compaction-tuner default thresholdPercent must be 75");
+
+      // classifyDecision: percent null -> skip
+      assert(classifyDecision(null, 75, true, 5).decision === "skip", "null percent must skip");
+
+      // Below threshold while armed: skip with reason below_threshold
+      assert(classifyDecision(50, 75, true, 5).decision === "skip", "50% with threshold 75 must skip");
+
+      // At/above threshold while armed: trigger
+      assert(classifyDecision(75, 75, true, 5).decision === "trigger", "exactly threshold must trigger");
+      assert(classifyDecision(80, 75, true, 5).decision === "trigger", "above threshold must trigger");
+
+      // Above threshold but disarmed (already triggered, still hot): skip
+      // with reason that distinguishes "already triggered" from below-threshold.
+      const aboveDisarmed = classifyDecision(80, 75, false, 5);
+      assert(aboveDisarmed.decision === "skip" && aboveDisarmed.reason === "already_triggered_awaiting_rearm",
+        `disarmed at 80 must skip with awaiting_rearm, got ${JSON.stringify(aboveDisarmed)}`);
+
+      // In-between band (threshold-margin <= percent < threshold) while disarmed:
+      // skip with reason "below_threshold" (rearm only fires when usage drops
+      // BELOW the floor, otherwise we hover indefinitely).
+      const inBand = classifyDecision(72, 75, false, 5);
+      assert(inBand.decision === "skip" && inBand.reason === "below_threshold",
+        `72%/threshold75/disarmed should skip with below_threshold, got ${JSON.stringify(inBand)}`);
+
+      // Below rearm floor while disarmed: rearm
+      assert(classifyDecision(69, 75, false, 5).decision === "rearm", "below rearm floor (75-5=70) must rearm");
+      assert(classifyDecision(50, 75, false, 5).decision === "rearm", "way below threshold while disarmed must rearm");
+
+      // Settings clamping: out-of-range thresholdPercent should be clamped
+      // (driven via env-pointed settings file).
+      const tunerSettingsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-tuner-"));
+      const tunerSettingsPath = path.join(tunerSettingsRoot, "pi-astack-settings.json");
+      const HOME = os.homedir();
+      const fakeHome = path.join(tunerSettingsRoot, "home");
+      fs.mkdirSync(path.join(fakeHome, ".pi", "agent"), { recursive: true });
+      fs.writeFileSync(
+        path.join(fakeHome, ".pi", "agent", "pi-astack-settings.json"),
+        JSON.stringify({
+          compactionTuner: {
+            enabled: true,
+            thresholdPercent: 200,    // out of range, must clamp to 95
+            rearmMarginPercent: -3,    // negative, must clamp to 0
+            customInstructions: "keep memory architecture details",
+          },
+        }),
+      );
+      const origHome = process.env.HOME;
+      process.env.HOME = fakeHome;
+      // settings.ts reads os.homedir() at call time only inside the function body via
+      // path.join(os.homedir(), ...). require'd module re-evaluates os.homedir() each
+      // call to loadPiStackSettings() because the path is computed inside fsSync.readFile.
+      // BUT our settings.ts captures PI_STACK_SETTINGS_PATH at module load time as a
+      // const — so we must re-load via fresh require (delete cache).
+      const settingsModulePath = require.resolve(path.join(outRoot, "compaction-tuner", "settings.js"));
+      delete require.cache[settingsModulePath];
+      const { resolveCompactionTunerSettings: freshResolve } = req("./compaction-tuner/settings.js");
+      const clamped = freshResolve();
+      assert(clamped.enabled === true, "settings file should yield enabled=true");
+      assert(clamped.thresholdPercent === 95, `out-of-range thresholdPercent must clamp to 95, got ${clamped.thresholdPercent}`);
+      assert(clamped.rearmMarginPercent === 0, `negative rearmMarginPercent must clamp to 0, got ${clamped.rearmMarginPercent}`);
+      assert(clamped.customInstructions === "keep memory architecture details", "customInstructions must round-trip");
+      process.env.HOME = origHome;
+      // restore caches for any later tests
+      delete require.cache[settingsModulePath];
+    }
 
     const fm = splitFrontmatter("---\ntitle: EOF\n---");
     assert(fm.frontmatterText.trim() === "title: EOF" && fm.body === "", "EOF frontmatter parse failed");

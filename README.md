@@ -101,6 +101,7 @@ pi install git:github.com/alfadb/pi-astack
 - `sediment/` — ✅ 部分实现：checkpoint/run-window + deterministic explicit `MEMORY:` extractor + `/sediment llm --dry-run`（audit + quality gate + `/sediment llm-report` + `/sediment readiness`）+ project-only writer substrate（validate/sanitize/dedupe/lint/lock/atomic write/audit/git best-effort）+ `/sediment migration-backups` + `/sediment migrate-one --plan/--apply --yes/--restore --yes` 单文件迁移与恢复（成功后自动重建 graph/index derived artifacts；操作手册见 [docs/migration/apply-checklist.md](./docs/migration/apply-checklist.md)）；自动 LLM 写入仍计划中
 - `model-curator/` — 模型能力快照与选择建议
 - `model-fallback/` — 非对称多模型 fallback：初始模型走 pi 内建指数退避重试，耗尽后按 `modelFallback.fallbackModels` 切下一个。alfadb 当前 pi 配置：claude-code parity，1+9=10 次尝试。（旧名 retry-stream-eof → retry-all-errors；**自有功能，不向上游 PR**）
+- `compaction-tuner/` — 按百分比阈值触发 pi compaction。解决 pi 内建 `reserveTokens` 是绝对数值、跨 200k–1M+ contextWindow 模型无法表达统一百分比的问题。Hook `agent_end` 读 `ctx.getContextUsage()`，`percent >= thresholdPercent` 时 `ctx.compact()`。Hysteresis (`rearmMarginPercent`) 防重复触发。Pi 默认 reserveTokens=16384 仍作底线 safety net。Slash command `/compaction-tuner [status|trigger]`。Audit 在 `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`。默认 opt-out；详见 `pi-astack-settings.schema.json#compactionTuner`。
 
 ### Skills（pi 技能）
 - `memory-wand/` — 记忆库查询助手（`memory_*` tool 包装）

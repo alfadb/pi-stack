@@ -198,6 +198,48 @@
       }
     },
 
+    "compactionTuner": {
+      "type": "object",
+      "description": "Trigger pi's compaction at a configurable percentage of contextWindow (extensions/compaction-tuner/). Solves the problem that pi's built-in `compaction.reserveTokens` is an absolute number, while user-stack models span 200k–1M+ contextWindow — a single number can't represent a fixed percentage uniformly. Hooks `agent_end`, reads `ctx.getContextUsage()`, and calls `ctx.compact()` once `percent >= thresholdPercent`. Pi's built-in threshold (default reserveTokens=16384, ~92% on 200k) remains as a last-resort safety net. Audit log: `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Master switch. When false the hook is loaded but short-circuits before any work, leaving pi's native compaction in sole control."
+        },
+
+        "thresholdPercent": {
+          "type": "number",
+          "default": 75,
+          "minimum": 10,
+          "maximum": 95,
+          "description": "Target percent of contextWindow consumed at which to fire `ctx.compact()`. Clamped to [10, 95]. Re-evaluated each turn; changes apply immediately on next agent_end with no restart needed."
+        },
+
+        "rearmMarginPercent": {
+          "type": "number",
+          "default": 5,
+          "minimum": 0,
+          "description": "Hysteresis margin (percentage points). After triggering at thresholdPercent, the trigger disarms until usage drops below `thresholdPercent - rearmMarginPercent`, then re-arms. Prevents repeated triggers while a long agent loop hovers near the boundary or while compaction is still finishing."
+        },
+
+        "notifyOnTrigger": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a one-line `ctx.ui.notify` message when compaction is triggered (and again on completion / error). The audit row is always written regardless of this flag."
+        },
+
+        "customInstructions": {
+          "type": "string",
+          "default": "",
+          "description": "Optional custom instructions passed through to pi's compaction LLM (`compact({customInstructions})`). Empty string = pass undefined and use pi's default summary prompt."
+        }
+      }
+    },
+
     "memory": {
       "type": "object",
       "description": "Read-only markdown memory Facade (extensions/memory/). Registers memory_search/get/list/neighbors over project .pensieve/ and optional world ~/.abrain/ stores. The extension never writes memory; sediment remains the sole writer.",
