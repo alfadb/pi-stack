@@ -103,6 +103,7 @@ async function main() {
     const { runDoctorLite } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { writeProjectEntry } = req("./sediment/writer.js");
+    const { migrateOne } = req("./sediment/migration.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     const { buildRunWindow, saveCheckpoint, loadCheckpoint } = req("./sediment/checkpoint.js");
     const { detectProjectDuplicate } = req("./sediment/dedupe.js");
@@ -158,6 +159,17 @@ Body.
     const migrationReport = await writeMigrationReport(path.join(root, ".pensieve"), migration, root);
     assert(fs.existsSync(path.join(root, ".pensieve", ".state", "migration-report.md")), "migration report not written");
     assert(migrationReport.migrateCount === migration.migrateCount, "migration report count mismatch");
+
+    const migrateApplied = await migrateOne(".pensieve/short-term/maxims/legacy.md", {
+      projectRoot: root,
+      sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
+      memorySettings: DEFAULT_SETTINGS,
+      apply: true,
+      yes: true,
+    });
+    assert(migrateApplied.status === "applied", `migrate-one failed: ${migrateApplied.reason}`);
+    assert(fs.existsSync(path.join(root, ".pensieve", "maxims", "legacy.md")), "migrate-one target not written");
+    assert(fs.existsSync(path.join(root, migrateApplied.backup_path)), "migrate-one backup not written");
 
     const doctor = await runDoctorLite(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(["pass", "warning", "error"].includes(doctor.status), "doctor-lite invalid status");

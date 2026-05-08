@@ -185,8 +185,17 @@ memory_search(query: "dispatch agent prompt")
 - `/sediment llm-report [--limit N]` 汇总最近 `llm_dry_run` 质量样本
 - `/sediment readiness` 根据 `autoLlmWriteEnabled` / `minDryRunSamples` / `requiredDryRunPassRate` 评估未来自动 LLM 写入是否可放行（当前仍不自动写）
 
+已完成 migration apply 安全入口：
+- `/sediment migrate-one --apply --yes <file>`：只允许单文件迁移
+- source 必须位于 `.pensieve/` 内且不是 `.state/.index/pipelines`
+- target 已存在则拒绝
+- 迁移前 backup 到 `.pensieve/.state/migration-backups/<timestamp>/...`
+- 生成 schema v1 markdown 后先 lint，error 则拒绝
+- tmp → rename 原子写入；移动场景写 target 后删除 source；不删除空目录
+- audit 到 `.pensieve/.state/sediment-events.jsonl`
+
 待实现完整 pipeline：
-- migration apply（当前仅 dry-run/report，不重写 canonical markdown）
+- batch migration apply（当前只支持单文件）
 - LLM extract + classify 的 lookup tools 版本（继承 ADR 0010 内核）
 - 将 LLM dry-run 质量门控后接入 agent_end 自动写
 
@@ -212,6 +221,9 @@ memory_search(query: "dispatch agent prompt")
 
 /sediment smoke --dry-run
 # → 返回将写入的 slug/path/lint/dedupe 结果，但不写 markdown
+
+/sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
+# → 备份 source，迁移单个 legacy 文件到 schema v1/canonical path
 ```
 
 **待实现验收**：

@@ -69,6 +69,7 @@ alfadb/pi-astack/
 │   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor
 │   │   ├── llm-extractor.ts           # /sediment llm --dry-run prompt + model call
 │   │   ├── report.ts                  # llm_dry_run audit report
+│   │   ├── migration.ts               # /sediment migrate-one 单文件 legacy migration apply
 │   │   ├── validation.ts              # draft runtime validation
 │   │   ├── dedupe.ts                  # deterministic slug/title duplicate detection
 │   │   ├── sanitizer.ts               # 最小写前脱敏/fail-closed

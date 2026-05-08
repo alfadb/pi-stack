@@ -13,6 +13,8 @@ import { buildRunWindow, checkpointSummary, hasPensieve, loadCheckpoint, saveChe
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun } from "./llm-extractor";
+import { migrateOne } from "./migration";
+import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { evaluateLlmAutoWriteReadiness, formatLlmAutoWriteReadiness, formatLlmDryRunReport, readLlmDryRunReport } from "./report";
 import { appendAudit, writeProjectEntry, type WriteProjectEntryResult } from "./writer";
 
@@ -38,9 +40,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window/extract/dedupe/report/readiness and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment llm --dry-run, /sediment llm-report, /sediment readiness, /sediment dedupe --title <title>, /sediment smoke --dry-run",
+    description: "Sediment writer status/window/extract/dedupe/report/readiness/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment llm --dry-run, /sediment llm-report, /sediment readiness, /sediment dedupe --title <title>, /sediment migrate-one --apply --yes <file>, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "extract --dry-run", "llm --dry-run", "llm-report", "readiness", "dedupe --title ", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "extract --dry-run", "llm --dry-run", "llm-report", "readiness", "dedupe --title ", "migrate-one --apply --yes ", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -164,6 +166,26 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
+      if (subcommand === "migrate-one") {
+        const apply = rest.includes("--apply");
+        const yes = rest.includes("--yes");
+        const fileParts = rest.filter((part) => part !== "--apply" && part !== "--yes");
+        const source = fileParts.join(" ").trim();
+        if (!source) {
+          ctx.ui.notify("Usage: /sediment migrate-one --apply --yes <file>", "warning");
+          return;
+        }
+        const result = await migrateOne(source, {
+          projectRoot: cwd,
+          sedimentSettings: settings,
+          memorySettings: resolveMemorySettings(),
+          apply,
+          yes,
+        });
+        ctx.ui.notify(JSON.stringify(result, null, 2), result.status === "applied" ? "info" : "warning");
+        return;
+      }
+
       if (subcommand === "smoke") {
         if (!rest.includes("--dry-run")) {
           ctx.ui.notify("Usage: /sediment smoke --dry-run (apply is intentionally not exposed)", "warning");
@@ -181,7 +203,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment llm --dry-run OR /sediment llm-report [--limit N] OR /sediment readiness OR /sediment dedupe --title <title> OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment llm --dry-run OR /sediment llm-report [--limit N] OR /sediment readiness OR /sediment dedupe --title <title> OR /sediment migrate-one --apply --yes <file> OR /sediment smoke --dry-run", "warning");
     },
   });
 }
