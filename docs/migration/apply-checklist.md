@@ -172,3 +172,17 @@ Before considering a limited batch apply command, collect evidence from repeated
 - `npm run smoke:memory` passes after each code change;
 - `doctor-lite` results are understood before and after each real apply;
 - no manual recovery outside `--restore` was required.
+
+## Status: Phase 1 migration completed (2026-05-08)
+
+All legacy `.pensieve/` entries in the parent `~/.pi` repo were migrated to schema v1 over ~14 LLM-driven batches using the single-file workflow above:
+
+- pending count: 173 → 0
+- lint errors: 547 → 0
+- dead links (post code-span fix): 0
+- migration backups: pruned (git history is the canonical undo trail)
+- final `doctor-lite` status: `pass`
+
+Batch apply was deliberately not added. The single-file workflow + git commit-per-batch was sufficient. Backup pruning at the end of migration is the recommended cleanup step; the `migration-backups` directory is gitignored and can be removed once a clean `git status` proves all migrations are committed.
+
+The migration tooling (`/sediment migrate-one`, `migration-backups`, restore logic) remains in place for future schema bumps but is one-shot in spirit — do not extend it (no batch mode, no queue, no dashboard).

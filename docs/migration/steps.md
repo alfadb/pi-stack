@@ -21,9 +21,9 @@
 ## Phase 1：Project 层 + 格式标准化（MVP）
 
 **验收标准**：
-- [ ] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）
+- [x] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）— 真实迁移已完成（~/.pi 父仓 173 → 0 pending，lint 0 errors，dead links 0）
 - [x] 10 条 Lint 规则实现（T1-T10；`/memory lint [path]` slash command，CLI wrapper 未实现；另有 `/memory doctor-lite [path]` 聚合报告）
-- [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 全库计划生成 + `/sediment migrate-one --plan <file>` 单文件预览 + `/sediment migrate-one --apply --yes <file>` 单文件 apply + `/sediment migrate-one --restore <backup> --yes` 单文件恢复 + `/sediment migration-backups` 恢复点列表；batch apply 仍待实现
+- [x] 旧格式迁移工具：`/memory migrate --dry-run [path]` 全库计划生成 + `/sediment migrate-one --plan <file>` 单文件预览 + `/sediment migrate-one --apply --yes <file>` 单文件 apply + `/sediment migrate-one --restore <backup> --yes` 单文件恢复 + `/sediment migration-backups` 恢复点列表；**batch apply 不再追加**（单文件 + git commit-per-batch 已被验证足够）
 - [x] `memory_search` grep-based 实现（rg 文件发现 + per-file tf-idf + title/slug boost；project 层 + 可选 world 只读）
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
 - [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`；`/sediment migrate-one` 成功后自动重建）
@@ -107,9 +107,9 @@
 # → 恢复原 legacy source，删除可验证的迁移 target，并重建 graph/index；若 target 已被手改则拒绝 target_modified
 ```
 
-**操作手册**：真实项目迁移按 [apply-checklist.md](./apply-checklist.md) 执行。当前只允许单文件 plan/apply/restore；batch apply 需要先完成 checklist 中的 burn-in 证据。
+**操作手册**：真实项目迁移按 [apply-checklist.md](./apply-checklist.md) 执行。实践中 LLM 在同一会话内调用 `migrateOne({apply:true,yes:true,gitCommit:false})` 批处理并 git commit-per-batch 已足够。
 
-**待实现验收**：batch apply（不绕过单文件安全约束）。
+**状态**：迁移完成（2026-05-08）。~/.pi 父仓 173 → 0 pending，14 batch，所有 commit 逆向可追。batch apply CLI 按原计划**不再追加**（详见 [apply-checklist.md](./apply-checklist.md) Status 段）。
 
 ### Phase 1.3 — memory_search（grep-based）
 
