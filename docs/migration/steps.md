@@ -20,7 +20,7 @@
 
 **验收标准**：
 - [ ] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）
-- [x] 10 条 Lint 规则实现（T1-T10；`/memory lint [path]` slash command，CLI wrapper 未实现）
+- [x] 10 条 Lint 规则实现（T1-T10；`/memory lint [path]` slash command，CLI wrapper 未实现；另有 `/memory doctor-lite [path]` 聚合报告）
 - [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 计划生成；实际写入迁移仍待 sediment/migration writer
 - [x] `memory_search` grep-based 实现（rg 文件发现 + per-file tf-idf + title/slug boost；project 层 + 可选 world 只读）
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
@@ -31,6 +31,23 @@
 - [x] 最小脱敏：credential pattern → 写入拒绝（fail-closed）；$HOME 路径替换
 
 **不包含**：World 层、向量搜索、promotion gates、passive nudge、语义 dedupe
+
+### Phase 1.0 — doctor-lite aggregate status
+
+**实现状态（2026-05-08）**：`extensions/memory/doctor.ts` 已实现 `/memory doctor-lite [path]`，聚合 Phase 1 关键状态，便于判断 legacy migration / graph / lint / sediment dry-run 是否就绪。
+
+汇总范围：
+- lint error/warning
+- graph/backlink dead links / symmetric backlink
+- generated `_index.md` 是否可构建
+- migration pending count
+- sediment `llm_dry_run` pass/fail/pass-rate
+
+**验收**：
+```text
+/memory doctor-lite .pensieve
+# → 返回 PASS / WARNING / ERROR 及分项摘要
+```
 
 ### Phase 1.1 — 条目格式标准化
 

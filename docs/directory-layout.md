@@ -56,6 +56,7 @@ alfadb/pi-astack/
 │   │   ├── parser.ts                  # markdown/frontmatter/parser + store scan
 │   │   ├── search.ts                  # search/list/get/neighbors 逻辑
 │   │   ├── lint.ts                    # T1-T10 lint engine
+│   │   ├── doctor.ts                  # doctor-lite aggregate health report
 │   │   ├── migrate.ts                 # legacy migration dry-run planner
 │   │   ├── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
 │   │   └── index-file.ts              # generated _index.md rebuild writer
@@ -114,6 +115,7 @@ v7 markdown+git 记忆架构的只读 Facade。注册 4 个 LLM-facing 工具：
 
 Human-facing 命令：
 - `/memory lint [path]`：执行 T1-T10 Timeline/frontmatter lint，不注册为 LLM tool
+- `/memory doctor-lite [path]`：汇总 lint / graph / index / migration / sediment dry-run 状态
 - `/memory migrate --dry-run [--report] [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划；`--report` 写 `.state/migration-report.md`
 - `/memory check-backlinks [path]`：in-memory 构建 graph snapshot，报告 dead links 与缺失 symmetric backlinks
 - `/memory rebuild --graph [path]`：写入 derived graph index（project: `.index/graph.json`；world: `.state/index/graph.json`）

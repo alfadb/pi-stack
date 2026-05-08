@@ -15,6 +15,7 @@ import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, searchEntries, serializeEntry } from "./search";
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "./migrate";
+import { formatDoctorLiteReport, runDoctorLite } from "./doctor";
 import { checkBacklinks, formatBacklinkReport, formatGraphRebuildReport, rebuildGraphIndex } from "./graph";
 import { formatMarkdownIndexRebuildReport, rebuildMarkdownIndex } from "./index-file";
 import { clamp, normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
@@ -30,11 +31,12 @@ function registerMemoryCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("memory", {
-    description: "Memory maintenance commands: /memory lint [path], /memory migrate --dry-run [--report] [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path]",
+    description: "Memory maintenance commands: /memory lint [path], /memory migrate --dry-run [--report] [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path], /memory doctor-lite [path]",
     getArgumentCompletions(prefix: string) {
       const items = [
         "lint", "lint .pensieve",
         "migrate --dry-run", "migrate --dry-run --report", "migrate --dry-run .pensieve",
+        "doctor-lite", "doctor-lite .pensieve",
         "check-backlinks", "check-backlinks .pensieve",
         "rebuild --graph", "rebuild --graph .pensieve",
         "rebuild --index", "rebuild --index .pensieve",
@@ -77,6 +79,14 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         return;
       }
 
+      if (subcommand === "doctor-lite") {
+        const targetArg = rest.join(" ").trim();
+        const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
+        const report = await runDoctorLite(target, settings, undefined, cwd);
+        ctx.ui.notify(formatDoctorLiteReport(report), report.status === "error" ? "error" : report.status === "warning" ? "warning" : "info");
+        return;
+      }
+
       if (subcommand === "check-backlinks") {
         const targetArg = rest.join(" ").trim();
         const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
@@ -111,7 +121,7 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate --dry-run [--report] [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]", "warning");
+      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate --dry-run [--report] [path] OR /memory doctor-lite [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]", "warning");
     },
   });
 }
