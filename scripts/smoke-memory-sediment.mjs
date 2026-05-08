@@ -214,6 +214,20 @@ Body.
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "migrate-one graph index not rebuilt");
     assert(fs.existsSync(path.join(root, ".pensieve", "_index.md")), "migrate-one markdown index not rebuilt");
 
+    const migratedTarget = path.join(root, ".pensieve", "maxims", "legacy.md");
+    const migratedTargetText = fs.readFileSync(migratedTarget, "utf-8");
+    fs.writeFileSync(migratedTarget, `${migratedTargetText}\nmanual edit after migration\n`);
+    const restoreConflict = await restoreMigrationBackup(migrateApplied.backup_path, {
+      projectRoot: root,
+      sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
+      memorySettings: DEFAULT_SETTINGS,
+      yes: true,
+    });
+    assert(restoreConflict.status === "rejected" && restoreConflict.reason === "target_modified", `restore conflict should reject target_modified, got ${restoreConflict.reason}`);
+    assert(!fs.existsSync(path.join(root, ".pensieve", "short-term", "maxims", "legacy.md")), "restore conflict should not restore source");
+    assert(fs.readFileSync(migratedTarget, "utf-8").includes("manual edit after migration"), "restore conflict should preserve modified target");
+    fs.writeFileSync(migratedTarget, migratedTargetText);
+
     const restored = await restoreMigrationBackup(migrateApplied.backup_path, {
       projectRoot: root,
       sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
