@@ -80,6 +80,72 @@ const autoWriteInFlight = new Map<string, Promise<void>>();
 /** Status key for ctx.ui.setStatus(). */
 const SEDIMENT_STATUS_KEY = "sediment";
 
+/**
+ * Footer status state machine for the sediment extension.
+ *
+ *   idle      Pi is loaded; sediment is enabled; no extraction work
+ *             is currently in progress (either nothing has run yet,
+ *             or the last activity already flushed back to idle on
+ *             a fresh agent_start).
+ *
+ *   running   The agent_end handler is currently running the explicit
+ *             write loop (synchronous, fast) OR has scheduled
+ *             background LLM auto-write that is still in flight.
+ *
+ *   completed The most recent extraction finished successfully
+ *             (writes succeeded, lint clean, audit row written) or
+ *             produced no entries in a healthy way (lane was
+ *             ineligible due to rate-limit / sampling / readiness,
+ *             OR the LLM returned SKIP).
+ *
+ *   failed    The most recent extraction hit an error path: lint /
+ *             validation reject, LLM call errored, or the rolling-
+ *             quality circuit tripped.
+ *
+ * Transitions, per user spec (2026-05-08):
+ *   - session_start                          -> idle (always)
+ *   - agent_start while in completed/failed  -> idle (reset)
+ *   - agent_start while in running           -> running (unchanged)
+ *   - agent_end                              -> running -> completed/failed
+ */
+type SedimentStatus = "idle" | "running" | "completed" | "failed";
+
+const sedimentStatusBySession = new Map<string, SedimentStatus>();
+
+/** Exported for smoke regression. Do not rely on this signature
+ *  outside test code; the formatting is informational. */
+export function renderSedimentStatus(state: SedimentStatus, detail?: string): string {
+  const prefix = (() => {
+    switch (state) {
+      case "idle":      return "💤 sediment idle";
+      case "running":   return "📝 sediment running";
+      case "completed": return "✅ sediment completed";
+      case "failed":    return "⚠️  sediment failed";
+    }
+  })();
+  return detail ? `${prefix}: ${detail}` : prefix;
+}
+
+/**
+ * Apply a sediment status to ctx.ui.setStatus and remember it under
+ * the sessionId. Both setStatus and sessionId may be undefined (older
+ * pi version without setStatus, or ephemeral session); the function
+ * tolerates both. The setStatus call is always wrapped in try/catch
+ * so a stale-ctx late fire from background work never throws.
+ */
+function applySedimentStatus(
+  setStatus: ((msg?: string) => void) | undefined,
+  sessionId: string | undefined,
+  state: SedimentStatus,
+  detail?: string,
+): void {
+  if (sessionId) sedimentStatusBySession.set(sessionId, state);
+  if (!setStatus) return;
+  try {
+    setStatus(renderSedimentStatus(state, detail));
+  } catch { /* stale ctx late fire is best-effort */ }
+}
+
 const HOUR_MS = 60 * 60 * 1000;
 
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
@@ -298,6 +364,38 @@ function registerSedimentCommand(pi: ExtensionAPI) {
 export default function (pi: ExtensionAPI) {
   registerSedimentCommand(pi);
 
+  // Footer state machine: session_start always sets idle.
+  // Used cast for ctx.ui because older pi versions may not expose
+  // setStatus; applySedimentStatus already tolerates undefined.
+  pi.on("session_start", async (_event: unknown, ctx: { sessionManager?: { getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null }; ui?: { setStatus?(extId: string, message?: string): void } }) => {
+    const settings = resolveSedimentSettings();
+    if (!settings.enabled) return;
+    const sessionId = readSessionId(ctx.sessionManager);
+    const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
+    const setStatus = setStatusRaw
+      ? (msg?: string) => { try { setStatusRaw(SEDIMENT_STATUS_KEY, msg); } catch {} }
+      : undefined;
+    applySedimentStatus(setStatus, sessionId, "idle");
+  });
+
+  // Footer state machine: agent_start resets completed/failed back to
+  // idle so each new prompt starts visually clean. running stays
+  // unchanged so a long-running bg work from the previous turn
+  // remains visible.
+  pi.on("agent_start", async (_event: unknown, ctx: { sessionManager?: { getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null }; ui?: { setStatus?(extId: string, message?: string): void } }) => {
+    const settings = resolveSedimentSettings();
+    if (!settings.enabled) return;
+    const sessionId = readSessionId(ctx.sessionManager);
+    if (!sessionId) return;
+    const prev = sedimentStatusBySession.get(sessionId);
+    if (prev !== "completed" && prev !== "failed") return;  // running -> stay; idle -> already idle
+    const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
+    const setStatus = setStatusRaw
+      ? (msg?: string) => { try { setStatusRaw(SEDIMENT_STATUS_KEY, msg); } catch {} }
+      : undefined;
+    applySedimentStatus(setStatus, sessionId, "idle");
+  });
+
   pi.on("agent_end", async (_event: unknown, ctx: {
     cwd?: string;
     sessionManager?: { getBranch(): unknown[]; getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null };
@@ -398,6 +496,9 @@ export default function (pi: ExtensionAPI) {
         stage_ms: { window_build: tWindowBuilt - tStart, parse: 0, write_total: 0, total: Date.now() - tStart },
         checkpoint_advanced: !!window.lastEntryId,
       });
+      // Healthy no-op skip (window too small or empty). Mark completed
+      // so the agent_start of the next prompt resets to idle.
+      applySedimentStatus(setStatus, sessionId, "completed", window.skipReason ?? "no new entries");
       return;
     }
 
@@ -441,15 +542,23 @@ export default function (pi: ExtensionAPI) {
           stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: 0, total: Date.now() - tStart },
           checkpoint_advanced: true,
         });
+        // Status stays at whatever the previous turn's bg work last
+        // applied (typically still "running"). Don't override here —
+        // the bg work is the authoritative state owner until it
+        // settles.
         return;
       }
 
       // Optimistic checkpoint advance before launching bg work.
       await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
 
+      // Mark running BEFORE scheduling the bg promise so the footer
+      // updates synchronously with agent_end. The bg promise will
+      // transition to completed/failed in its finally block.
+      applySedimentStatus(setStatus, sessionId, "running", `auto-write (model=${settings.extractorModel})`);
+
       const bgPromise = (async () => {
         try {
-          if (setStatus) setStatus(`📝 sediment extracting (model=${settings.extractorModel})...`);
           const auto = await tryAutoWriteLane({
             cwd,
             sessionId,
@@ -488,6 +597,13 @@ export default function (pi: ExtensionAPI) {
                 );
               } catch {}
             }
+            const createdCount = auto.results.filter(r => r.status === "created").length;
+            const rejectedCount = auto.results.filter(r => r.status === "rejected").length;
+            if (rejectedCount > 0) {
+              applySedimentStatus(setStatus, sessionId, "failed", `auto-write: ${createdCount} created, ${rejectedCount} rejected`);
+            } else {
+              applySedimentStatus(setStatus, sessionId, "completed", `auto-write: ${createdCount} ${createdCount === 1 ? "entry" : "entries"}`);
+            }
             return;
           }
 
@@ -512,6 +628,15 @@ export default function (pi: ExtensionAPI) {
             checkpoint_advanced: true,
             background_async: true,
           });
+          // ineligible / llm_skip = healthy completion;
+          // llm_error = failed (LLM call broke; user should know).
+          if (auto.kind === "llm_error") {
+            applySedimentStatus(setStatus, sessionId, "failed", `LLM error: ${auto.llmAuditSummary.error ?? "unknown"}`);
+          } else if (auto.kind === "ineligible") {
+            applySedimentStatus(setStatus, sessionId, "completed", auto.eligibility.reason ?? "ineligible");
+          } else {
+            applySedimentStatus(setStatus, sessionId, "completed", "LLM returned skip");
+          }
         } catch (err: any) {
           // Last-resort failure path. Never let bg work throw out of
           // the Promise (uncaught rejection in pi can crash the
@@ -526,8 +651,12 @@ export default function (pi: ExtensionAPI) {
               background_async: true,
             });
           } catch {}
+          applySedimentStatus(setStatus, sessionId, "failed", `bg error: ${err?.message ?? String(err)}`);
         } finally {
-          if (setStatus) setStatus(undefined);
+          // Status is already transitioned to completed/failed above.
+          // Do NOT clear with setStatus(undefined) — user wants the
+          // completed/failed indicator visible until the next
+          // agent_start resets to idle.
           if (autoWriteInFlight.get(sessionId) === bgPromise) {
             autoWriteInFlight.delete(sessionId);
           }
@@ -538,6 +667,11 @@ export default function (pi: ExtensionAPI) {
       // main session is unblocked.
       return;
     }
+
+    // Synchronous explicit lane: status visible briefly during the
+    // write loop (each writeProjectEntry typically < 200ms). Lands at
+    // completed/failed when agent_end returns.
+    applySedimentStatus(setStatus, sessionId, "running", `explicit (${drafts.length} candidate${drafts.length === 1 ? "" : "s"})`);
 
     const tWriteStart = Date.now();
     const results: WriteProjectEntryResult[] = [];
@@ -579,6 +713,13 @@ export default function (pi: ExtensionAPI) {
         // notify against a stale ui is best-effort; the audit is the
         // canonical record.
       }
+    }
+    const createdCount = results.filter(r => r.status === "created").length;
+    const rejectedCount = results.filter(r => r.status === "rejected").length;
+    if (rejectedCount > 0 || !shouldAdvance) {
+      applySedimentStatus(setStatus, sessionId, "failed", `explicit: ${createdCount} created, ${rejectedCount} rejected`);
+    } else {
+      applySedimentStatus(setStatus, sessionId, "completed", `explicit: ${createdCount} ${createdCount === 1 ? "entry" : "entries"}`);
     }
   });
 }
@@ -923,6 +1064,7 @@ export function _resetAutoWriteStateForTests(): void {
   autoWriteRecentFires.clear();
   autoWriteDisabledBySession.clear();
   autoWriteInFlight.clear();
+  sedimentStatusBySession.clear();
 }
 
 /**
