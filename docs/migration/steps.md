@@ -203,6 +203,7 @@ memory_search(query: "dispatch agent prompt")
 - raw output 只存 SHA-256 + 截断 preview（默认 1000 chars）
 - `/sediment llm-report [--limit N]` 汇总最近 `llm_dry_run` 质量样本
 - `/sediment readiness` 根据 `autoLlmWriteEnabled` / `minDryRunSamples` / `requiredDryRunPassRate` 评估未来自动 LLM 写入是否可放行（当前仍不自动写）
+- **Readiness gate 样本已太期**（2026-05-08）：`scripts/seed-llm-dry-runs.mjs` 一次性脚本跨过 24 个样本（`deepseek-v4-pro` via sub2api）。结果：23/24 PASS（`pass rate 0.958` ≥ 0.9，samples 24 ≥ 20，`policyPassed: true`）。唯一 blocker为 `autoLlmWriteEnabled: false` 这个显式闸门。脚本是一次性 evidence-collection 工具，不是长期运行的 subsystem；类似 migration apply，不要扩展为 queue/dashboard。
 
 已完成 migration apply 安全入口：
 - `/sediment migrate-one --plan <file>`：只预览单文件迁移结果，不写入、不 audit、不重建 derived artifacts
