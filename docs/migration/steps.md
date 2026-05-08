@@ -156,7 +156,7 @@ memory_search(query: "dispatch agent prompt")
 - `buildRunWindow(branch, checkpoint)`：从 `ctx.sessionManager.getBranch()` 取 checkpoint 之后的新 entries
 - compaction/branch fallback：checkpoint entry 找不到时只取最新 entry，避免重放全历史
 - window budget：`minWindowChars` / `maxWindowChars` / `maxWindowEntries`
-- agent_end enabled 时 audit window stats，但 extractor 未实现所以不推进 checkpoint
+- agent_end enabled 时：无新窗口/无显式 `MEMORY:` marker → audit skip 并推进 checkpoint；有显式 marker → 走 deterministic extractor + writer；LLM 自动写入仍未接入
 
 已完成 writer substrate：
 - validate：runtime 检查 title/kind/status/confidence/compiledTruth
@@ -186,6 +186,7 @@ memory_search(query: "dispatch agent prompt")
 - `/sediment readiness` 根据 `autoLlmWriteEnabled` / `minDryRunSamples` / `requiredDryRunPassRate` 评估未来自动 LLM 写入是否可放行（当前仍不自动写）
 
 待实现完整 pipeline：
+- migration apply（当前仅 dry-run/report，不重写 canonical markdown）
 - LLM extract + classify 的 lookup tools 版本（继承 ADR 0010 内核）
 - 将 LLM dry-run 质量门控后接入 agent_end 自动写
 

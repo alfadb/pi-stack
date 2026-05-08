@@ -93,7 +93,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b |
-| `extensions/sediment/` | ✅ 部分实现（writer substrate；extract 未实现） | Phase 1.4a |
+| `extensions/sediment/` | ✅ 部分实现（explicit extractor + LLM dry-run；自动 LLM 写入未启用） | Phase 1.4a |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |
@@ -193,7 +193,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | `extensions/model-curator/` | alfadb（C 类迁入） | ✅ 已实现 | ✅ |
 | `extensions/model-fallback/` | alfadb（A 类永久 own） | ✅ 已实现 | ✅ |
 | `extensions/memory/` | alfadb（v7 新建） | ✅ 已实现（只读 Facade） | ✅ |
-| `extensions/sediment/` | alfadb（A 类改造） | ✅ 部分实现（writer substrate；extract 未实现） | ✅ |
+| `extensions/sediment/` | alfadb（A 类改造） | ✅ 部分实现（explicit extractor + LLM dry-run；自动 LLM 写入未启用） | ✅ |
 | `extensions/browse/` | alfadb（C 类迁入） | [计划] | ✅ |
 | `skills/` | alfadb（B 类端口） | [计划] | ✅ |
 | `prompts/` | alfadb（A 类 + B 类） | [计划] | ✅ |
@@ -223,7 +223,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
   memory/   ──→ markdown + git (source of truth, read-only)
                  ├── <project>/.pensieve/     (项目级)
                  └── ~/.abrain/               (世界级，可选)
-  sediment/ ──→ markdown + git (唯一写入者；writer substrate 已实现，extract 计划中)
+  sediment/ ──→ markdown + git (唯一写入者；explicit extractor 可写，LLM 自动写入计划中)
 ```
 
 **严禁的引用关系**:
