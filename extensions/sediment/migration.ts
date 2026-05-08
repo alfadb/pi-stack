@@ -43,17 +43,26 @@ export interface MigrateOneDerivedResult {
   error?: string;
 }
 
+export interface MigrateOnePreview {
+  frontmatter: string;
+  compiledTruthPreview: string;
+  timelinePreview: string[];
+}
+
 export interface MigrateOneResult {
   status: MigrateOneStatus;
   reason?: string;
   slug?: string;
+  title?: string;
   source_path: string;
   target_path?: string;
   backup_path?: string;
+  target_exists?: boolean;
   lintErrors?: number;
   lintWarnings?: number;
   gitCommit?: string | null;
   actions?: string[];
+  preview?: MigrateOnePreview;
   derived?: MigrateOneDerivedResult;
 }
 
@@ -240,6 +249,20 @@ function derivedGitPaths(derived: MigrateOneDerivedResult): string[] {
   return [derived.graph?.path, derived.index?.path].filter((p): p is string => !!p);
 }
 
+function truncatePreview(text: string, maxChars: number): string {
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+
+function buildMigrationPreview(markdown: string): MigrateOnePreview {
+  const { frontmatterText, body } = splitFrontmatter(markdown);
+  const split = splitCompiledTruth(body);
+  return {
+    frontmatter: frontmatterText,
+    compiledTruthPreview: truncatePreview(split.compiledTruth.trim(), 1_200),
+    timelinePreview: split.timeline.slice(0, 5),
+  };
+}
+
 function buildMigratedMarkdown(args: {
   raw: string;
   sourcePath: string;
@@ -308,6 +331,7 @@ export async function migrateOne(
     memorySettings: MemorySettings;
     apply: boolean;
     yes: boolean;
+    plan?: boolean;
   },
 ): Promise<MigrateOneResult> {
   const started = Date.now();
@@ -316,8 +340,10 @@ export async function migrateOne(
   const sourcePath = path.resolve(projectRoot, sourceInput);
   const displaySource = path.relative(projectRoot, sourcePath) || sourcePath;
 
-  if (!opts.apply) return { status: "rejected", reason: "apply flag required", source_path: displaySource };
-  if (!opts.yes) return { status: "rejected", reason: "--yes required", source_path: displaySource };
+  const plan = !!opts.plan;
+  if (plan && opts.apply) return { status: "rejected", reason: "use either --plan or --apply, not both", source_path: displaySource };
+  if (!plan && !opts.apply) return { status: "rejected", reason: "--plan or --apply required", source_path: displaySource };
+  if (opts.apply && !opts.yes) return { status: "rejected", reason: "--yes required", source_path: displaySource };
   if (!sourcePath.endsWith(".md")) return { status: "rejected", reason: "source must be a markdown file", source_path: displaySource };
   if (!isInside(pensieveRoot, sourcePath)) return { status: "rejected", reason: "source must be inside .pensieve", source_path: displaySource };
 
@@ -336,26 +362,43 @@ export async function migrateOne(
   }
 
   const built = buildMigratedMarkdown({ raw, sourcePath, relPath, projectRoot, memorySettings: opts.memorySettings });
+  const displayTarget = path.relative(projectRoot, built.targetPath) || built.targetPath;
   const sanitize = sanitizeForMemory(built.markdown);
   if (!sanitize.ok) {
-    const auditPath = await appendAudit(projectRoot, { operation: "migrate_one_reject", reason: sanitize.error, source: relPath, duration_ms: Date.now() - started });
-    return { status: "rejected", reason: sanitize.error, source_path: displaySource, target_path: path.relative(projectRoot, built.targetPath), slug: built.slug, actions: built.actions, backup_path: auditPath };
+    const auditPath = plan ? undefined : await appendAudit(projectRoot, { operation: "migrate_one_reject", reason: sanitize.error, source: relPath, duration_ms: Date.now() - started });
+    return { status: "rejected", reason: sanitize.error, source_path: displaySource, target_path: displayTarget, slug: built.slug, title: built.title, actions: built.actions, ...(auditPath ? { backup_path: auditPath } : {}) };
   }
 
   const markdown = sanitize.text ?? built.markdown;
+  const preview = buildMigrationPreview(markdown);
   const lint = lintMarkdown(markdown, built.targetPath);
   const lintErrors = lint.filter((issue) => issue.severity === "error").length;
   const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
-  const displayTarget = path.relative(projectRoot, built.targetPath) || built.targetPath;
   if (lintErrors > 0) {
-    const auditPath = await appendAudit(projectRoot, { operation: "migrate_one_reject", reason: "lint_error", source: relPath, target: displayTarget, lintErrors, lintWarnings, duration_ms: Date.now() - started });
-    return { status: "rejected", reason: "lint_error", source_path: displaySource, target_path: displayTarget, slug: built.slug, lintErrors, lintWarnings, actions: built.actions, backup_path: auditPath };
+    const auditPath = plan ? undefined : await appendAudit(projectRoot, { operation: "migrate_one_reject", reason: "lint_error", source: relPath, target: displayTarget, lintErrors, lintWarnings, duration_ms: Date.now() - started });
+    return { status: "rejected", reason: "lint_error", source_path: displaySource, target_path: displayTarget, slug: built.slug, title: built.title, lintErrors, lintWarnings, actions: built.actions, preview, ...(auditPath ? { backup_path: auditPath } : {}) };
   }
 
   const samePath = path.resolve(sourcePath) === path.resolve(built.targetPath);
-  if (!samePath && fsSync.existsSync(built.targetPath)) {
-    const auditPath = await appendAudit(projectRoot, { operation: "migrate_one_reject", reason: "target_exists", source: relPath, target: displayTarget, duration_ms: Date.now() - started });
-    return { status: "rejected", reason: "target_exists", source_path: displaySource, target_path: displayTarget, slug: built.slug, lintErrors, lintWarnings, actions: built.actions, backup_path: auditPath };
+  const targetExists = !samePath && fsSync.existsSync(built.targetPath);
+  if (targetExists) {
+    const auditPath = plan ? undefined : await appendAudit(projectRoot, { operation: "migrate_one_reject", reason: "target_exists", source: relPath, target: displayTarget, duration_ms: Date.now() - started });
+    return { status: "rejected", reason: "target_exists", source_path: displaySource, target_path: displayTarget, slug: built.slug, title: built.title, target_exists: true, lintErrors, lintWarnings, actions: built.actions, preview, ...(auditPath ? { backup_path: auditPath } : {}) };
+  }
+
+  if (plan) {
+    return {
+      status: "dry_run",
+      slug: built.slug,
+      title: built.title,
+      source_path: displaySource,
+      target_path: displayTarget,
+      target_exists: false,
+      lintErrors,
+      lintWarnings,
+      actions: built.actions,
+      preview,
+    };
   }
 
   let lock: LockHandle | undefined;
@@ -363,7 +406,7 @@ export async function migrateOne(
   try {
     lock = await acquireLock(projectRoot, opts.sedimentSettings.lockTimeoutMs);
     if (!samePath && fsSync.existsSync(built.targetPath)) {
-      return { status: "rejected", reason: "target_exists", source_path: displaySource, target_path: displayTarget, slug: built.slug, lintErrors, lintWarnings, actions: built.actions };
+      return { status: "rejected", reason: "target_exists", source_path: displaySource, target_path: displayTarget, slug: built.slug, title: built.title, target_exists: true, lintErrors, lintWarnings, actions: built.actions, preview };
     }
 
     await fs.mkdir(path.dirname(backup), { recursive: true });
@@ -391,9 +434,11 @@ export async function migrateOne(
     return {
       status: "applied",
       slug: built.slug,
+      title: built.title,
       source_path: displaySource,
       target_path: displayTarget,
       backup_path: path.relative(projectRoot, backup),
+      target_exists: false,
       lintErrors,
       lintWarnings,
       gitCommit: git,
@@ -403,7 +448,7 @@ export async function migrateOne(
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     await appendAudit(projectRoot, { operation: "migrate_one_error", source: relPath, target: displayTarget, reason: message, duration_ms: Date.now() - started });
-    return { status: "rejected", reason: message, source_path: displaySource, target_path: displayTarget, slug: built.slug, lintErrors, lintWarnings, actions: built.actions };
+    return { status: "rejected", reason: message, source_path: displaySource, target_path: displayTarget, slug: built.slug, title: built.title, lintErrors, lintWarnings, actions: built.actions, preview };
   } finally {
     await lock?.release();
   }

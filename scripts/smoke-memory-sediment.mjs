@@ -179,6 +179,19 @@ Body.
     assert(fs.existsSync(path.join(root, ".pensieve", ".state", "migration-report.md")), "migration report not written");
     assert(migrationReport.migrateCount === migration.migrateCount, "migration report count mismatch");
 
+    const migratePlanned = await migrateOne(".pensieve/short-term/maxims/legacy.md", {
+      projectRoot: root,
+      sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
+      memorySettings: DEFAULT_SETTINGS,
+      apply: false,
+      yes: false,
+      plan: true,
+    });
+    assert(migratePlanned.status === "dry_run", `migrate-one plan failed: ${migratePlanned.reason}`);
+    assert(migratePlanned.target_path === ".pensieve/maxims/legacy.md", "migrate-one plan target mismatch");
+    assert(migratePlanned.preview?.frontmatter.includes("schema_version: 1"), "migrate-one plan preview missing schema_version");
+    assert(!fs.existsSync(path.join(root, ".pensieve", "maxims", "legacy.md")), "migrate-one plan should not write target");
+
     const migrateApplied = await migrateOne(".pensieve/short-term/maxims/legacy.md", {
       projectRoot: root,
       sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
