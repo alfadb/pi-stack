@@ -58,7 +58,11 @@ alfadb/pi-astack/
 │   │   ├── lint.ts                    # T1-T10 lint engine
 │   │   ├── migrate.ts                 # legacy migration dry-run planner
 │   │   └── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
-│   ├── sediment/                      # [计划] v7 单 agent + markdown 写入（Phase 1.4）
+│   ├── sediment/                      # ✅ 部分实现：project-only writer substrate（Phase 1.4a）
+│   │   ├── index.ts                   # /sediment status + smoke dry-run；agent_end hook fail-closed
+│   │   ├── settings.ts                # sediment 配置读取
+│   │   ├── sanitizer.ts               # 最小写前脱敏/fail-closed
+│   │   └── writer.ts                  # lock + atomic markdown write + audit + git best-effort
 │   └── browse/                        # [计划] from pi-gstack
 │
 ├── skills/                            # [计划] pi 技能（19 gstack skills + memory-wand）
@@ -79,7 +83,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b |
-| `extensions/sediment/` | [计划] | Phase 1.4 |
+| `extensions/sediment/` | ✅ 部分实现（writer substrate；extract 未实现） | Phase 1.4a |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |
@@ -164,6 +168,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | modelCurator | `providers`, `hints`, `imageGen` |
 | modelFallback | `fallbackModels` |
 | memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays` |
+| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence` |
 | vision | `modelPreferences` |
 
 ## 所有权矩阵
@@ -176,7 +181,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | `extensions/model-curator/` | alfadb（C 类迁入） | ✅ 已实现 | ✅ |
 | `extensions/model-fallback/` | alfadb（A 类永久 own） | ✅ 已实现 | ✅ |
 | `extensions/memory/` | alfadb（v7 新建） | ✅ 已实现（只读 Facade） | ✅ |
-| `extensions/sediment/` | alfadb（A 类改造） | [计划] Phase 1.4 | ✅ |
+| `extensions/sediment/` | alfadb（A 类改造） | ✅ 部分实现（writer substrate；extract 未实现） | ✅ |
 | `extensions/browse/` | alfadb（C 类迁入） | [计划] | ✅ |
 | `skills/` | alfadb（B 类端口） | [计划] | ✅ |
 | `prompts/` | alfadb（A 类 + B 类） | [计划] | ✅ |
@@ -206,7 +211,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
   memory/   ──→ markdown + git (source of truth, read-only)
                  ├── <project>/.pensieve/     (项目级)
                  └── ~/.abrain/               (世界级，可选)
-  sediment/ ──→ markdown + git (唯一写入者，计划)
+  sediment/ ──→ markdown + git (唯一写入者；writer substrate 已实现，extract 计划中)
 ```
 
 **严禁的引用关系**:

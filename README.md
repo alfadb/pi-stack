@@ -97,7 +97,7 @@ pi install git:github.com/alfadb/pi-astack
 ### Extensions（pi 行为扩展）
 - `dispatch/` — subprocess-based `dispatch_agent` / `dispatch_agents`（主会话自由组合）；每个子 agent 是独立 pi 进程，OS 级隔离（ADR 0009）
 - `memory/` — ✅ 主会话记忆 read tool（`memory_search/get/list/neighbors`），Facade 模式封装；只读扫描 `.pensieve/` + 可选 `~/.abrain/`；另含 human slash commands `/memory lint`、`/memory migrate --dry-run`、`/memory check-backlinks`、`/memory rebuild --graph`
-- `sediment/` — [计划] 后台沉淀代理（markdown 文件唯一写入者，memory-architecture.md §8）
+- `sediment/` — ✅ 部分实现：project-only writer substrate（sanitize/lint/lock/atomic write/audit/git best-effort）；自动 extract 仍计划中
 - `model-curator/` — 模型能力快照与选择建议
 - `model-fallback/` — 非对称多模型 fallback：初始模型走 pi 内建指数退避重试，耗尽后按 `modelFallback.fallbackModels` 切下一个。alfadb 当前 pi 配置：claude-code parity，1+9=10 次尝试。（旧名 retry-stream-eof → retry-all-errors；**自有功能，不向上游 PR**）
 
@@ -137,7 +137,7 @@ pi install git:github.com/alfadb/pi-astack
 - 项目记忆 → `<project>/.pensieve/{maxims,decisions,knowledge,staging,archive}/`（md + git）
 - 跨项目准则 → `~/.abrain/{maxims,patterns,anti-patterns,facts,staging,archive}/`（独立 git repo）
 - 条目格式：frontmatter v1 + compiled truth + `## Timeline`
-- 主会话只读（`memory_search/get/list/neighbors`），sediment 单写（`memory_write/update/deprecate/promote/relate`）
+- 主会话只读（`memory_search/get/list/neighbors`），sediment 单写（writer substrate 已实现；`memory_write/update/deprecate/promote/relate` 自动写接口仍计划中）
 - 派生索引（`graph.json`）gitignored，可从 markdown 重建
 
 ## 设计原则

@@ -86,6 +86,42 @@
       }
     },
 
+    "sediment": {
+      "type": "object",
+      "description": "Project-only sediment writer settings (extensions/sediment/). Current slice provides writer substrate only: sanitize + lint + lock + atomic markdown write + audit + best-effort git commit. Automatic LLM extraction is not enabled yet.",
+      "additionalProperties": false,
+      "properties": {
+        "_comment": { "type": "string" },
+
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable agent_end sediment hook. Default false until automatic extraction is implemented."
+        },
+
+        "gitCommit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether writer attempts best-effort git add + git commit after markdown atomic write. Git failure does not roll back markdown."
+        },
+
+        "lockTimeoutMs": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 100,
+          "description": "Maximum time to wait for .pensieve/.state/locks/sediment.lock."
+        },
+
+        "defaultConfidence": {
+          "type": "number",
+          "default": 3,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Default confidence for writer smoke/deterministic provisional entries."
+        }
+      }
+    },
+
     "memory": {
       "type": "object",
       "description": "Read-only markdown memory Facade (extensions/memory/). Registers memory_search/get/list/neighbors over project .pensieve/ and optional world ~/.abrain/ stores. The extension never writes memory; sediment remains the sole writer.",
