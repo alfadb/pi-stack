@@ -12,7 +12,7 @@ import { resolveSedimentSettings } from "./settings";
 import { buildRunWindow, checkpointSummary, hasPensieve, loadCheckpoint, saveCheckpoint } from "./checkpoint";
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
-import { runLlmExtractorDryRun } from "./llm-extractor";
+import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun } from "./llm-extractor";
 import { appendAudit, writeProjectEntry, type WriteProjectEntryResult } from "./writer";
 
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
@@ -118,7 +118,19 @@ function registerSedimentCommand(pi: ExtensionAPI) {
           modelRegistry: ctx.modelRegistry as Parameters<typeof runLlmExtractorDryRun>[1]["modelRegistry"],
           signal: ctx.signal,
         });
-        ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), llm: result }, null, 2), result.ok ? "info" : "error");
+        const llm = summarizeLlmExtractorDryRun(result, {
+          maxCandidates: settings.extractorMaxCandidates,
+          rawPreviewChars: settings.extractorAuditRawChars,
+        });
+        if (hasPensieve(cwd)) {
+          await appendAudit(cwd, {
+            operation: "llm_dry_run",
+            ...checkpointSummary(window),
+            llm,
+            checkpoint_advanced: false,
+          });
+        }
+        ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), llm }, null, 2), llm.ok ? (llm.quality.passed ? "info" : "warning") : "error");
         return;
       }
 

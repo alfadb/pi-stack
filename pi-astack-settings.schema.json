@@ -159,6 +159,20 @@
           "default": 0,
           "minimum": 0,
           "description": "Max retries for /sediment llm --dry-run model call. Default 0 to avoid hidden repeated extraction costs."
+        },
+
+        "extractorMaxCandidates": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "Quality gate for /sediment llm --dry-run: outputs with more candidates than this are marked too_many_candidates."
+        },
+
+        "extractorAuditRawChars": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 0,
+          "description": "Number of raw LLM output characters stored in the llm_dry_run audit preview. SHA-256 is stored for full raw output when present."
         }
       }
     },

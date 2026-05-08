@@ -143,6 +143,9 @@ memory_search(query: "dispatch agent prompt")
 - `/sediment llm --dry-run` 调用 `sediment.extractorModel`（默认 `deepseek/deepseek-v4-pro`）
 - 输出仅解析 `MEMORY:` blocks / `SKIP`
 - 不写 markdown，不推进 checkpoint
+- 写入 audit：`.pensieve/.state/sediment-events.jsonl` 的 `llm_dry_run` 事件
+- quality gate：`skip` / `valid_candidates` pass；`model_error` / `unparseable_output` / `validation_errors` / `too_many_candidates` fail/warn
+- raw output 只存 SHA-256 + 截断 preview（默认 1000 chars）
 
 待实现完整 pipeline：
 - LLM extract + classify 的 lookup tools 版本（继承 ADR 0010 内核）

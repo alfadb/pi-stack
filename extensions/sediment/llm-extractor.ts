@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import type { SedimentSettings } from "./settings";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 
@@ -12,6 +13,26 @@ export interface LlmExtractorDryRunResult {
   stopReason?: string;
   error?: string;
   rawText?: string;
+  extraction?: ReturnType<typeof previewExtraction>;
+}
+
+export interface LlmExtractorQualityGate {
+  passed: boolean;
+  reason: "skip" | "valid_candidates" | "model_error" | "unparseable_output" | "validation_errors" | "too_many_candidates";
+  candidateCount: number;
+  validationErrorCount: number;
+  invalidCandidateCount: number;
+  rawTextSha256?: string;
+  rawTextPreview?: string;
+  rawTextTruncated?: boolean;
+}
+
+export interface LlmExtractorAuditSummary {
+  ok: boolean;
+  model: string;
+  stopReason?: string;
+  error?: string;
+  quality: LlmExtractorQualityGate;
   extraction?: ReturnType<typeof previewExtraction>;
 }
 
@@ -49,6 +70,52 @@ export function buildLlmExtractorPrompt(windowText: string): string {
     windowText,
     "PI_SEDIMENT_WINDOW>>>",
   ].join("\n");
+}
+
+function hashRaw(raw: string): string {
+  return crypto.createHash("sha256").update(raw).digest("hex");
+}
+
+export function summarizeLlmExtractorDryRun(
+  result: LlmExtractorDryRunResult,
+  opts: { maxCandidates: number; rawPreviewChars: number },
+): LlmExtractorAuditSummary {
+  const raw = result.rawText ?? "";
+  const extraction = result.extraction;
+  const candidateCount = extraction?.count ?? 0;
+  const validationErrorCount = extraction?.drafts.reduce((sum, draft) => sum + draft.validationErrors.length, 0) ?? 0;
+  const invalidCandidateCount = extraction?.drafts.filter((draft) => draft.validationErrors.length > 0).length ?? 0;
+
+  let reason: LlmExtractorQualityGate["reason"];
+  let passed = false;
+  if (!result.ok) reason = "model_error";
+  else if (!raw || raw === "SKIP") { reason = "skip"; passed = true; }
+  else if (candidateCount === 0) reason = "unparseable_output";
+  else if (candidateCount > opts.maxCandidates) reason = "too_many_candidates";
+  else if (validationErrorCount > 0) reason = "validation_errors";
+  else { reason = "valid_candidates"; passed = true; }
+
+  const rawTextPreview = opts.rawPreviewChars > 0 && raw
+    ? raw.slice(0, opts.rawPreviewChars)
+    : undefined;
+
+  return {
+    ok: result.ok,
+    model: result.model,
+    stopReason: result.stopReason,
+    error: result.error,
+    extraction,
+    quality: {
+      passed,
+      reason,
+      candidateCount,
+      validationErrorCount,
+      invalidCandidateCount,
+      ...(raw ? { rawTextSha256: hashRaw(raw) } : {}),
+      ...(rawTextPreview !== undefined ? { rawTextPreview } : {}),
+      ...(raw ? { rawTextTruncated: raw.length > opts.rawPreviewChars } : {}),
+    },
+  };
 }
 
 export async function runLlmExtractorDryRun(
