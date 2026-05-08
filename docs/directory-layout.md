@@ -64,6 +64,7 @@ alfadb/pi-astack/
 │   │   ├── checkpoint.ts              # checkpoint + run window builder
 │   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor
 │   │   ├── llm-extractor.ts           # /sediment llm --dry-run prompt + model call
+│   │   ├── report.ts                  # llm_dry_run audit report
 │   │   ├── validation.ts              # draft runtime validation
 │   │   ├── dedupe.ts                  # deterministic slug/title duplicate detection
 │   │   ├── sanitizer.ts               # 最小写前脱敏/fail-closed

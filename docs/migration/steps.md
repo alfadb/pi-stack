@@ -146,6 +146,7 @@ memory_search(query: "dispatch agent prompt")
 - 写入 audit：`.pensieve/.state/sediment-events.jsonl` 的 `llm_dry_run` 事件
 - quality gate：`skip` / `valid_candidates` pass；`model_error` / `unparseable_output` / `validation_errors` / `too_many_candidates` fail/warn
 - raw output 只存 SHA-256 + 截断 preview（默认 1000 chars）
+- `/sediment llm-report [--limit N]` 汇总最近 `llm_dry_run` 质量样本
 
 待实现完整 pipeline：
 - LLM extract + classify 的 lookup tools 版本（继承 ADR 0010 内核）
@@ -161,6 +162,9 @@ memory_search(query: "dispatch agent prompt")
 
 /sediment llm --dry-run
 # → 调用 LLM extractor，返回候选 preview；不写 markdown/不推进 checkpoint
+
+/sediment llm-report --limit 20
+# → 汇总 llm_dry_run pass/fail、reason 分布、候选数量和最近 preview/hash
 
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果
