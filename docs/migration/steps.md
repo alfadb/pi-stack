@@ -24,7 +24,7 @@
 - [ ] 旧格式迁移工具：已实现 `/memory migrate --dry-run [path]` 计划生成；实际写入迁移仍待 sediment/migration writer
 - [x] `memory_search` grep-based 实现（rg 文件发现 + per-file tf-idf + title/slug boost；project 层 + 可选 world 只读）
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
-- [ ] `_index.md` 自动生成（sediment 写入后重建）
+- [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`；sediment 写入后自动触发仍待接入）
 - [x] graph 派生索引：已实现 `buildGraphSnapshot` + `/memory check-backlinks [path]` + `/memory rebuild --graph [path]` 写入 gitignored derived index
 - [ ] Sediment project-only pipeline：writer substrate 已实现（validate → sanitize → deterministic dedupe → lint → lock → atomic write md → git best-effort → audit）；extract/classify/agent_end 自动写仍待实现
 - [x] Project scope 的 file lock + 错误恢复（writer substrate）
@@ -88,6 +88,21 @@ memory_search(query: "dispatch agent prompt")
 ```
 
 > CLI wrapper（`pi memory search ...`）尚未实现；当前完成的是 extension tool surface。
+
+### Phase 1.3a — `_index.md` generated markdown index
+
+**实现状态（2026-05-08）**：`extensions/memory/index-file.ts` 已实现 generated `_index.md` builder，`extensions/memory/index.ts` 注册 human-facing slash command `/memory rebuild --index [path]`。
+
+- 按 kind 分组，组内按 confidence 降序、updated 降序
+- Recently Updated top 10
+- Orphans 仅列出 staging 中零入/出边条目
+- 原子写入 `<target>/_index.md`
+
+**当前验收**：
+```text
+/memory rebuild --index .pensieve
+# → 写入 .pensieve/_index.md（generated artifact）
+```
 
 ### Phase 1.3b — graph snapshot + check-backlinks（read-only）
 

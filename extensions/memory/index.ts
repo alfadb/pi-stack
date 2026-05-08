@@ -16,6 +16,7 @@ import { findEntry, listEntries, neighbors, searchEntries, serializeEntry } from
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun } from "./migrate";
 import { checkBacklinks, formatBacklinkReport, formatGraphRebuildReport, rebuildGraphIndex } from "./graph";
+import { formatMarkdownIndexRebuildReport, rebuildMarkdownIndex } from "./index-file";
 import { clamp, normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
 
 function registerMemoryCommand(pi: ExtensionAPI) {
@@ -29,13 +30,14 @@ function registerMemoryCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("memory", {
-    description: "Memory maintenance commands: /memory lint [path], /memory migrate --dry-run [path], /memory check-backlinks [path], /memory rebuild --graph [path]",
+    description: "Memory maintenance commands: /memory lint [path], /memory migrate --dry-run [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path]",
     getArgumentCompletions(prefix: string) {
       const items = [
         "lint", "lint .pensieve",
         "migrate --dry-run", "migrate --dry-run .pensieve",
         "check-backlinks", "check-backlinks .pensieve",
         "rebuild --graph", "rebuild --graph .pensieve",
+        "rebuild --index", "rebuild --index .pensieve",
       ];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
@@ -80,19 +82,30 @@ function registerMemoryCommand(pi: ExtensionAPI) {
 
       if (subcommand === "rebuild") {
         const graphFlag = rest.includes("--graph");
-        if (!graphFlag) {
-          ctx.ui.notify("Usage: /memory rebuild --graph [path]", "warning");
+        const indexFlag = rest.includes("--index");
+        if (!graphFlag && !indexFlag) {
+          ctx.ui.notify("Usage: /memory rebuild --graph|--index [path]", "warning");
           return;
         }
-        const targetParts = rest.filter((part) => part !== "--graph");
+        const targetParts = rest.filter((part) => part !== "--graph" && part !== "--index");
         const targetArg = targetParts.join(" ").trim();
         const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
-        const report = await rebuildGraphIndex(target, settings, undefined, cwd);
-        ctx.ui.notify(formatGraphRebuildReport(report), report.deadLinkCount > 0 ? "warning" : "info");
+        const messages: string[] = [];
+        let severity: "info" | "warning" = "info";
+        if (graphFlag) {
+          const report = await rebuildGraphIndex(target, settings, undefined, cwd);
+          messages.push(formatGraphRebuildReport(report));
+          if (report.deadLinkCount > 0) severity = "warning";
+        }
+        if (indexFlag) {
+          const report = await rebuildMarkdownIndex(target, settings, undefined, cwd);
+          messages.push(formatMarkdownIndexRebuildReport(report));
+        }
+        ctx.ui.notify(messages.join("\n\n"), severity);
         return;
       }
 
-      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate --dry-run [path] OR /memory check-backlinks [path] OR /memory rebuild --graph [path]", "warning");
+      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate --dry-run [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]", "warning");
     },
   });
 }

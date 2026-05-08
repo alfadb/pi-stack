@@ -57,7 +57,8 @@ alfadb/pi-astack/
 │   │   ├── search.ts                  # search/list/get/neighbors 逻辑
 │   │   ├── lint.ts                    # T1-T10 lint engine
 │   │   ├── migrate.ts                 # legacy migration dry-run planner
-│   │   └── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
+│   │   ├── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
+│   │   └── index-file.ts              # generated _index.md rebuild writer
 │   ├── sediment/                      # ✅ 部分实现：project-only writer substrate（Phase 1.4a）
 │   │   ├── index.ts                   # /sediment status/window/smoke；agent_end hook fail-closed
 │   │   ├── settings.ts                # sediment 配置读取
@@ -116,6 +117,7 @@ Human-facing 命令：
 - `/memory migrate --dry-run [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划，不写文件
 - `/memory check-backlinks [path]`：in-memory 构建 graph snapshot，报告 dead links 与缺失 symmetric backlinks
 - `/memory rebuild --graph [path]`：写入 derived graph index（project: `.index/graph.json`；world: `.state/index/graph.json`）
+- `/memory rebuild --index [path]`：写入 generated markdown index（`_index.md`）
 
 配置：`pi-astack-settings.json → memory.{includeWorld, defaultLimit, maxLimit, maxEntries, projectBoost, shortTermTtlDays}`
 
