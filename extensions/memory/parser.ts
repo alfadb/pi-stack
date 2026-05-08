@@ -245,11 +245,20 @@ export function relationValues(value: Jsonish | undefined): string[] {
   return [];
 }
 
+// Strip fenced code blocks (``` ... ```) and inline code spans (`...`)
+// so wikilink-shaped examples inside code do not pollute the graph.
+function stripCode(body: string): string {
+  let out = body.replace(/```[\s\S]*?```/g, "");
+  out = out.replace(/`[^`\n]*`/g, "");
+  return out;
+}
+
 function extractBodyWikilinks(body: string): string[] {
   const out: string[] = [];
   const re = /\[\[([^\]]+)\]\]/g;
+  const stripped = stripCode(body);
   let match: RegExpExecArray | null;
-  while ((match = re.exec(body))) {
+  while ((match = re.exec(stripped))) {
     const slug = normalizeBareSlug(match[1]);
     if (slug) out.push(slug);
   }
