@@ -34,6 +34,15 @@ export interface SedimentSettings {
   autoWriteDisallowMaxim: boolean;
   autoWriteDisallowArchived: boolean;
   autoWriteMaxConfidence: number;
+  // Operational throttles for the auto-write lane. These all live
+  // *after* the readiness gate (autoLlmWriteEnabled + dry-run pass
+  // rate) and the content gates (autoWrite*). They cap how often the
+  // lane fires once it has cleared the gates.
+  autoWriteSampleEveryNRuns: number;
+  autoWriteMaxPerHour: number;
+  autoWriteRollingWindowSamples: number;
+  autoWriteRollingPassRate: number;
+  autoWriteRawAuditChars: number;
 }
 
 export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
@@ -56,6 +65,11 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoWriteDisallowMaxim: true,
   autoWriteDisallowArchived: true,
   autoWriteMaxConfidence: 6,
+  autoWriteSampleEveryNRuns: 1,
+  autoWriteMaxPerHour: 6,
+  autoWriteRollingWindowSamples: 20,
+  autoWriteRollingPassRate: 0.85,
+  autoWriteRawAuditChars: 8_000,
 };
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -91,5 +105,10 @@ export function resolveSedimentSettings(): SedimentSettings {
     autoWriteDisallowMaxim: asBoolean(cfg.autoWriteDisallowMaxim, DEFAULT_SEDIMENT_SETTINGS.autoWriteDisallowMaxim),
     autoWriteDisallowArchived: asBoolean(cfg.autoWriteDisallowArchived, DEFAULT_SEDIMENT_SETTINGS.autoWriteDisallowArchived),
     autoWriteMaxConfidence: Math.min(10, Math.max(0, asNumber(cfg.autoWriteMaxConfidence, DEFAULT_SEDIMENT_SETTINGS.autoWriteMaxConfidence))),
+    autoWriteSampleEveryNRuns: Math.max(1, Math.floor(asNumber(cfg.autoWriteSampleEveryNRuns, DEFAULT_SEDIMENT_SETTINGS.autoWriteSampleEveryNRuns))),
+    autoWriteMaxPerHour: Math.max(0, Math.floor(asNumber(cfg.autoWriteMaxPerHour, DEFAULT_SEDIMENT_SETTINGS.autoWriteMaxPerHour))),
+    autoWriteRollingWindowSamples: Math.max(1, Math.floor(asNumber(cfg.autoWriteRollingWindowSamples, DEFAULT_SEDIMENT_SETTINGS.autoWriteRollingWindowSamples))),
+    autoWriteRollingPassRate: Math.min(1, Math.max(0, asNumber(cfg.autoWriteRollingPassRate, DEFAULT_SEDIMENT_SETTINGS.autoWriteRollingPassRate))),
+    autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
   };
 }

@@ -220,6 +220,42 @@
           "minimum": 0,
           "maximum": 10,
           "description": "Cap on `confidence` for LLM auto-written entries. Confidence in [7, 10] is reserved for human-attested entries that have survived peer review or repeated citation. Default 6 keeps auto-written entries clearly second-tier."
+        },
+
+        "autoWriteSampleEveryNRuns": {
+          "type": "number",
+          "default": 1,
+          "minimum": 1,
+          "description": "Deterministic sampling stride. The auto-write LLM lane fires only on every Nth eligible agent_end (per session, in-process counter). N=1 means every run; N=5 means one in five. Non-firing runs still advance the checkpoint and emit a skip audit row. Use to control LLM cost on long sessions."
+        },
+
+        "autoWriteMaxPerHour": {
+          "type": "number",
+          "default": 6,
+          "minimum": 0,
+          "description": "Hard ceiling on auto-write LLM calls per session per rolling 60 minutes. 0 disables the lane entirely (equivalent to autoLlmWriteEnabled=false but kept separate for emergency throttling). Counter is in-process and resets on pi restart."
+        },
+
+        "autoWriteRollingWindowSamples": {
+          "type": "number",
+          "default": 20,
+          "minimum": 1,
+          "description": "Size of the rolling-quality window. The most recent N llm_dry_run + auto_write audit rows are evaluated against `autoWriteRollingPassRate`; if pass rate falls below the threshold the lane is circuit-broken in-process for the rest of this pi run."
+        },
+
+        "autoWriteRollingPassRate": {
+          "type": "number",
+          "default": 0.85,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Pass-rate threshold for the rolling-quality circuit breaker. Slightly lower than `requiredDryRunPassRate` (default 0.9) to allow some drift before disabling. On pi restart the circuit is reset and the gate is re-evaluated."
+        },
+
+        "autoWriteRawAuditChars": {
+          "type": "number",
+          "default": 8000,
+          "minimum": 0,
+          "description": "Maximum raw LLM extractor output stored in each auto_write audit row. Unlike `extractorAuditRawChars` (preview-only, default 1000) this one is meant to be large enough for full forensic replay; only truncate when raw output exceeds the cap."
         }
       }
     },

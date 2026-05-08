@@ -1,22 +1,68 @@
 /**
- * sediment extension for pi-astack — project-only markdown writer skeleton.
+ * sediment extension for pi-astack — project-only markdown writer.
  *
- * Phase 1.4 foundation: lock + sanitize + lint + atomic markdown write + audit
- * + best-effort git commit. LLM extraction is intentionally not implemented in
- * this slice; the agent_end hook is disabled by default via settings.
+ * agent_end pipeline (in order):
+ *   1. Synchronous ctx capture (cwd / branch / sessionId / notify) to
+ *      survive stale-ctx invalidation during async work.
+ *   2. Ephemeral session early-return (--no-session, dispatch_agent
+ *      subprocesses, CI). Records a single audit row and returns.
+ *   3. buildRunWindow over the per-session checkpoint slot.
+ *   4. parseExplicitMemoryBlocks (deterministic, fence-aware). Always
+ *      attempted. If hit, write each block via writeProjectEntry.
+ *   5. *NEW (Phase 1.4 A2)*: When (4) yielded zero blocks AND
+ *      autoLlmWriteEnabled gates pass, the LLM auto-write lane runs.
+ *      It is bounded by:
+ *        - readiness gate (sample count + dry-run pass rate)
+ *        - per-session sampling stride (autoWriteSampleEveryNRuns)
+ *        - per-session rate limit (autoWriteMaxPerHour, sliding 60min)
+ *        - rolling-quality circuit breaker (in-process trip)
+ *        - content gates (forceProvisional, disallowMaxim, maxConfidence,
+ *          disallowArchived; G2/G3/G4)
+ *        - all standard write-side defenses (G5/G6/G7/G8 from A1)
+ *   6. saveSessionCheckpoint advances iff write outcomes are terminal
+ *      (created / dry_run / dedupe_reject / validation / lint).
+ *   7. Audit row.
  */
 
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { resolveSedimentSettings } from "./settings";
-import { buildRunWindow, checkpointSummary, hasPensieve, loadSessionCheckpoint, saveSessionCheckpoint } from "./checkpoint";
+import { resolveSedimentSettings, type SedimentSettings } from "./settings";
+import { buildRunWindow, checkpointSummary, hasPensieve, loadSessionCheckpoint, saveSessionCheckpoint, type RunWindow } from "./checkpoint";
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
-import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun } from "./llm-extractor";
+import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun, type LlmExtractorDryRunResult } from "./llm-extractor";
 import { listMigrationBackups, migrateOne, restoreMigrationBackup } from "./migration";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
-import { evaluateLlmAutoWriteReadiness, formatLlmAutoWriteReadiness, formatLlmDryRunReport, readLlmDryRunReport } from "./report";
-import { appendAudit, writeProjectEntry, type WriteProjectEntryResult } from "./writer";
+import { evaluateLlmAutoWriteReadiness, evaluateRollingGate, formatLlmAutoWriteReadiness, formatLlmDryRunReport, readLlmDryRunReport, type RollingGateState } from "./report";
+import type { DraftPolicy } from "./validation";
+import { appendAudit, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult } from "./writer";
+
+// ---------------------------------------------------------------
+// Phase 1.4 A2: in-process state for the auto-write lane.
+//
+// All these Maps are deliberately NOT persisted. Pi restart resets
+// them, which is the desired behavior for circuit-breaks and rate
+// limits — a fresh process gets a fresh evaluation window.
+//
+// Keying by sessionId means multiple concurrent pi instances against
+// the same project root each maintain independent state, matching the
+// per-session checkpoint isolation in checkpoint.ts.
+// ---------------------------------------------------------------
+
+/** sessionId -> count of agent_end runs since last LLM lane fire. */
+const autoWriteRunCount = new Map<string, number>();
+
+/** sessionId -> array of unix-ms timestamps of recent auto-write fires. */
+const autoWriteRecentFires = new Map<string, number[]>();
+
+/**
+ * sessionId -> reason the lane was disabled in this process.
+ * Once present, all future agent_end calls in this session skip the
+ * lane until pi restart.
+ */
+const autoWriteDisabledBySession = new Map<string, string>();
+
+const HOUR_MS = 60 * 60 * 1000;
 
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
   const terminalReasons = new Set([
@@ -317,17 +363,88 @@ export default function (pi: ExtensionAPI) {
     const drafts = parseExplicitMemoryBlocks(window.text);
     const tParseEnd = Date.now();
     if (drafts.length === 0) {
+      // Phase 1.4 A2: LLM auto-write lane.
+      //
+      // The lane fires only when ALL of these hold:
+      //   - autoLlmWriteEnabled (master switch)
+      //   - readiness gate (sample count + dry-run pass rate)
+      //   - rolling-quality circuit not tripped
+      //   - rate limit not exceeded for this session
+      //   - sampling stride aligns with current run count
+      //   - modelRegistry is available on ctx (it isn't on agent_end
+      //     in some pi versions; we treat absence as ineligible)
+      //
+      // When ineligible we fall through to the same skip-and-advance
+      // path the previous implementation used, just with a richer
+      // audit reason explaining *why* the lane skipped.
+      const auto = await tryAutoWriteLane({
+        cwd,
+        sessionId,
+        settings,
+        window,
+        modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
+        signal: (ctx as { signal?: AbortSignal }).signal,
+      });
+      const tAutoEnd = Date.now();
+
+      if (auto.kind === "wrote") {
+        const shouldAdvance = shouldAdvanceAfterResults(auto.results);
+        if (shouldAdvance) await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
+        await appendAudit(cwd, {
+          operation: "auto_write",
+          session_id: sessionId,
+          ...summary,
+          extractor: "llm_extractor",
+          parser_version: PARSER_VERSION,
+          settings_snapshot: settingsSnapshot,
+          entry_breakdown: entryBreakdown,
+          candidate_count: auto.drafts.length,
+          candidates: auto.drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
+          results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, gitCommit: r.gitCommit })),
+          llm: auto.llmAuditSummary,
+          rolling: auto.rollingState,
+          // G9: persist the full extractor raw output for forensic
+          // replay. `extractorAuditRawChars` (preview field used by
+          // dry-run) is intentionally distinct from
+          // `autoWriteRawAuditChars` (this field).
+          raw_text: auto.rawTextStored,
+          raw_text_truncated: auto.rawTextTruncated,
+          stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, llm_total: auto.llmDurationMs, write_total: tAutoEnd - auto.writeStart, total: Date.now() - tStart },
+          checkpoint_advanced: shouldAdvance,
+        });
+        if (notify) {
+          try {
+            notify(
+              `Sediment auto-write: ${auto.results.map((r) => `${r.slug}:${r.status}${r.reason ? `(${r.reason})` : ""}`).join(", ")}`,
+              shouldAdvance ? "info" : "warning",
+            );
+          } catch {}
+        }
+        return;
+      }
+
+      // Lane was ineligible OR LLM call failed OR LLM returned SKIP /
+      // unparseable / validation-rejected. Either way we still advance
+      // the checkpoint (we *did* see the window) and record why.
       await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
       await appendAudit(cwd, {
         operation: "skip",
-        reason: "no_explicit_memory_markers",
+        reason: auto.kind === "ineligible" ? auto.eligibility.reason ?? "auto_write_ineligible"
+              : auto.kind === "llm_skip"   ? "llm_returned_skip"
+              : auto.kind === "llm_error"  ? "llm_extraction_error"
+              : "no_explicit_memory_markers",
         session_id: sessionId,
         ...summary,
-        extractor: "explicit_marker",
+        extractor: auto.kind === "ineligible" ? "explicit_marker" : "llm_extractor",
         parser_version: PARSER_VERSION,
         settings_snapshot: settingsSnapshot,
         entry_breakdown: entryBreakdown,
-        stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: 0, total: Date.now() - tStart },
+        eligibility: auto.kind === "ineligible" ? auto.eligibility : undefined,
+        llm: auto.kind === "ineligible" ? undefined : auto.llmAuditSummary,
+        rolling: auto.kind === "ineligible" ? undefined : auto.rollingState,
+        raw_text: auto.kind === "llm_error" || auto.kind === "llm_skip" ? auto.rawTextStored : undefined,
+        raw_text_truncated: auto.kind === "llm_error" || auto.kind === "llm_skip" ? auto.rawTextTruncated : undefined,
+        stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, llm_total: auto.kind === "ineligible" ? 0 : auto.llmDurationMs, write_total: 0, total: Date.now() - tStart },
         checkpoint_advanced: true,
       });
       return;
@@ -377,6 +494,190 @@ export default function (pi: ExtensionAPI) {
   });
 }
 
+// ===========================================================================
+// LLM auto-write lane implementation
+// ===========================================================================
+
+interface ModelRegistryLike {
+  find(provider: string, modelId: string): unknown;
+  getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
+}
+
+type AutoWriteLaneOutcome =
+  | { kind: "ineligible"; eligibility: AutoWriteEligibility }
+  | { kind: "llm_skip"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
+  | { kind: "llm_error"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
+  | { kind: "wrote"; drafts: ProjectEntryDraft[]; results: WriteProjectEntryResult[]; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; writeStart: number; rawTextStored?: string; rawTextTruncated?: boolean };
+
+function truncateRawForAudit(raw: string | undefined, cap: number): { text?: string; truncated?: boolean } {
+  if (!raw || cap <= 0) return {};
+  if (raw.length <= cap) return { text: raw, truncated: false };
+  return { text: raw.slice(0, cap), truncated: true };
+}
+
+/**
+ * Run the LLM auto-write lane end-to-end. The function performs all
+ * gate checks, runs the LLM extractor when eligible, and applies
+ * `previewExtraction` + the auto-write `DraftPolicy` so that only
+ * compliant candidates flow into `writeProjectEntry`. Side effects
+ * (in-process state mutation, fire timestamp recording, rolling-gate
+ * trip detection) all live here so the agent_end handler stays
+ * declarative.
+ */
+async function tryAutoWriteLane(args: {
+  cwd: string;
+  sessionId: string;
+  settings: SedimentSettings;
+  window: RunWindow;
+  modelRegistry: unknown;
+  signal?: AbortSignal;
+}): Promise<AutoWriteLaneOutcome> {
+  const { cwd, sessionId, settings, window } = args;
+  const modelRegistry = args.modelRegistry as ModelRegistryLike | undefined;
+
+  if (!modelRegistry || typeof modelRegistry.find !== "function" || typeof modelRegistry.getApiKeyAndHeaders !== "function") {
+    return {
+      kind: "ineligible",
+      eligibility: { eligible: false, reason: "model_registry_unavailable" },
+    };
+  }
+
+  // 1. Readiness gate (user-curated dry-run pass rate).
+  //    Reads the FULL audit file (capped at parseLimit=200 internally).
+  const readinessReport = await readLlmDryRunReport(cwd, settings.minDryRunSamples);
+  const readiness = evaluateLlmAutoWriteReadiness(readinessReport, {
+    autoLlmWriteEnabled: settings.autoLlmWriteEnabled,
+    minDryRunSamples: settings.minDryRunSamples,
+    requiredDryRunPassRate: settings.requiredDryRunPassRate,
+  });
+
+  // 2. Rolling gate (auto-disable on quality drift).
+  //    This window includes BOTH llm_dry_run and auto_write rows.
+  const rollingReport = await readLlmDryRunReport(cwd, settings.autoWriteRollingWindowSamples, {
+    includeAutoWrite: true,
+    scanLimit: settings.autoWriteRollingWindowSamples,
+  });
+  const rolling = evaluateRollingGate(rollingReport, settings.autoWriteRollingWindowSamples, settings.autoWriteRollingPassRate);
+
+  // 3. Composite eligibility (rate, sampling, circuit, readiness).
+  const eligibility = decideAutoWriteEligibility({
+    sessionId,
+    settings,
+    readinessReady: readiness.ready,
+    readinessBlockers: readiness.blockers,
+    rolling,
+  });
+  if (!eligibility.eligible) {
+    return { kind: "ineligible", eligibility };
+  }
+
+  // 4. Run extractor.
+  //    runLlmExtractorDryRun is misnamed historically — it does not
+  //    write or commit; it just runs the model + parses. We use it for
+  //    both lanes.
+  const llmStart = Date.now();
+  let llmResult: LlmExtractorDryRunResult;
+  try {
+    llmResult = await runLlmExtractorDryRun(window.text, {
+      settings,
+      modelRegistry: modelRegistry as Parameters<typeof runLlmExtractorDryRun>[1]["modelRegistry"],
+      signal: args.signal,
+    });
+  } catch (e: any) {
+    llmResult = { ok: false, model: settings.extractorModel, error: e?.message ?? "extractor threw" };
+  }
+  const llmDurationMs = Date.now() - llmStart;
+  recordAutoWriteFire(sessionId);
+
+  const policy = buildAutoWritePolicy(settings);
+  const llmAuditSummary = summarizeLlmExtractorDryRun(llmResult, {
+    maxCandidates: settings.extractorMaxCandidates,
+    rawPreviewChars: settings.extractorAuditRawChars,
+  });
+
+  const { text: rawTextStored, truncated: rawTextTruncated } = truncateRawForAudit(
+    llmResult.rawText,
+    settings.autoWriteRawAuditChars,
+  );
+
+  if (!llmResult.ok) {
+    // Re-evaluate rolling gate with this failure included so the
+    // NEXT agent_end short-circuits if quality has truly cratered.
+    const postReport = await readLlmDryRunReport(cwd, settings.autoWriteRollingWindowSamples, {
+      includeAutoWrite: true,
+      scanLimit: settings.autoWriteRollingWindowSamples,
+    });
+    const postRolling = evaluateRollingGate(postReport, settings.autoWriteRollingWindowSamples, settings.autoWriteRollingPassRate);
+    maybeTripRollingCircuit(sessionId, postRolling);
+    return { kind: "llm_error", llmAuditSummary, rollingState: postRolling, llmDurationMs, rawTextStored, rawTextTruncated };
+  }
+
+  // 5. Filter candidates against the auto-write policy. The LLM
+  //    extractor returns ANY MEMORY block it parsed; we keep only
+  //    those that pass `validateProjectEntryDraft(d, policy)`.
+  const drafts = (llmResult.extraction?.drafts ?? [])
+    .filter((d) => d.validationErrors.length === 0)
+    .map((d) => d.markerIndex);
+  // We need full drafts (not previews) for writing; re-parse via
+  // policy-aware previewExtraction to get fresh validation outcome.
+  // Using the rawText path: parseExplicitMemoryBlocks on the LLM
+  // output, then validate with the policy overlay.
+  const fullDrafts = (llmResult.rawText && llmResult.rawText !== "SKIP")
+    ? (await import("./extractor")).parseExplicitMemoryBlocks(llmResult.rawText)
+    : [];
+  const policyPreview = previewExtraction(fullDrafts, policy);
+  const compliantDrafts: ProjectEntryDraft[] = fullDrafts.filter((_, i) => policyPreview.drafts[i]?.validationErrors.length === 0);
+
+  if (compliantDrafts.length === 0) {
+    // SKIP / unparseable / validation-rejected. Treat as a
+    // quality data point and possibly trip rolling.
+    const postReport = await readLlmDryRunReport(cwd, settings.autoWriteRollingWindowSamples, {
+      includeAutoWrite: true,
+      scanLimit: settings.autoWriteRollingWindowSamples,
+    });
+    const postRolling = evaluateRollingGate(postReport, settings.autoWriteRollingWindowSamples, settings.autoWriteRollingPassRate);
+    maybeTripRollingCircuit(sessionId, postRolling);
+    return { kind: "llm_skip", llmAuditSummary, rollingState: postRolling, llmDurationMs, rawTextStored, rawTextTruncated };
+  }
+
+  // 6. Write each compliant draft.
+  const writeStart = Date.now();
+  const results: WriteProjectEntryResult[] = [];
+  for (const draft of compliantDrafts) {
+    results.push(await writeProjectEntry({
+      ...draft,
+      sessionId,
+      timelineNote: draft.timelineNote || "captured from LLM auto-write extractor",
+    }, {
+      projectRoot: cwd,
+      settings,
+      dryRun: false,
+      policy,
+      forceProvisional: settings.autoWriteForceProvisional,
+    }));
+  }
+
+  // 7. Re-evaluate rolling for the next session run.
+  const postReport = await readLlmDryRunReport(cwd, settings.autoWriteRollingWindowSamples, {
+    includeAutoWrite: true,
+    scanLimit: settings.autoWriteRollingWindowSamples,
+  });
+  const postRolling = evaluateRollingGate(postReport, settings.autoWriteRollingWindowSamples, settings.autoWriteRollingPassRate);
+  maybeTripRollingCircuit(sessionId, postRolling);
+
+  return {
+    kind: "wrote",
+    drafts: compliantDrafts,
+    results,
+    llmAuditSummary,
+    rollingState: postRolling,
+    llmDurationMs,
+    writeStart,
+    rawTextStored,
+    rawTextTruncated,
+  };
+}
+
 /** Compact subset of SedimentSettings safe to embed in every audit row. */
 function snapshotSedimentSettings(settings: ReturnType<typeof resolveSedimentSettings>) {
   return {
@@ -386,7 +687,152 @@ function snapshotSedimentSettings(settings: ReturnType<typeof resolveSedimentSet
     defaultConfidence: settings.defaultConfidence,
     maxWindowChars: settings.maxWindowChars,
     maxWindowEntries: settings.maxWindowEntries,
+    autoWriteForceProvisional: settings.autoWriteForceProvisional,
+    autoWriteDisallowMaxim: settings.autoWriteDisallowMaxim,
+    autoWriteDisallowArchived: settings.autoWriteDisallowArchived,
+    autoWriteMaxConfidence: settings.autoWriteMaxConfidence,
+    autoWriteSampleEveryNRuns: settings.autoWriteSampleEveryNRuns,
+    autoWriteMaxPerHour: settings.autoWriteMaxPerHour,
+    autoWriteRollingWindowSamples: settings.autoWriteRollingWindowSamples,
+    autoWriteRollingPassRate: settings.autoWriteRollingPassRate,
   };
+}
+
+/** Build the DraftPolicy passed into validation/writer for the LLM lane. */
+export function buildAutoWritePolicy(settings: SedimentSettings): DraftPolicy {
+  return {
+    disallowMaxim: settings.autoWriteDisallowMaxim,
+    disallowArchived: settings.autoWriteDisallowArchived,
+    maxConfidence: settings.autoWriteMaxConfidence,
+  };
+}
+
+/**
+ * Decision record emitted by `decideAutoWriteEligibility`. The shape
+ * is also what `operation: "skip"` audit rows record so a tail of
+ * `audit.jsonl` answers "why didn't the LLM lane fire?".
+ */
+export interface AutoWriteEligibility {
+  eligible: boolean;
+  reason?: string;
+  detail?: Record<string, unknown>;
+}
+
+/**
+ * Pure-ish gate evaluator. The only side effect is incrementing the
+ * sampling counter on the sessionId; everything else is read-only over
+ * settings + in-process Maps + a pre-fetched rolling-gate report.
+ */
+export function decideAutoWriteEligibility(args: {
+  sessionId: string;
+  settings: SedimentSettings;
+  readinessReady: boolean;
+  readinessBlockers: string[];
+  rolling: RollingGateState;
+  /**
+   * Optional override for `Date.now()` so smoke tests can replay sliding-
+   * window logic deterministically.
+   */
+  now?: number;
+}): AutoWriteEligibility {
+  const { sessionId, settings, readinessReady, readinessBlockers, rolling } = args;
+  const now = args.now ?? Date.now();
+
+  if (!settings.autoLlmWriteEnabled) {
+    return { eligible: false, reason: "auto_write_disabled_setting" };
+  }
+  if (settings.autoWriteMaxPerHour <= 0) {
+    return { eligible: false, reason: "auto_write_rate_zero" };
+  }
+  if (!readinessReady) {
+    return { eligible: false, reason: "readiness_gate_blocked", detail: { blockers: readinessBlockers } };
+  }
+  if (autoWriteDisabledBySession.has(sessionId)) {
+    return {
+      eligible: false,
+      reason: "circuit_broken_in_process",
+      detail: { trip_reason: autoWriteDisabledBySession.get(sessionId) },
+    };
+  }
+  if (rolling.tripped) {
+    autoWriteDisabledBySession.set(sessionId, "rolling_pass_rate_below_threshold");
+    return {
+      eligible: false,
+      reason: "rolling_pass_rate_tripped",
+      detail: {
+        windowSize: rolling.windowSize,
+        passRate: rolling.passRate,
+        threshold: settings.autoWriteRollingPassRate,
+        reasons: rolling.reasons,
+      },
+    };
+  }
+
+  // Sliding-window rate limit: prune entries older than 60 min,
+  // compare against cap, then (if firing) push current timestamp.
+  // We don't push here — the caller pushes only on actual LLM call.
+  const fires = autoWriteRecentFires.get(sessionId) ?? [];
+  const recentFires = fires.filter((t) => now - t < HOUR_MS);
+  if (fires.length !== recentFires.length) autoWriteRecentFires.set(sessionId, recentFires);
+  if (recentFires.length >= settings.autoWriteMaxPerHour) {
+    return {
+      eligible: false,
+      reason: "rate_limited",
+      detail: { recent_fires: recentFires.length, max_per_hour: settings.autoWriteMaxPerHour },
+    };
+  }
+
+  // Deterministic sampling stride. Increment every call regardless
+  // of eligibility so the stride accounts for *all* opportunities,
+  // not just the ones that pass earlier gates.
+  const prevCount = autoWriteRunCount.get(sessionId) ?? 0;
+  const nextCount = prevCount + 1;
+  autoWriteRunCount.set(sessionId, nextCount);
+  const stride = Math.max(1, settings.autoWriteSampleEveryNRuns);
+  if (nextCount % stride !== 0) {
+    return {
+      eligible: false,
+      reason: "sampled_out",
+      detail: { run_count: nextCount, stride },
+    };
+  }
+
+  return { eligible: true };
+}
+
+/** Mark this sessionId as having actually fired the LLM lane (push timestamp). */
+function recordAutoWriteFire(sessionId: string, now = Date.now()): void {
+  const fires = autoWriteRecentFires.get(sessionId) ?? [];
+  const filtered = fires.filter((t) => now - t < HOUR_MS);
+  filtered.push(now);
+  autoWriteRecentFires.set(sessionId, filtered);
+}
+
+/**
+ * After each auto-write fire we re-evaluate the rolling gate. If it
+ * trips we don't tear down the in-flight run — it's already done — but
+ * we mark the session disabled so the NEXT agent_end skips fast.
+ */
+export function maybeTripRollingCircuit(
+  sessionId: string,
+  rolling: RollingGateState,
+): boolean {
+  if (rolling.tripped && !autoWriteDisabledBySession.has(sessionId)) {
+    autoWriteDisabledBySession.set(sessionId, "rolling_pass_rate_below_threshold");
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Test-only hook to reset all in-process state. Smoke tests call this
+ * between fixtures so cross-fixture pollution can't mask real bugs.
+ * Do not call from production code paths.
+ */
+export function _resetAutoWriteStateForTests(): void {
+  autoWriteRunCount.clear();
+  autoWriteRecentFires.clear();
+  autoWriteDisabledBySession.clear();
 }
 
 /** Tally entry types within the included window for at-a-glance diagnostics. */

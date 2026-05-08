@@ -54,9 +54,30 @@ function parseLimit(value: number | undefined): number {
   return Math.max(1, Math.min(200, Math.floor(value)));
 }
 
-export async function readLlmDryRunReport(projectRoot: string, limit?: number): Promise<LlmDryRunReport> {
+export interface ReadReportOptions {
+  /** Include `operation: "auto_write"` rows alongside `llm_dry_run` rows. */
+  includeAutoWrite?: boolean;
+  /**
+   * Cap on rows scanned regardless of operation type. The reader walks
+   * the audit file from the END backwards, stopping once it has
+   * collected this many qualifying rows. Default 200 (matches
+   * parseLimit ceiling). Set lower for the rolling-window gate
+   * (typical 20–50).
+   */
+  scanLimit?: number;
+}
+
+export async function readLlmDryRunReport(
+  projectRoot: string,
+  limit?: number,
+  opts?: ReadReportOptions,
+): Promise<LlmDryRunReport> {
   const file = auditPath(projectRoot);
   const max = parseLimit(limit);
+  const scanCap = opts?.scanLimit && Number.isFinite(opts.scanLimit) && opts.scanLimit > 0
+    ? Math.floor(opts.scanLimit)
+    : Number.POSITIVE_INFINITY;
+  const includeAutoWrite = !!opts?.includeAutoWrite;
   let raw = "";
   try {
     raw = await fs.readFile(file, "utf-8");
@@ -74,8 +95,13 @@ export async function readLlmDryRunReport(projectRoot: string, limit?: number): 
     };
   }
 
+  // Scan oldest-to-newest into a flat list, then take the tail when
+  // scanCap is finite. We can't easily reverse-scan a JSONL file
+  // without seeking; the audit log is bounded enough that O(n) is
+  // fine.
+  const allLines = raw.split("\n");
   const items: LlmDryRunReportItem[] = [];
-  for (const line of raw.split("\n")) {
+  for (const line of allLines) {
     if (!line.trim()) continue;
     let event: any;
     try {
@@ -83,7 +109,9 @@ export async function readLlmDryRunReport(projectRoot: string, limit?: number): 
     } catch {
       continue;
     }
-    if (event.operation !== "llm_dry_run" || !event.llm) continue;
+    const isDryRun = event.operation === "llm_dry_run";
+    const isAutoWrite = includeAutoWrite && event.operation === "auto_write";
+    if ((!isDryRun && !isAutoWrite) || !event.llm) continue;
     const quality = event.llm.quality ?? {};
     items.push({
       timestamp: event.timestamp,
@@ -98,6 +126,16 @@ export async function readLlmDryRunReport(projectRoot: string, limit?: number): 
       rawTextPreview: quality.rawTextPreview,
     });
   }
+  // Apply scanCap to keep only the most recent N qualifying rows.
+  // IMPORTANT: when scanCap is infinite or items length <= scanCap we
+  // must NOT alias the array — a later `items.length = 0` would clear
+  // both. We always copy the slice so subsequent in-place mutation
+  // (if any) is local.
+  const limited = Number.isFinite(scanCap) && items.length > scanCap
+    ? items.slice(items.length - scanCap)
+    : items.slice();
+  items.length = 0;
+  items.push(...limited);
 
   const reasons: Record<string, number> = {};
   let passCount = 0;
@@ -153,6 +191,55 @@ export function evaluateLlmAutoWriteReadiness(
     requiredDryRunPassRate: policy.requiredDryRunPassRate,
     blockers,
     reasons: report.reasons,
+  };
+}
+
+export interface RollingGateState {
+  /** Number of qualifying rows scanned (cap = autoWriteRollingWindowSamples). */
+  windowSize: number;
+  /** How many rows in the window had quality.passed === true. */
+  passCount: number;
+  /** passCount / windowSize, or 1.0 when windowSize is 0 (insufficient data => not yet failing). */
+  passRate: number;
+  /** True when windowSize >= warmup AND passRate < threshold. */
+  tripped: boolean;
+  /** Per-reason histogram for diagnostic notify. */
+  reasons: Record<string, number>;
+  /**
+   * The minimum windowSize required before the gate is allowed to
+   * trip. Mirrors `requiredDryRunPassRate`'s warmup behavior: until
+   * we have at least N samples we don't have signal.
+   */
+  warmup: number;
+}
+
+/**
+ * Evaluate the rolling-quality circuit breaker for the auto-write
+ * lane. Reads the most recent `windowSamples` rows that have a
+ * quality gate (llm_dry_run + auto_write). Trips the breaker when the
+ * pass rate falls below `passRateThreshold` AND we have enough
+ * samples to make that judgment statistically meaningful (warmup =
+ * windowSamples).
+ *
+ * Pure function over an already-fetched report so it composes with
+ * any audit reader.
+ */
+export function evaluateRollingGate(
+  report: LlmDryRunReport,
+  windowSamples: number,
+  passRateThreshold: number,
+): RollingGateState {
+  const windowSize = report.total;
+  const passRate = windowSize === 0 ? 1.0 : report.passCount / windowSize;
+  const warmup = Math.max(1, Math.floor(windowSamples));
+  const tripped = windowSize >= warmup && passRate < passRateThreshold;
+  return {
+    windowSize,
+    passCount: report.passCount,
+    passRate,
+    tripped,
+    reasons: report.reasons,
+    warmup,
   };
 }
 

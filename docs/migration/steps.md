@@ -168,7 +168,7 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 1.4 — Sediment project-only pipeline
 
-**实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/checkpoint.ts` 已实现 checkpoint + run window builder；`extensions/sediment/extractor.ts` 已实现 deterministic explicit `MEMORY:` block extractor；`extensions/sediment/llm-extractor.ts` 已实现 `/sediment llm --dry-run` 的 prompt + model call + parser；`extensions/sediment/index.ts` 注册 `/sediment status`、`/sediment window --dry-run`、`/sediment extract --dry-run`、`/sediment llm --dry-run`、`/sediment dedupe --title` 与 `/sediment smoke --dry-run`。`agent_end` hook 默认 disabled；启用后仅处理显式 `MEMORY:` block，成功/terminal skip 后推进 checkpoint。
+**实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/checkpoint.ts` 已实现 per-session checkpoint + RMW 锁 + run window builder；`extensions/sediment/extractor.ts` 已实现 fence-aware deterministic explicit `MEMORY:` block extractor；`extensions/sediment/llm-extractor.ts` 已实现 prompt (含 Trust Boundary role-aware 指令) + model call + parser；`extensions/sediment/index.ts` 注册 全部 `/sediment` 子命令 + `agent_end` hook。底层走 deterministic explicit `MEMORY:` lane；**LLM auto-write lane 已接入 hook**（Phase 1.4 A2，2026-05-08），在显式 miss 后、`autoLlmWriteEnabled=true` 且 readiness/rolling/rate/sampling 全部放行后调用 LLM。
 
 已完成 checkpoint/window substrate：
 - checkpoint path：`.pi-astack/sediment/checkpoint.json`
@@ -219,10 +219,20 @@ memory_search(query: "dispatch agent prompt")
 - audit 到 `.pi-astack/sediment/audit.jsonl`
 - 成功后自动重建 `.pensieve/.index/graph.json` 与 `.pensieve/_index.md`；derived rebuild 失败不会回滚已完成迁移/恢复，但会写入返回值/audit
 
-待实现完整 pipeline：
-- batch migration apply（当前只支持单文件）
-- LLM extract + classify 的 lookup tools 版本（继承 ADR 0010 内核）
-- 将 LLM dry-run 质量门控后接入 agent_end 自动写
+已完成 LLM auto-write lane（A1 + A2，2026-05-08）：
+- A1（安全前置 G2-G8）：`writeProjectEntry.opts.policy` + `forceProvisional`；`validateProjectEntryDraft(draft, policy)` overlay（`disallowMaxim` / `disallowArchived` / `maxConfidence`）；sanitizer 扩 4 pattern（JWT / PEM / AWS / connection URL）；`normalizeCompiledTruth` 对 `^---$` body 行退转；triggerPhrases 过 sanitizer；extractor prompt 加 Trust Boundary 指令。
+- A2（接入 + G9-G12）：`agent_end` 在 `parseExplicitMemoryBlocks(window) === []` 之后调用 `tryAutoWriteLane`。闸门顺序：
+  1. modelRegistry 存在 → `evaluateLlmAutoWriteReadiness(report, policy)` → `evaluateRollingGate(rollingReport, ...)` → `decideAutoWriteEligibility({sessionId, settings, readiness, rolling})`
+  2. 全部放行后：`runLlmExtractorDryRun()` → `parseExplicitMemoryBlocks(rawText)` → `previewExtraction(drafts, policy)` → 过滤违反项 → `writeProjectEntry({...draft, policy, forceProvisional})`
+  3. 写后重新 `evaluateRollingGate` 跳闸检查；跳闸后该 sessionId 本进程不再调 LLM（`autoWriteDisabledBySession` Map）。
+- G9 audit：`operation: "auto_write"` 含 candidate_count / candidates / results / **raw_text 全文** (cap `autoWriteRawAuditChars` 默认 8000) / rolling / stage_ms.llm_total。如果 LLM 打一鱼三天这些都够复现。
+- G10 rolling 闸门：`autoWriteRollingWindowSamples`/`autoWriteRollingPassRate` 两个 settings；跳闸是 **进程内** 状态，pi 重启重置（不改 settings.json，避免 “不可逆” 问题）。
+- G11 独立模型：复用现有 `extractorModel` settings（默认 deepseek-v4-pro）；不强制隔离主会话模型，仅靠 settings 表达意图。
+- G12 速率闸门：`autoWriteMaxPerHour` (默认 6) 滑动 1 小时窗口；`autoWriteSampleEveryNRuns` (默认 1) 确定性采样步进。两者进程内 Map，pi 重启重置。
+
+剩余待实现 pipeline：
+- batch migration apply（当前只支持单文件；设计上不加）
+- LLM extract 的 lookup tools 版本（ADR 0010 描述的内核）— 当前是 single-shot prompt + parser，未引入 lookup tools loop
 
 **当前验收**：
 ```text
@@ -239,7 +249,7 @@ memory_search(query: "dispatch agent prompt")
 # → 汇总 llm_dry_run pass/fail、reason 分布、候选数量和最近 preview/hash
 
 /sediment readiness
-# → 检查 dry-run 样本数/通过率/autoLlmWriteEnabled 是否满足未来自动写入门禁
+# → 检查 dry-run 样本数/通过率/autoLlmWriteEnabled 是否满足 LLM auto-write lane 门禁
 
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果
