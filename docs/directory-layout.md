@@ -36,6 +36,7 @@ alfadb/pi-astack/
 │   │   └── 0012-sediment-pensieve-gbrain-dual-target.md  # superseded by memory-architecture.md
 │   └── migration/
 │       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6
+│       ├── apply-checklist.md         # 单文件 migration apply/restore 操作手册
 │       └── open-questions.md          # 适配新架构的待澄清问题
 │
 ├── extensions/                        # ✅ pi 行为扩展（alfadb own）

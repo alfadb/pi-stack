@@ -2,6 +2,8 @@
 
 > 基于 [memory-architecture.md](../memory-architecture.md) §11 实施路线图。
 > 替代旧 7 Slice (A→G) 方案（基于 gbrain，已于 2026-05-07 作废）。
+>
+> 单文件 apply/restore 操作手册见 [apply-checklist.md](./apply-checklist.md)。
 
 ## 总览
 
@@ -72,7 +74,7 @@
 - 识别旧格式条目：无 `schema_version` 或无 `---` 分隔符
 - 自动映射：旧 `short-term/` → 条目移入同级目录 + `lifetime.kind: ttl`
 - 缺失 timeline：迁移时生成初始 timeline 行
-- 迁移前自动 git commit 当前状态（可回滚）
+- 迁移前备份 source；apply/restore 后 best-effort git commit（失败不回滚 markdown）
 - 支持 `--dry-run`
 - 支持 `--report` 写入 `.pensieve/.state/migration-report.md`（generated artifact）；report 每个 migration item 都包含推荐的 `/sediment migrate-one --plan ...` 与 `/sediment migrate-one --apply --yes ...` 命令
 
@@ -103,6 +105,8 @@
 /sediment migrate-one --restore .pensieve/.state/migration-backups/<timestamp>/short-term/maxims/example.md --yes
 # → 恢复原 legacy source，删除可验证的迁移 target，并重建 graph/index；若 target 已被手改则拒绝 target_modified
 ```
+
+**操作手册**：真实项目迁移按 [apply-checklist.md](./apply-checklist.md) 执行。当前只允许单文件 plan/apply/restore；batch apply 需要先完成 checklist 中的 burn-in 证据。
 
 **待实现验收**：batch apply（不绕过单文件安全约束）。
 
