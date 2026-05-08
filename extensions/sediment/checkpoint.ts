@@ -2,13 +2,43 @@ import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
 import type { SedimentSettings } from "./settings";
-import { ensureSedimentLegacyMigrated, formatLocalIsoTimestamp, sedimentCheckpointPath } from "../_shared/runtime";
+import {
+  ensureSedimentLegacyMigrated,
+  formatLocalIsoTimestamp,
+  sedimentCheckpointPath,
+  sedimentLocksDir,
+} from "../_shared/runtime";
 
+/**
+ * Per-session checkpoint. Each pi session (identified by its sessionId)
+ * has its OWN slot in the on-disk checkpoint file because session branch
+ * entry IDs are not interchangeable across sessions — a `lastProcessedEntryId`
+ * captured by session A is meaningless when applied to session B's branch
+ * (B would fall through to the compaction-fallback path and either replay
+ * everything or only the latest entry).
+ */
 export interface SedimentCheckpoint {
   lastProcessedEntryId?: string;
   updatedAt?: string;
-  sessionId?: string;
 }
+
+/** On-disk format. Wraps per-session slots in a versioned envelope. */
+interface CheckpointFile {
+  schema_version: number;
+  sessions: Record<string, SedimentCheckpoint>;
+}
+
+const CHECKPOINT_SCHEMA_VERSION = 2;
+const STALE_SESSION_DAYS = 90;
+const CHECKPOINT_LOCK_TIMEOUT_MS = 5_000;
+const CHECKPOINT_LOCK_STEAL_AFTER_MS = 30_000;
+
+/**
+ * Slot used when migrating a v1 checkpoint that has no sessionId. The
+ * first session that calls `saveSessionCheckpoint` adopts this slot's
+ * lastProcessedEntryId and the slot is cleared.
+ */
+const LEGACY_SLOT = "_legacy";
 
 export interface RunWindow {
   entries: unknown[];
@@ -27,21 +57,174 @@ export function checkpointPath(projectRoot: string): string {
   return sedimentCheckpointPath(projectRoot);
 }
 
-export async function loadCheckpoint(projectRoot: string): Promise<SedimentCheckpoint> {
+/**
+ * Coerce any on-disk shape (v1 raw or v2 envelope) into a CheckpointFile.
+ */
+function upgradeCheckpoint(raw: unknown): CheckpointFile {
+  if (raw && typeof raw === "object" && (raw as any).schema_version === CHECKPOINT_SCHEMA_VERSION && (raw as any).sessions) {
+    return raw as CheckpointFile;
+  }
+  const out: CheckpointFile = { schema_version: CHECKPOINT_SCHEMA_VERSION, sessions: {} };
+  if (raw && typeof raw === "object") {
+    const v1 = raw as Record<string, unknown>;
+    const last = typeof v1.lastProcessedEntryId === "string" ? v1.lastProcessedEntryId : undefined;
+    if (last) {
+      const slot = typeof v1.sessionId === "string" && v1.sessionId ? v1.sessionId : LEGACY_SLOT;
+      out.sessions[slot] = {
+        lastProcessedEntryId: last,
+        updatedAt: typeof v1.updatedAt === "string" ? v1.updatedAt : formatLocalIsoTimestamp(),
+      };
+    }
+  }
+  return out;
+}
+
+/** Drop session slots whose `updatedAt` is more than STALE_SESSION_DAYS old. */
+function pruneStaleSessions(file: CheckpointFile): CheckpointFile {
+  const now = Date.now();
+  const cutoffMs = STALE_SESSION_DAYS * 24 * 60 * 60 * 1000;
+  const fresh: Record<string, SedimentCheckpoint> = {};
+  for (const [id, sess] of Object.entries(file.sessions)) {
+    if (!sess.updatedAt) { fresh[id] = sess; continue; }
+    const t = Date.parse(sess.updatedAt);
+    if (!Number.isFinite(t) || now - t < cutoffMs) fresh[id] = sess;
+  }
+  return { ...file, sessions: fresh };
+}
+
+async function loadCheckpointFile(projectRoot: string): Promise<CheckpointFile> {
   await ensureSedimentLegacyMigrated(projectRoot);
   try {
-    return JSON.parse(await fs.readFile(checkpointPath(projectRoot), "utf-8"));
+    const raw = await fs.readFile(checkpointPath(projectRoot), "utf-8");
+    return upgradeCheckpoint(JSON.parse(raw));
   } catch {
-    return {};
+    return { schema_version: CHECKPOINT_SCHEMA_VERSION, sessions: {} };
   }
 }
 
+async function atomicWriteCheckpoint(projectRoot: string, file: CheckpointFile): Promise<void> {
+  const dest = checkpointPath(projectRoot);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(tmp, JSON.stringify(file, null, 2) + "\n", "utf-8");
+  await fs.rename(tmp, dest);
+}
+
+/**
+ * File-lock-protected execution to serialize concurrent read-modify-write
+ * sequences across multiple pi processes sharing the same project root.
+ * Steals stale locks (>30s old) to avoid deadlocks if a previous holder
+ * crashed without releasing.
+ */
+async function withCheckpointLock<T>(projectRoot: string, fn: () => Promise<T>): Promise<T> {
+  const lockDir = sedimentLocksDir(projectRoot);
+  const lockPath = path.join(lockDir, "checkpoint.lock");
+  await fs.mkdir(lockDir, { recursive: true });
+  const start = Date.now();
+  while (true) {
+    try {
+      const handle = await fs.open(lockPath, "wx");
+      await handle.writeFile(JSON.stringify({ pid: process.pid, op: "checkpoint", at: formatLocalIsoTimestamp() }));
+      await handle.close();
+      try {
+        return await fn();
+      } finally {
+        await fs.unlink(lockPath).catch(() => undefined);
+      }
+    } catch (e: any) {
+      if (e?.code !== "EEXIST") throw e;
+      // Steal stale lock (previous holder crashed).
+      try {
+        const stat = await fs.stat(lockPath);
+        if (Date.now() - stat.mtimeMs > CHECKPOINT_LOCK_STEAL_AFTER_MS) {
+          await fs.unlink(lockPath).catch(() => undefined);
+          continue;
+        }
+      } catch { /* ignore */ }
+      if (Date.now() - start > CHECKPOINT_LOCK_TIMEOUT_MS) {
+        throw new Error(`checkpoint lock timeout after ${CHECKPOINT_LOCK_TIMEOUT_MS}ms`);
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
+
+/**
+ * Read this session's checkpoint slot.
+ *
+ * - `sessionId` is required for persistence. If undefined (ephemeral pi,
+ *   subprocess `--no-session`, ad-hoc CLI invocation) we return `{}` and
+ *   the caller falls through to a no-checkpoint replay path. saveSession
+ *   below also no-ops in that mode, so the main session's checkpoint is
+ *   never corrupted by ephemeral runs.
+ * - On first read, if a `_legacy` slot is present (v1 migration carry-over
+ *   with no sessionId) we return its value so this session can adopt it.
+ *   The slot is cleared on the next save (see saveSessionCheckpoint).
+ */
+export async function loadSessionCheckpoint(
+  projectRoot: string,
+  sessionId: string | undefined,
+): Promise<SedimentCheckpoint> {
+  if (!sessionId) return {};
+  const file = await loadCheckpointFile(projectRoot);
+  const slot = file.sessions[sessionId];
+  if (slot) return slot;
+  return file.sessions[LEGACY_SLOT] ?? {};
+}
+
+/**
+ * Update this session's checkpoint slot. No-op when sessionId is missing
+ * (ephemeral / subprocess mode).
+ */
+export async function saveSessionCheckpoint(
+  projectRoot: string,
+  sessionId: string | undefined,
+  patch: SedimentCheckpoint,
+): Promise<void> {
+  if (!sessionId) return;
+  await withCheckpointLock(projectRoot, async () => {
+    let file = pruneStaleSessions(await loadCheckpointFile(projectRoot));
+    // Adopt the v1 legacy slot on first save by this session, then drop it.
+    if (file.sessions[LEGACY_SLOT] && !file.sessions[sessionId]) {
+      file.sessions[sessionId] = file.sessions[LEGACY_SLOT];
+      delete file.sessions[LEGACY_SLOT];
+    }
+    file.sessions[sessionId] = {
+      ...(file.sessions[sessionId] || {}),
+      ...patch,
+      updatedAt: formatLocalIsoTimestamp(),
+    };
+    await atomicWriteCheckpoint(projectRoot, file);
+  });
+}
+
+/**
+ * @deprecated Backward-compatibility shim. New code MUST use
+ * `loadSessionCheckpoint(projectRoot, sessionId)`. Reading without a
+ * sessionId returns the merged latest slot (best-effort), which can be
+ * the wrong session in multi-session contexts — only safe in tests with
+ * a single known session.
+ */
+export async function loadCheckpoint(projectRoot: string): Promise<SedimentCheckpoint> {
+  const file = await loadCheckpointFile(projectRoot);
+  const slots = Object.values(file.sessions);
+  if (slots.length === 0) return {};
+  // Return the most-recently-updated slot (least surprising for tests).
+  return slots.sort((a, b) => (Date.parse(b.updatedAt || "") || 0) - (Date.parse(a.updatedAt || "") || 0))[0] || {};
+}
+
+/**
+ * @deprecated Backward-compatibility shim. New code MUST use
+ * `saveSessionCheckpoint(projectRoot, sessionId, patch)`. This shim
+ * stores the entry under the LEGACY_SLOT, which is reserved for v1
+ * migration carry-overs.
+ */
 export async function saveCheckpoint(projectRoot: string, checkpoint: SedimentCheckpoint): Promise<void> {
-  const file = checkpointPath(projectRoot);
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  await fs.writeFile(tmp, `${JSON.stringify({ ...checkpoint, updatedAt: formatLocalIsoTimestamp() }, null, 2)}\n`, "utf-8");
-  await fs.rename(tmp, file);
+  await withCheckpointLock(projectRoot, async () => {
+    const file = await loadCheckpointFile(projectRoot);
+    file.sessions[LEGACY_SLOT] = { ...checkpoint, updatedAt: formatLocalIsoTimestamp() };
+    await atomicWriteCheckpoint(projectRoot, file);
+  });
 }
 
 function entryId(entry: unknown): string | undefined {

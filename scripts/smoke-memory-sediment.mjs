@@ -124,7 +124,7 @@ async function main() {
     const { writeProjectEntry } = req("./sediment/writer.js");
     const { listMigrationBackups, migrateOne, restoreMigrationBackup } = req("./sediment/migration.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
-    const { buildRunWindow, saveCheckpoint, loadCheckpoint } = req("./sediment/checkpoint.js");
+    const { buildRunWindow, saveCheckpoint, loadCheckpoint, loadSessionCheckpoint, saveSessionCheckpoint } = req("./sediment/checkpoint.js");
     const { detectProjectDuplicate } = req("./sediment/dedupe.js");
     const { parseExplicitMemoryBlocks } = req("./sediment/extractor.js");
     const { summarizeLlmExtractorDryRun } = req("./sediment/llm-extractor.js");
@@ -312,6 +312,49 @@ Body.
     await saveCheckpoint(root, { lastProcessedEntryId: "a1" });
     const window = buildRunWindow(branch, await loadCheckpoint(root), { ...DEFAULT_SEDIMENT_SETTINGS, minWindowChars: 0 });
     assert(window.candidateEntries === 1 && window.lastEntryId === "b2", "checkpoint window failed");
+
+    // Regression: per-session checkpoint isolation. Two sessions sharing
+    // the same project root must NOT clobber each other's last-processed
+    // entry id. Subprocess / ephemeral pi (sessionId=undefined) MUST NOT
+    // persist any state.
+    const concRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-conc-"));
+    fs.mkdirSync(path.join(concRoot, ".pensieve"), { recursive: true });
+    await saveSessionCheckpoint(concRoot, "session-A", { lastProcessedEntryId: "entryA-99" });
+    await saveSessionCheckpoint(concRoot, "session-B", { lastProcessedEntryId: "entryB-42" });
+    const cpA = await loadSessionCheckpoint(concRoot, "session-A");
+    const cpB = await loadSessionCheckpoint(concRoot, "session-B");
+    assert(cpA.lastProcessedEntryId === "entryA-99", `session A checkpoint corrupted by session B: ${cpA.lastProcessedEntryId}`);
+    assert(cpB.lastProcessedEntryId === "entryB-42", `session B checkpoint corrupted by session A: ${cpB.lastProcessedEntryId}`);
+    const cpUnknown = await loadSessionCheckpoint(concRoot, "session-C-never-saved");
+    assert(!cpUnknown.lastProcessedEntryId, "unknown session must return empty checkpoint, not steal another session's slot");
+    // Ephemeral mode: undefined sessionId is no-op for both load and save.
+    await saveSessionCheckpoint(concRoot, undefined, { lastProcessedEntryId: "ephemeral-leak" });
+    const cpAAfterEphemeral = await loadSessionCheckpoint(concRoot, "session-A");
+    assert(cpAAfterEphemeral.lastProcessedEntryId === "entryA-99", "ephemeral save must not affect any persisted session slot");
+    const cpEph = await loadSessionCheckpoint(concRoot, undefined);
+    assert(!cpEph.lastProcessedEntryId, "ephemeral load must return empty checkpoint regardless of file content");
+    // Verify on-disk shape: schema_version 2 + sessions map with both keys.
+    const cpDiskRaw = JSON.parse(fs.readFileSync(path.join(concRoot, ".pi-astack", "sediment", "checkpoint.json"), "utf-8"));
+    assert(cpDiskRaw.schema_version === 2, `expected checkpoint schema_version=2, got ${cpDiskRaw.schema_version}`);
+    assert(cpDiskRaw.sessions && cpDiskRaw.sessions["session-A"]?.lastProcessedEntryId === "entryA-99", "on-disk session A slot missing");
+    assert(cpDiskRaw.sessions["session-B"]?.lastProcessedEntryId === "entryB-42", "on-disk session B slot missing");
+
+    // Regression: v1 schema (raw {lastProcessedEntryId}) auto-upgrades on
+    // first read. v1 with no sessionId lands in the LEGACY slot and is
+    // adopted by the first session that writes (then cleared).
+    const v1Root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-v1-"));
+    fs.mkdirSync(path.join(v1Root, ".pi-astack", "sediment"), { recursive: true });
+    fs.mkdirSync(path.join(v1Root, ".pensieve"), { recursive: true });
+    fs.writeFileSync(
+      path.join(v1Root, ".pi-astack", "sediment", "checkpoint.json"),
+      JSON.stringify({ lastProcessedEntryId: "legacy-77", updatedAt: "2026-05-08T10:00:00.000+08:00" }, null, 2),
+    );
+    const v1Loaded = await loadSessionCheckpoint(v1Root, "new-session");
+    assert(v1Loaded.lastProcessedEntryId === "legacy-77", `v1 LEGACY slot not adopted by new session, got ${v1Loaded.lastProcessedEntryId}`);
+    await saveSessionCheckpoint(v1Root, "new-session", { lastProcessedEntryId: "new-78" });
+    const v1AfterAdoption = JSON.parse(fs.readFileSync(path.join(v1Root, ".pi-astack", "sediment", "checkpoint.json"), "utf-8"));
+    assert(!v1AfterAdoption.sessions["_legacy"], "_legacy slot must be cleared after adoption");
+    assert(v1AfterAdoption.sessions["new-session"]?.lastProcessedEntryId === "new-78", "v1 carry-over not persisted under new session");
 
     const marker = `MEMORY:
 title: Explicit Candidate

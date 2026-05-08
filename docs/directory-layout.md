@@ -196,6 +196,28 @@ OpenAI Responses API 生图。复用用户已有的 openai provider 配置（key
 
 **时间戳**：所有 audit / checkpoint / generated report 的时间戳都是带本地时区偏移的 ISO 8601（例 `2026-05-08T14:23:19.436+08:00`），不再用 UTC `Z` 后缀。
 
+### 并发模型（多 pi 实例 / 子进程 / ephemeral）
+
+Checkpoint v2 格式：
+
+```json
+{
+  "schema_version": 2,
+  "sessions": {
+    "<sessionId-uuid>": {
+      "lastProcessedEntryId": "...",
+      "updatedAt": "2026-05-08T14:43:07.080+08:00"
+    }
+  }
+}
+```
+
+- **多个 pi 实例在同一 `<projectRoot>/`**：每个会话有独立的 sessionId slot，互不覆盖。`saveSessionCheckpoint` 用文件锁（`.pi-astack/sediment/locks/checkpoint.lock`）串行化 read-modify-write，避免并发丢更新。锁隐含 30s 偏移后可被偷 (steal) 以防会话崩溃后死锁。
+- **子进程 pi / `pi --print --no-session` / dispatch_agent 生成的 ephemeral session**：`getSessionFile()` 返回 undefined 时被识别为 ephemeral，`saveSessionCheckpoint` no-op 不污染主会话的 slot。audit 仍追加但标记 `ephemeral_session: true` 且不写 `session_id` 字段。
+- **Audit 并发追加**：依赖 Linux `O_APPEND` 原子性（< PIPE_BUF=4KB 单次写入原子），JSONL 行 < 4KB 不会擕裂；多会话的行会交错但每行 `session_id` 可区分。
+- **v1 schema 迁移**：旧版 `{ lastProcessedEntryId, updatedAt }` 装进 `sessions._legacy` slot，被首个保存的 session 收养后清除。
+- **冗余会话清理**：`updatedAt > 90 天` 的 session slot 在下一次 RMW 时自动 prune，避免 sessions map 无限生长。
+
 ## 配置
 
 pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schema 定义在本仓 `pi-astack-settings.schema.json`。

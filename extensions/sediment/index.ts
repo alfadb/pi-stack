@@ -9,7 +9,7 @@
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveSedimentSettings } from "./settings";
-import { buildRunWindow, checkpointSummary, hasPensieve, loadCheckpoint, saveCheckpoint } from "./checkpoint";
+import { buildRunWindow, checkpointSummary, hasPensieve, loadSessionCheckpoint, saveSessionCheckpoint } from "./checkpoint";
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun } from "./llm-extractor";
@@ -34,7 +34,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
     registerCommand?: (name: string, options: {
       description?: string;
       getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null;
-      handler: (args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; modelRegistry?: unknown; signal?: AbortSignal; ui: { notify(message: string, type?: string): void } }) => Promise<void> | void;
+      handler: (args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[]; getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null }; modelRegistry?: unknown; signal?: AbortSignal; ui: { notify(message: string, type?: string): void } }) => Promise<void> | void;
     }) => void;
   };
   if (typeof maybePi.registerCommand !== "function") return;
@@ -46,9 +46,10 @@ function registerSedimentCommand(pi: ExtensionAPI) {
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
-    async handler(args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; modelRegistry?: unknown; signal?: AbortSignal; ui: { notify(message: string, type?: string): void } }) {
+    async handler(args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[]; getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null }; modelRegistry?: unknown; signal?: AbortSignal; ui: { notify(message: string, type?: string): void } }) {
       const cwd = path.resolve(ctx.cwd || process.cwd());
       const settings = resolveSedimentSettings();
+      const sessionId = readSessionId(ctx.sessionManager);
       const [subcommand = "status", ...rest] = args.trim() ? args.trim().split(/\s+/) : [];
 
       if (subcommand === "status") {
@@ -77,7 +78,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
           ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
           return;
         }
-        const checkpoint = await loadCheckpoint(cwd);
+        const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
         const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
         ctx.ui.notify(JSON.stringify(checkpointSummary(window), null, 2), window.skipReason ? "warning" : "info");
         return;
@@ -92,7 +93,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
           ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
           return;
         }
-        const checkpoint = await loadCheckpoint(cwd);
+        const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
         const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
         const drafts = window.skipReason ? [] : parseExplicitMemoryBlocks(window.text);
         ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), extraction: previewExtraction(drafts) }, null, 2), drafts.length > 0 ? "warning" : "info");
@@ -112,7 +113,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
           ctx.ui.notify("Model registry unavailable; cannot run LLM extractor", "error");
           return;
         }
-        const checkpoint = await loadCheckpoint(cwd);
+        const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
         const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
         if (window.skipReason) {
           ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), extraction: previewExtraction([]) }, null, 2), "warning");
@@ -233,7 +234,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
 export default function (pi: ExtensionAPI) {
   registerSedimentCommand(pi);
 
-  pi.on("agent_end", async (_event: unknown, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; ui?: { notify(message: string, type?: string): void } }) => {
+  pi.on("agent_end", async (_event: unknown, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[]; getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null }; ui?: { notify(message: string, type?: string): void } }) => {
     const settings = resolveSedimentSettings();
     if (!settings.enabled) return;
 
@@ -251,10 +252,15 @@ export default function (pi: ExtensionAPI) {
       // ctx already stale at hook entry — skip silently.
       return;
     }
+    const sessionId = readSessionId(ctx.sessionManager);
     const notify = ctx.ui?.notify?.bind(ctx.ui);
 
     const tStart = Date.now();
-    const checkpoint = await loadCheckpoint(cwd);
+    // Per-session checkpoint slot. When sessionId is missing (subprocess
+    // pi / --no-session), loadSessionCheckpoint returns {} and
+    // saveSessionCheckpoint is a no-op so we never corrupt the main
+    // session's persisted state.
+    const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
     const window = buildRunWindow(branch, checkpoint, settings);
     const tWindowBuilt = Date.now();
     const summary = checkpointSummary(window);
@@ -262,17 +268,19 @@ export default function (pi: ExtensionAPI) {
     const entryBreakdown = countEntryTypes(window.entries);
 
     if (window.skipReason || !window.lastEntryId) {
-      if (window.lastEntryId) await saveCheckpoint(cwd, { lastProcessedEntryId: window.lastEntryId });
+      if (window.lastEntryId) await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
       await appendAudit(cwd, {
         operation: "skip",
         reason: window.skipReason ?? "no_last_entry",
+        session_id: sessionId,
+        ephemeral_session: !sessionId,
         ...summary,
         extractor: "explicit_marker",
         parser_version: PARSER_VERSION,
         settings_snapshot: settingsSnapshot,
         entry_breakdown: entryBreakdown,
         stage_ms: { window_build: tWindowBuilt - tStart, parse: 0, write_total: 0, total: Date.now() - tStart },
-        checkpoint_advanced: !!window.lastEntryId,
+        checkpoint_advanced: !!sessionId && !!window.lastEntryId,
       });
       return;
     }
@@ -281,17 +289,19 @@ export default function (pi: ExtensionAPI) {
     const drafts = parseExplicitMemoryBlocks(window.text);
     const tParseEnd = Date.now();
     if (drafts.length === 0) {
-      await saveCheckpoint(cwd, { lastProcessedEntryId: window.lastEntryId });
+      await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
       await appendAudit(cwd, {
         operation: "skip",
         reason: "no_explicit_memory_markers",
+        session_id: sessionId,
+        ephemeral_session: !sessionId,
         ...summary,
         extractor: "explicit_marker",
         parser_version: PARSER_VERSION,
         settings_snapshot: settingsSnapshot,
         entry_breakdown: entryBreakdown,
         stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: 0, total: Date.now() - tStart },
-        checkpoint_advanced: true,
+        checkpoint_advanced: !!sessionId,
       });
       return;
     }
@@ -301,16 +311,18 @@ export default function (pi: ExtensionAPI) {
     for (const draft of drafts) {
       results.push(await writeProjectEntry({
         ...draft,
-        sessionId: "sediment",
+        sessionId: sessionId || "sediment",
         timelineNote: draft.timelineNote || "captured from explicit MEMORY block",
       }, { projectRoot: cwd, settings, dryRun: false }));
     }
     const tWriteEnd = Date.now();
 
     const shouldAdvance = shouldAdvanceAfterResults(results);
-    if (shouldAdvance) await saveCheckpoint(cwd, { lastProcessedEntryId: window.lastEntryId });
+    if (shouldAdvance) await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
     await appendAudit(cwd, {
       operation: "explicit_extract",
+      session_id: sessionId,
+      ephemeral_session: !sessionId,
       ...summary,
       extractor: "explicit_marker",
       parser_version: PARSER_VERSION,
@@ -320,7 +332,7 @@ export default function (pi: ExtensionAPI) {
       candidates: drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
       results: results.map((result) => ({ status: result.status, slug: result.slug, reason: result.reason, path: result.path, lintErrors: result.lintErrors, lintWarnings: result.lintWarnings, gitCommit: result.gitCommit })),
       stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: tWriteEnd - tWriteStart, total: Date.now() - tStart },
-      checkpoint_advanced: shouldAdvance,
+      checkpoint_advanced: !!sessionId && shouldAdvance,
     });
 
     // Use captured `notify` (ctx.ui.notify pre-bound) rather than ctx.ui
@@ -370,3 +382,40 @@ function countEntryTypes(entries: unknown[]): Record<string, number> {
 /** Identifier of the parser-version producing this audit row.
  *  Bumped whenever the parser semantics change (e.g., fence-awareness). */
 const PARSER_VERSION = "fence_aware_v1";
+
+/**
+ * Best-effort sessionId reader, with ephemeral-session filtering.
+ *
+ * pi >= 0.74 exposes `getSessionId` on ReadonlySessionManager. However,
+ * `--no-session` (and dispatch_agent subprocesses) still allocate a fresh
+ * UUID for the in-memory session even though nothing is persisted to
+ * disk; using that UUID as a checkpoint slot would balloon
+ * `checkpoint.json` with single-use entries and pollute audit `session_id`
+ * fields with throwaway IDs.
+ *
+ * We treat a session as ephemeral (=> return undefined here) when
+ * `getSessionFile()` is unavailable or returns no path. In ephemeral
+ * mode the deterministic extractor still runs, but checkpoints are not
+ * persisted (see saveSessionCheckpoint no-op) and audit rows record
+ * `ephemeral_session: true` for attribution.
+ */
+function readSessionId(sm: {
+  getSessionId?(): string | undefined | null;
+  getSessionFile?(): string | undefined | null;
+} | undefined): string | undefined {
+  if (!sm || typeof sm.getSessionId !== "function") return undefined;
+  if (typeof sm.getSessionFile === "function") {
+    try {
+      const file = sm.getSessionFile();
+      if (!file || typeof file !== "string") return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  try {
+    const id = sm.getSessionId();
+    return typeof id === "string" && id.trim() ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
