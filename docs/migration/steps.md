@@ -270,14 +270,16 @@ memory_search(query: "dispatch agent prompt")
 ## Phase 2：World 层接入
 
 **验收标准**：
-- [ ] `~/.abrain/` 目录结构落地，独立 git repo
-- [ ] `ABRAIN_ROOT` 环境变量支持，默认 `~/.abrain`
-- [ ] Memory Facade 跨 store dispatch + graceful degradation
-- [ ] `memory_search` 同时检索 project + world
-- [ ] Sediment world lane（world 写入路径，决策树 logic）
-- [ ] World scope 的 file lock
-- [ ] Promotion gate 1-5 基础版（keyword-based）
-- [ ] 跨机器同步脚本
+- [ ] `~/.abrain/` 目录结构落地，独立 git repo【运维一次性，未执行】
+- [x] `ABRAIN_ROOT` 环境变量支持，默认 `~/.abrain`【`extensions/memory/parser.ts::resolveStores`】
+- [x] Memory Facade 跨 store dispatch + graceful degradation【`resolveStores` 在 world 不存在时仅返回 project store，不报错】
+- [x] `memory_search` 同时检索 project + world【smoke 覆盖 `ABRAIN_ROOT` 路径】
+- [ ] Sediment world lane（world 写入路径，决策树 logic）【被 `autoLlmWriteEnabled: false` 闸门挡住】
+- [ ] World scope 的 file lock【同上，sediment 写入路径依赖】
+- [ ] Promotion gate 1-5 基础版（keyword-based）【同上】
+- [ ] 跨机器同步脚本【运维脚本，路线漏洞】
+
+**状态（2026-05-08）**：读侧（resolve / search / get / list）全部落地，且被 smoke 覆盖。只要本地存在 `~/.abrain/`（或设了 `ABRAIN_ROOT`），`memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 会自动合并 world 层结果，scope 字段在返回中区分。写侧（sediment world lane / promotion gate / sync）依然依赖 auto LLM write 闸门解除，本 phase 不推进。
 
 ### Phase 2.1 — ~/.abrain 初始化
 
