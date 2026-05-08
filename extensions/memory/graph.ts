@@ -7,6 +7,7 @@ import type { MemorySettings } from "./settings";
 import type { MemoryEntry, Scope } from "./types";
 import { parseEntry, scanStore } from "./parser";
 import { prettyPath } from "./utils";
+import { formatLocalIsoTimestamp } from "../_shared/runtime";
 
 interface GraphNode {
   title: string;
@@ -202,7 +203,7 @@ export async function buildGraphSnapshot(
     .sort();
 
   return {
-    built_at: new Date().toISOString(),
+    built_at: formatLocalIsoTimestamp(),
     git_head: await gitHead(root),
     stale: false,
     nodes,

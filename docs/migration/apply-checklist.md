@@ -5,11 +5,11 @@
 ## Safety invariants
 
 - `extensions/memory/` remains read-only for canonical markdown entries.
-  - It may generate migration reports only under `.pensieve/.state/`.
+  - It may generate migration reports only under `.pi-astack/memory/`.
 - Canonical markdown migration writes go through `extensions/sediment/migration.ts` only.
 - One apply command migrates exactly one source file.
-- Every apply creates a backup under `.pensieve/.state/migration-backups/<timestamp>/...` before writing the target.
-- `--restore` only restores from `.pensieve/.state/migration-backups/`.
+- Every apply creates a backup under `.pi-astack/sediment/migration-backups/<timestamp>/...` before writing the target.
+- `--restore` only restores from `.pi-astack/sediment/migration-backups/`.
 - If a migrated target has been manually edited, restore must reject with `target_modified` and must not delete the target.
 - Automatic LLM memory writing remains separate from migration apply and is not enabled by this workflow.
 
@@ -34,7 +34,7 @@ Record the current status before changing files. Warnings are acceptable for kno
 This writes:
 
 ```text
-.pensieve/.state/migration-report.md
+.pi-astack/memory/migration-report.md
 ```
 
 The report is generated state, not canonical knowledge. It should include one `Plan Command` and one `Apply Command` per migration item.

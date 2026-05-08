@@ -50,7 +50,7 @@ function assertNoLegacyPackageScope() {
 
 function transpileExtensions(outRoot) {
   const extRoot = path.join(repoRoot, "extensions");
-  const dirs = ["memory", "sediment"];
+  const dirs = ["_shared", "memory", "sediment"];
   let count = 0;
   for (const dir of dirs) {
     const srcDir = path.join(extRoot, dir);
@@ -211,8 +211,8 @@ Body.
     assert(legacyPlan?.plan_command === "/sediment migrate-one --plan .pensieve/short-term/maxims/legacy.md", "migration plan command missing");
     assert(legacyPlan?.apply_command === "/sediment migrate-one --apply --yes .pensieve/short-term/maxims/legacy.md", "migration apply command missing");
     const migrationReport = await writeMigrationReport(path.join(root, ".pensieve"), migration, root);
-    const migrationReportText = fs.readFileSync(path.join(root, ".pensieve", ".state", "migration-report.md"), "utf-8");
-    assert(fs.existsSync(path.join(root, ".pensieve", ".state", "migration-report.md")), "migration report not written");
+    const migrationReportText = fs.readFileSync(path.join(root, ".pi-astack", "memory", "migration-report.md"), "utf-8");
+    assert(fs.existsSync(path.join(root, ".pi-astack", "memory", "migration-report.md")), "migration report not written");
     assert(migrationReportText.includes("Suggested Single-File Workflow"), "migration report missing workflow guidance");
     assert(migrationReportText.includes("/sediment migrate-one --plan .pensieve/short-term/maxims/legacy.md"), "migration report missing plan command");
     assert(migrationReportText.includes("/sediment migrate-one --apply --yes .pensieve/short-term/maxims/legacy.md"), "migration report missing apply command");
@@ -385,7 +385,7 @@ END_MEMORY`;
     const llmSummary = summarizeLlmExtractorDryRun({ ok: true, model: "x/y", rawText: "SKIP", extraction: { count: 0, drafts: [] } }, { maxCandidates: 3, rawPreviewChars: 10 });
     assert(llmSummary.quality.reason === "skip" && llmSummary.quality.passed, "llm summary skip gate failed");
 
-    writeFile(path.join(root, ".pensieve", ".state", "sediment-events.jsonl"), JSON.stringify({
+    writeFile(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), JSON.stringify({
       timestamp: "2026-05-08T00:00:00Z",
       operation: "llm_dry_run",
       llm: { ok: true, model: "x/y", quality: { passed: true, reason: "skip", candidateCount: 0, validationErrorCount: 0, invalidCandidateCount: 0 } },

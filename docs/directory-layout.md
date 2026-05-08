@@ -120,7 +120,7 @@ v7 markdown+git 记忆架构的只读 Facade。注册 4 个 LLM-facing 工具：
 Human-facing 命令：
 - `/memory lint [path]`：执行 T1-T10 Timeline/frontmatter lint，不注册为 LLM tool
 - `/memory doctor-lite [path]`：汇总 lint / graph / index / migration / sediment dry-run 状态
-- `/memory migrate --dry-run [--report] [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划；`--report` 写 `.state/migration-report.md`
+- `/memory migrate --dry-run [--report] [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划；`--report` 写 `.pi-astack/memory/migration-report.md`
 - `/memory check-backlinks [path]`：in-memory 构建 graph snapshot，报告 dead links 与缺失 symmetric backlinks
 - `/memory rebuild --graph [path]`：写入 derived graph index（project: `.index/graph.json`；world: `.state/index/graph.json`）
 - `/memory rebuild --index [path]`：写入 generated markdown index（`_index.md`）
@@ -170,6 +170,31 @@ OpenAI Responses API 生图。复用用户已有的 openai provider 配置（key
 配置：`pi-astack-settings.json → modelFallback.fallbackModels`
 
 旧名：`retry-stream-eof` → `retry-all-errors` → `model-fallback`
+
+## 运行态产出布局（`.pi-astack/`）
+
+所有运行态状态、审计日志、锁、迁移备份统一归集到 `<projectRoot>/.pi-astack/<module>/`。`.pensieve/` 只装 canonical markdown 知识库 + 可浏览的 derived view（`_index.md`、`.index/graph.json`）。
+
+```
+<projectRoot>/
+├── .pi-astack/
+│   ├── imagine/                     # 生成的 PNG
+│   ├── sediment/
+│   │   ├── audit.jsonl              # JSONL；v2 schema：本地 TZ + audit_version + pid + project_root + settings_snapshot + entry_breakdown + parser_version + stage_ms
+│   │   ├── checkpoint.json          # 上次处理过的 entry_id
+│   │   ├── locks/                   # ephemeral 文件锁
+│   │   └── migration-backups/<ts>/  # /sediment migrate-one --apply 前的备份
+│   └── memory/
+│       └── migration-report.md      # /memory migrate --dry-run --report 输出
+└── .pensieve/
+    ├── decisions/ knowledge/ maxims/ pipelines/  # canonical markdown
+    ├── _index.md                                  # auto-generated TOC
+    └── .index/graph.json                          # auto-generated graph
+```
+
+**迁移**（一次性）：首次 `appendAudit` / `loadCheckpoint` 调用会检测 legacy `.pensieve/.state/sediment-events.jsonl` / `sediment-checkpoint.json`，如存在则 `rename` 到新位置。两边都存在时 audit 按追加合并，checkpoint 保留 canonical。
+
+**时间戳**：所有 audit / checkpoint / generated report 的时间戳都是带本地时区偏移的 ISO 8601（例 `2026-05-08T14:23:19.436+08:00`），不再用 UTC `Z` 后缀。
 
 ## 配置
 

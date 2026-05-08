@@ -9,6 +9,9 @@ import { sanitizeForMemory } from "./sanitizer";
 import { type EntryKind, type EntryStatus, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
 import { normalizeBareSlug, slugify } from "../memory/utils";
+import { ensureSedimentLegacyMigrated, formatLocalIsoTimestamp, sedimentAuditPath, sedimentLocksDir } from "../_shared/runtime";
+
+const AUDIT_SCHEMA_VERSION = 2;
 
 const execFileAsync = promisify(execFile);
 
@@ -136,7 +139,7 @@ function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: s
 }
 
 async function acquireLock(projectRoot: string, timeoutMs: number): Promise<LockHandle> {
-  const lockDir = path.join(projectRoot, ".pensieve", ".state", "locks");
+  const lockDir = sedimentLocksDir(projectRoot);
   const lockPath = path.join(lockDir, "sediment.lock");
   await fs.mkdir(lockDir, { recursive: true });
 
@@ -144,7 +147,7 @@ async function acquireLock(projectRoot: string, timeoutMs: number): Promise<Lock
   while (true) {
     try {
       const handle = await fs.open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ pid: process.pid, created_at: new Date().toISOString() }));
+      await handle.writeFile(JSON.stringify({ pid: process.pid, created_at: formatLocalIsoTimestamp() }));
       await handle.close();
       return {
         async release() {
@@ -179,9 +182,22 @@ async function gitCommit(projectRoot: string, filePath: string, slug: string): P
 }
 
 export async function appendAudit(projectRoot: string, event: Record<string, unknown>): Promise<string> {
-  const auditPath = path.join(projectRoot, ".pensieve", ".state", "sediment-events.jsonl");
+  await ensureSedimentLegacyMigrated(projectRoot);
+  const auditPath = sedimentAuditPath(projectRoot);
   await fs.mkdir(path.dirname(auditPath), { recursive: true });
-  await fs.appendFile(auditPath, `${JSON.stringify({ timestamp: new Date().toISOString(), ...event })}\n`, "utf-8");
+  // Schema v2 enrichment: every audit row carries the local-tz timestamp
+  // plus standard execution context (PID, project root) so that ad-hoc
+  // analysis on the JSONL doesn't need to cross-reference other sources.
+  // Per-operation fields from `event` are spread last so callers can
+  // override anything (rarely needed).
+  const enriched = {
+    timestamp: formatLocalIsoTimestamp(),
+    audit_version: AUDIT_SCHEMA_VERSION,
+    pid: process.pid,
+    project_root: path.resolve(projectRoot),
+    ...event,
+  };
+  await fs.appendFile(auditPath, `${JSON.stringify(enriched)}\n`, "utf-8");
   return auditPath;
 }
 

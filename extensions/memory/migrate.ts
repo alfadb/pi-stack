@@ -13,6 +13,7 @@ import {
 } from "./parser";
 import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_FIELDS } from "./lint";
 import { clamp, normalizeBareSlug, prettyPath, stableUnique, titleFromSlug, throwIfAborted } from "./utils";
+import { formatLocalIsoTimestamp, memoryMigrationReportPath } from "../_shared/runtime";
 
 export interface MigrationPlanItem {
   source_path: string;
@@ -239,7 +240,7 @@ export function formatMigrationReportMarkdown(report: MigrationPlanReport): stri
   const lines: string[] = [
     "# Memory Migration Dry-Run Report",
     "",
-    `> Generated ${new Date().toISOString()} | target: \`${report.target}\``,
+    `> Generated ${formatLocalIsoTimestamp()} | target: \`${report.target}\``,
     "",
     "## Summary",
     "",
@@ -319,7 +320,10 @@ export async function writeMigrationReport(
   cwd = process.cwd(),
 ): Promise<MigrationReportWriteResult> {
   const projectRoot = inferProjectRoot(path.resolve(target));
-  const reportPath = path.join(projectRoot, ".state", "migration-report.md");
+  // The pensieve target lives at <projectRoot>/.pensieve; one-up to the
+  // pi-astack project root for the runtime artifact path.
+  const piAstackProjectRoot = path.dirname(projectRoot);
+  const reportPath = memoryMigrationReportPath(piAstackProjectRoot);
   await atomicWrite(reportPath, formatMigrationReportMarkdown(report));
   return {
     report_path: prettyPath(reportPath, cwd),

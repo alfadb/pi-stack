@@ -18,6 +18,7 @@ import type { Model } from "@earendil-works/pi-ai";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { formatLocalIsoTimestamp } from "../_shared/runtime";
 
 // ── Constants ─────────────────────────────────────────────────
 
@@ -97,7 +98,7 @@ function canaryLog(line: string): void {
 		} catch {
 			/* file doesn't exist */
 		}
-		fs.appendFileSync(CANARY_LOG_PATH, `${new Date().toISOString()} ${line}\n`);
+		fs.appendFileSync(CANARY_LOG_PATH, `${formatLocalIsoTimestamp()} ${line}\n`);
 	} catch {
 		/* best-effort */
 	}

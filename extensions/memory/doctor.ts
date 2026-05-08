@@ -7,6 +7,7 @@ import { lintTarget } from "./lint";
 import { planMigrationDryRun } from "./migrate";
 import { prettyPath } from "./utils";
 import { listMigrationBackups, type MigrationBackupItem } from "../sediment/migration";
+import { sedimentAuditPath } from "../_shared/runtime";
 
 export interface DoctorLiteReport {
   target: string;
@@ -75,7 +76,10 @@ function projectRootForPensieveRoot(root: string): string | undefined {
 }
 
 async function readLlmDryRunStats(root: string) {
-  const file = path.join(root, ".state", "sediment-events.jsonl");
+  // root may be either a `.pensieve` directory or a project root; resolve
+  // to the project root before computing the .pi-astack/sediment audit path.
+  const projectRoot = path.basename(root) === ".pensieve" ? path.dirname(root) : root;
+  const file = sedimentAuditPath(projectRoot);
   const stats = {
     llmDryRunCount: 0,
     llmDryRunPass: 0,

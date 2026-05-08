@@ -21,6 +21,12 @@ import { clamp, normalizeBareSlug, slugify, titleFromSlug } from "../memory/util
 import type { SedimentSettings } from "./settings";
 import { sanitizeForMemory } from "./sanitizer";
 import { appendAudit } from "./writer";
+import {
+  formatLocalIsoTimestamp,
+  localTimestampForFilename,
+  sedimentLocksDir,
+  sedimentMigrationBackupsDir,
+} from "../_shared/runtime";
 
 const execFileAsync = promisify(execFile);
 
@@ -119,7 +125,7 @@ function todayIso(): string {
 }
 
 function timestampSlug(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
+  return localTimestampForFilename();
 }
 
 function yamlString(value: string): string {
@@ -189,7 +195,10 @@ function isInside(root: string, abs: string): boolean {
 
 function backupPath(pensieveRoot: string, sourcePath: string): string {
   const rel = path.relative(pensieveRoot, sourcePath);
-  return path.join(pensieveRoot, ".state", "migration-backups", timestampSlug(), rel);
+  // pensieveRoot = <projectRoot>/.pensieve; backups now live under
+  // <projectRoot>/.pi-astack/sediment/migration-backups/<ts>/<rel>.
+  const projectRoot = path.dirname(pensieveRoot);
+  return path.join(sedimentMigrationBackupsDir(projectRoot), timestampSlug(), rel);
 }
 
 function restoreCommand(backupRelPath: string): string {
@@ -197,7 +206,7 @@ function restoreCommand(backupRelPath: string): string {
 }
 
 async function acquireLock(projectRoot: string, timeoutMs: number): Promise<LockHandle> {
-  const lockDir = path.join(projectRoot, ".pensieve", ".state", "locks");
+  const lockDir = sedimentLocksDir(projectRoot);
   const lockPath = path.join(lockDir, "sediment.lock");
   await fs.mkdir(lockDir, { recursive: true });
 
@@ -205,7 +214,7 @@ async function acquireLock(projectRoot: string, timeoutMs: number): Promise<Lock
   while (true) {
     try {
       const handle = await fs.open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ pid: process.pid, created_at: new Date().toISOString(), op: "migrate-one" }));
+      await handle.writeFile(JSON.stringify({ pid: process.pid, created_at: formatLocalIsoTimestamp(), op: "migrate-one" }));
       await handle.close();
       return { release: async () => { await fs.unlink(lockPath).catch(() => undefined); } };
     } catch (e: any) {
@@ -321,17 +330,17 @@ async function readTextIfExists(file: string): Promise<string | undefined> {
 }
 
 function backupTimestampFromPath(projectRoot: string, backupPath: string): string {
-  const backupsRoot = path.join(projectRoot, ".pensieve", ".state", "migration-backups");
+  const backupsRoot = sedimentMigrationBackupsDir(projectRoot);
   const rel = path.relative(backupsRoot, backupPath);
   return rel.split(path.sep).filter(Boolean)[0] || "unknown";
 }
 
 function backupRestorePaths(projectRoot: string, backupInput: string): { backupPath: string; originalRel: string; originalPath: string } {
   const pensieveRoot = path.join(projectRoot, ".pensieve");
-  const backupsRoot = path.join(pensieveRoot, ".state", "migration-backups");
+  const backupsRoot = sedimentMigrationBackupsDir(projectRoot);
   const backupPath = path.resolve(projectRoot, backupInput);
   if (!isInside(backupsRoot, backupPath)) {
-    throw new Error("backup must be inside .pensieve/.state/migration-backups");
+    throw new Error("backup must be inside .pi-astack/sediment/migration-backups");
   }
 
   const rel = path.relative(backupsRoot, backupPath);
@@ -566,7 +575,7 @@ export async function listMigrationBackups(
   limit = 20,
 ): Promise<ListMigrationBackupsResult> {
   const projectRoot = path.resolve(projectRootRaw);
-  const backupsRoot = path.join(projectRoot, ".pensieve", ".state", "migration-backups");
+  const backupsRoot = sedimentMigrationBackupsDir(projectRoot);
   const backupRootDisplay = path.relative(projectRoot, backupsRoot) || backupsRoot;
   const safeLimit = Math.max(1, Math.min(100, Math.floor(Number.isFinite(limit) ? limit : 20)));
   const files = await walkBackupMarkdownFiles(backupsRoot);

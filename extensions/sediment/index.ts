@@ -237,12 +237,29 @@ export default function (pi: ExtensionAPI) {
     const settings = resolveSedimentSettings();
     if (!settings.enabled) return;
 
+    // Capture everything we need from `ctx` SYNCHRONOUSLY before the first
+    // await. pi may invalidate ctx ("stale ctx") if newSession/fork/reload
+    // happens during our async work; touching ctx after invalidation
+    // throws "Extension error: stale ctx". Capturing values upfront makes
+    // the rest of the handler ctx-independent.
     const cwd = path.resolve(ctx.cwd || process.cwd());
     if (!hasPensieve(cwd) || !ctx.sessionManager?.getBranch) return;
+    let branch: unknown[];
+    try {
+      branch = ctx.sessionManager.getBranch();
+    } catch {
+      // ctx already stale at hook entry — skip silently.
+      return;
+    }
+    const notify = ctx.ui?.notify?.bind(ctx.ui);
 
+    const tStart = Date.now();
     const checkpoint = await loadCheckpoint(cwd);
-    const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
+    const window = buildRunWindow(branch, checkpoint, settings);
+    const tWindowBuilt = Date.now();
     const summary = checkpointSummary(window);
+    const settingsSnapshot = snapshotSedimentSettings(settings);
+    const entryBreakdown = countEntryTypes(window.entries);
 
     if (window.skipReason || !window.lastEntryId) {
       if (window.lastEntryId) await saveCheckpoint(cwd, { lastProcessedEntryId: window.lastEntryId });
@@ -251,12 +268,18 @@ export default function (pi: ExtensionAPI) {
         reason: window.skipReason ?? "no_last_entry",
         ...summary,
         extractor: "explicit_marker",
+        parser_version: PARSER_VERSION,
+        settings_snapshot: settingsSnapshot,
+        entry_breakdown: entryBreakdown,
+        stage_ms: { window_build: tWindowBuilt - tStart, parse: 0, write_total: 0, total: Date.now() - tStart },
         checkpoint_advanced: !!window.lastEntryId,
       });
       return;
     }
 
+    const tParseStart = Date.now();
     const drafts = parseExplicitMemoryBlocks(window.text);
+    const tParseEnd = Date.now();
     if (drafts.length === 0) {
       await saveCheckpoint(cwd, { lastProcessedEntryId: window.lastEntryId });
       await appendAudit(cwd, {
@@ -264,11 +287,16 @@ export default function (pi: ExtensionAPI) {
         reason: "no_explicit_memory_markers",
         ...summary,
         extractor: "explicit_marker",
+        parser_version: PARSER_VERSION,
+        settings_snapshot: settingsSnapshot,
+        entry_breakdown: entryBreakdown,
+        stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: 0, total: Date.now() - tStart },
         checkpoint_advanced: true,
       });
       return;
     }
 
+    const tWriteStart = Date.now();
     const results: WriteProjectEntryResult[] = [];
     for (const draft of drafts) {
       results.push(await writeProjectEntry({
@@ -277,6 +305,7 @@ export default function (pi: ExtensionAPI) {
         timelineNote: draft.timelineNote || "captured from explicit MEMORY block",
       }, { projectRoot: cwd, settings, dryRun: false }));
     }
+    const tWriteEnd = Date.now();
 
     const shouldAdvance = shouldAdvanceAfterResults(results);
     if (shouldAdvance) await saveCheckpoint(cwd, { lastProcessedEntryId: window.lastEntryId });
@@ -284,14 +313,60 @@ export default function (pi: ExtensionAPI) {
       operation: "explicit_extract",
       ...summary,
       extractor: "explicit_marker",
+      parser_version: PARSER_VERSION,
+      settings_snapshot: settingsSnapshot,
+      entry_breakdown: entryBreakdown,
       candidate_count: drafts.length,
-      results: results.map((result) => ({ status: result.status, slug: result.slug, reason: result.reason })),
+      candidates: drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
+      results: results.map((result) => ({ status: result.status, slug: result.slug, reason: result.reason, path: result.path, lintErrors: result.lintErrors, lintWarnings: result.lintWarnings, gitCommit: result.gitCommit })),
+      stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: tWriteEnd - tWriteStart, total: Date.now() - tStart },
       checkpoint_advanced: shouldAdvance,
     });
 
-    ctx.ui?.notify?.(
-      `Sediment explicit marker extraction: ${results.map((r) => `${r.slug}:${r.status}${r.reason ? `(${r.reason})` : ""}`).join(", ")}`,
-      shouldAdvance ? "info" : "warning",
-    );
+    // Use captured `notify` (ctx.ui.notify pre-bound) rather than ctx.ui
+    // directly, so a late ctx invalidation does not throw here.
+    if (notify) {
+      try {
+        notify(
+          `Sediment explicit marker extraction: ${results.map((r) => `${r.slug}:${r.status}${r.reason ? `(${r.reason})` : ""}`).join(", ")}`,
+          shouldAdvance ? "info" : "warning",
+        );
+      } catch {
+        // notify against a stale ui is best-effort; the audit is the
+        // canonical record.
+      }
+    }
   });
 }
+
+/** Compact subset of SedimentSettings safe to embed in every audit row. */
+function snapshotSedimentSettings(settings: ReturnType<typeof resolveSedimentSettings>) {
+  return {
+    enabled: settings.enabled,
+    autoLlmWriteEnabled: settings.autoLlmWriteEnabled,
+    extractorModel: settings.extractorModel,
+    defaultConfidence: settings.defaultConfidence,
+    maxWindowChars: settings.maxWindowChars,
+    maxWindowEntries: settings.maxWindowEntries,
+  };
+}
+
+/** Tally entry types within the included window for at-a-glance diagnostics. */
+function countEntryTypes(entries: unknown[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const e of entries) {
+    if (!e || typeof e !== "object") continue;
+    const obj = e as Record<string, unknown>;
+    let key = typeof obj.type === "string" ? obj.type : "unknown";
+    if (key === "message" && obj.message && typeof obj.message === "object") {
+      const role = (obj.message as Record<string, unknown>).role;
+      if (typeof role === "string") key = `message/${role}`;
+    }
+    counts[key] = (counts[key] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/** Identifier of the parser-version producing this audit row.
+ *  Bumped whenever the parser semantics change (e.g., fence-awareness). */
+const PARSER_VERSION = "fence_aware_v1";

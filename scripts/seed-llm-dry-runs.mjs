@@ -9,7 +9,7 @@
  * command is unavailable. This script bypasses the pi runtime ModelRegistry by
  * resolving pi-ai's getModel + streamSimple directly, runs the same prompt /
  * parser / summary code paths, and appends `llm_dry_run` events to
- * `.pensieve/.state/sediment-events.jsonl` (the audit log doctor-lite reads).
+ * `.pi-astack/sediment/audit.jsonl` (the audit log doctor-lite reads).
  *
  * Usage:
  *
@@ -145,7 +145,7 @@ const settings = {
 };
 
 console.log(`Running ${WINDOWS.length} dry-run samples against ${baseModel.provider}/${baseModel.id} via sub2api...`);
-console.log(`Audit log: ${path.relative(projectRoot, path.join(projectRoot, ".pensieve", ".state", "sediment-events.jsonl"))}`);
+console.log(`Audit log: ${path.relative(projectRoot, path.join(projectRoot, ".pi-astack", "sediment", "audit.jsonl"))}`);
 console.log();
 
 const startedAll = Date.now();

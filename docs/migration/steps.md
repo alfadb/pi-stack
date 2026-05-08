@@ -171,7 +171,7 @@ memory_search(query: "dispatch agent prompt")
 **实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/checkpoint.ts` 已实现 checkpoint + run window builder；`extensions/sediment/extractor.ts` 已实现 deterministic explicit `MEMORY:` block extractor；`extensions/sediment/llm-extractor.ts` 已实现 `/sediment llm --dry-run` 的 prompt + model call + parser；`extensions/sediment/index.ts` 注册 `/sediment status`、`/sediment window --dry-run`、`/sediment extract --dry-run`、`/sediment llm --dry-run`、`/sediment dedupe --title` 与 `/sediment smoke --dry-run`。`agent_end` hook 默认 disabled；启用后仅处理显式 `MEMORY:` block，成功/terminal skip 后推进 checkpoint。
 
 已完成 checkpoint/window substrate：
-- checkpoint path：`.pensieve/.state/sediment-checkpoint.json`
+- checkpoint path：`.pi-astack/sediment/checkpoint.json`
 - `buildRunWindow(branch, checkpoint)`：从 `ctx.sessionManager.getBranch()` 取 checkpoint 之后的新 entries
 - compaction/branch fallback：checkpoint entry 找不到时只取最新 entry，避免重放全历史
 - window budget：`minWindowChars` / `maxWindowChars` / `maxWindowEntries`
@@ -182,10 +182,10 @@ memory_search(query: "dispatch agent prompt")
 - sanitize：credential pattern 命中 fail-closed；`$HOME` 路径替换；IP/email redact
 - deterministic dedupe：slug 精确相等 + 标题 trigram Jaccard ≥ 0.7，命中则 reject duplicate
 - lint：写前调用 T1-T10 lint，error 阻断写入
-- lock：`.pensieve/.state/locks/sediment.lock`，超时可配置
+- lock：`.pi-astack/sediment/locks/sediment.lock`，超时可配置
 - write：tmp → rename 原子写入 markdown
 - git：best-effort `git add` + `git commit`，失败不回滚 markdown
-- audit：追加 `.pensieve/.state/sediment-events.jsonl`
+- audit：追加 `.pi-astack/sediment/audit.jsonl`（v2 schema：本地 TZ 时间戳 + audit_version + pid + project_root + settings_snapshot + entry_breakdown + parser_version + stage_ms；从 `.pensieve/.state/sediment-events.jsonl` 在首次 appendAudit 调用时自动迁移）
 
 已完成 deterministic extractor stub：
 - 仅识别显式 block，不从普通对话中猜测
@@ -198,7 +198,7 @@ memory_search(query: "dispatch agent prompt")
 - `/sediment llm --dry-run` 调用 `sediment.extractorModel`（默认 `deepseek/deepseek-v4-pro`）
 - 输出仅解析 `MEMORY:` blocks / `SKIP`
 - 不写 markdown，不推进 checkpoint
-- 写入 audit：`.pensieve/.state/sediment-events.jsonl` 的 `llm_dry_run` 事件
+- 写入 audit：`.pi-astack/sediment/audit.jsonl` 的 `llm_dry_run` 事件
 - quality gate：`skip` / `valid_candidates` pass；`model_error` / `unparseable_output` / `validation_errors` / `too_many_candidates` fail/warn
 - raw output 只存 SHA-256 + 截断 preview（默认 1000 chars）
 - `/sediment llm-report [--limit N]` 汇总最近 `llm_dry_run` 质量样本
@@ -212,11 +212,11 @@ memory_search(query: "dispatch agent prompt")
 - `/sediment migration-backups [--limit N]`：只读列出最近 backup、restore command 与当前 state（restorable / target_modified / already_restored 等）
 - source 必须位于 `.pensieve/` 内且不是 `.state/.index/pipelines`
 - target 已存在则拒绝
-- 迁移前 backup 到 `.pensieve/.state/migration-backups/<timestamp>/...`
+- 迁移前 backup 到 `.pi-astack/sediment/migration-backups/<timestamp>/...`
 - apply 成功返回可复制的 `restore_command: /sediment migrate-one --restore <backup> --yes`
 - 生成 schema v1 markdown 后先 lint，error 则拒绝
 - tmp → rename 原子写入；移动场景写 target 后删除 source；不删除空目录
-- audit 到 `.pensieve/.state/sediment-events.jsonl`
+- audit 到 `.pi-astack/sediment/audit.jsonl`
 - 成功后自动重建 `.pensieve/.index/graph.json` 与 `.pensieve/_index.md`；derived rebuild 失败不会回滚已完成迁移/恢复，但会写入返回值/audit
 
 待实现完整 pipeline：

@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
 import type { SedimentSettings } from "./settings";
+import { ensureSedimentLegacyMigrated, formatLocalIsoTimestamp, sedimentCheckpointPath } from "../_shared/runtime";
 
 export interface SedimentCheckpoint {
   lastProcessedEntryId?: string;
@@ -23,10 +24,11 @@ export interface RunWindow {
 }
 
 export function checkpointPath(projectRoot: string): string {
-  return path.join(projectRoot, ".pensieve", ".state", "sediment-checkpoint.json");
+  return sedimentCheckpointPath(projectRoot);
 }
 
 export async function loadCheckpoint(projectRoot: string): Promise<SedimentCheckpoint> {
+  await ensureSedimentLegacyMigrated(projectRoot);
   try {
     return JSON.parse(await fs.readFile(checkpointPath(projectRoot), "utf-8"));
   } catch {
@@ -38,7 +40,7 @@ export async function saveCheckpoint(projectRoot: string, checkpoint: SedimentCh
   const file = checkpointPath(projectRoot);
   await fs.mkdir(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp-${process.pid}-${Date.now()}`;
-  await fs.writeFile(tmp, `${JSON.stringify({ ...checkpoint, updatedAt: new Date().toISOString() }, null, 2)}\n`, "utf-8");
+  await fs.writeFile(tmp, `${JSON.stringify({ ...checkpoint, updatedAt: formatLocalIsoTimestamp() }, null, 2)}\n`, "utf-8");
   await fs.rename(tmp, file);
 }
 

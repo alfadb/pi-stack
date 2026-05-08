@@ -6,6 +6,7 @@ import type { MemoryEntry, Scope } from "./types";
 import { scanStore } from "./parser";
 import { buildGraphSnapshot } from "./graph";
 import { prettyPath } from "./utils";
+import { formatLocalIsoTimestamp } from "../_shared/runtime";
 
 export interface MarkdownIndexRebuildReport {
   target: string;
@@ -118,7 +119,7 @@ export async function buildMarkdownIndex(
   const lines: string[] = [
     inferScope(root) === "world" ? "# World Knowledge Index" : "# Project Knowledge Index",
     "",
-    `> Auto-generated ${new Date().toISOString()} | ${entries.length} entries`,
+    `> Auto-generated ${formatLocalIsoTimestamp()} | ${entries.length} entries`,
     "",
     "## By Kind",
     "",

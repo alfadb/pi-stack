@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { sedimentAuditPath } from "../_shared/runtime";
 
 export interface LlmDryRunReportItem {
   timestamp?: string;
@@ -45,7 +46,7 @@ export interface LlmAutoWriteReadiness {
 }
 
 export function auditPath(projectRoot: string): string {
-  return path.join(projectRoot, ".pensieve", ".state", "sediment-events.jsonl");
+  return sedimentAuditPath(projectRoot);
 }
 
 function parseLimit(value: number | undefined): number {
