@@ -175,8 +175,15 @@ Body.
 `);
     const migration = await planMigrationDryRun(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(migration.migrateCount >= 1, "migration dry-run found no pending entries");
+    const legacyPlan = migration.items.find((item) => item.source_path === ".pensieve/short-term/maxims/legacy.md");
+    assert(legacyPlan?.plan_command === "/sediment migrate-one --plan .pensieve/short-term/maxims/legacy.md", "migration plan command missing");
+    assert(legacyPlan?.apply_command === "/sediment migrate-one --apply --yes .pensieve/short-term/maxims/legacy.md", "migration apply command missing");
     const migrationReport = await writeMigrationReport(path.join(root, ".pensieve"), migration, root);
+    const migrationReportText = fs.readFileSync(path.join(root, ".pensieve", ".state", "migration-report.md"), "utf-8");
     assert(fs.existsSync(path.join(root, ".pensieve", ".state", "migration-report.md")), "migration report not written");
+    assert(migrationReportText.includes("Suggested Single-File Workflow"), "migration report missing workflow guidance");
+    assert(migrationReportText.includes("/sediment migrate-one --plan .pensieve/short-term/maxims/legacy.md"), "migration report missing plan command");
+    assert(migrationReportText.includes("/sediment migrate-one --apply --yes .pensieve/short-term/maxims/legacy.md"), "migration report missing apply command");
     assert(migrationReport.migrateCount === migration.migrateCount, "migration report count mismatch");
 
     const migratePlanned = await migrateOne(".pensieve/short-term/maxims/legacy.md", {

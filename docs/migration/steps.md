@@ -74,7 +74,7 @@
 - 缺失 timeline：迁移时生成初始 timeline 行
 - 迁移前自动 git commit 当前状态（可回滚）
 - 支持 `--dry-run`
-- 支持 `--report` 写入 `.pensieve/.state/migration-report.md`（generated artifact）
+- 支持 `--report` 写入 `.pensieve/.state/migration-report.md`（generated artifact）；report 每个 migration item 都包含推荐的 `/sediment migrate-one --plan ...` 与 `/sediment migrate-one --apply --yes ...` 命令
 
 **当前验收**：
 ```text
@@ -82,7 +82,7 @@
 # → 显示迁移计划，不修改 markdown 条目
 
 /memory migrate --dry-run --report .pensieve
-# → 写入 .pensieve/.state/migration-report.md，便于人工审查
+# → 写入 .pensieve/.state/migration-report.md，便于人工审查；每项都带 plan/apply 单文件命令
 ```
 
 **plan/apply 验收（单文件）**：

@@ -24,6 +24,8 @@ export interface MigrationPlanItem {
   confidence: number;
   reasons: string[];
   actions: string[];
+  plan_command: string;
+  apply_command: string;
 }
 
 export interface MigrationSkipItem {
@@ -128,6 +130,8 @@ async function planMigrationForFile(
   );
   const created = scalarString(frontmatter.created);
   const targetPath = legacyTargetPath(file, projectRoot, relPath, slug);
+  const sourceDisplay = prettyPath(file, cwd);
+  const targetDisplay = prettyPath(targetPath, cwd);
 
   const reasons: string[] = [];
   const actions: string[] = [];
@@ -142,11 +146,11 @@ async function planMigrationForFile(
   if (targetPath !== file) reasons.push("legacy path layout");
 
   if (reasons.length === 0) {
-    return { skipped: { source_path: prettyPath(file, cwd), reason: "already schema_version v1-compatible" } };
+    return { skipped: { source_path: sourceDisplay, reason: "already schema_version v1-compatible" } };
   }
 
   actions.push(`write frontmatter schema_version: 1, scope: project, kind: ${kind}, confidence: ${confidence}`);
-  if (targetPath !== file) actions.push(`move/rename to ${prettyPath(targetPath, cwd)}`);
+  if (targetPath !== file) actions.push(`move/rename to ${targetDisplay}`);
   if (area.shortTerm) {
     const expires = addDaysIso(created, settings.shortTermTtlDays);
     actions.push(`add lifetime.kind: ttl, lifetime.expires_at: ${expires} (${settings.shortTermTtlDays}d)`);
@@ -159,8 +163,8 @@ async function planMigrationForFile(
 
   return {
     item: {
-      source_path: prettyPath(file, cwd),
-      target_path: prettyPath(targetPath, cwd),
+      source_path: sourceDisplay,
+      target_path: targetDisplay,
       slug,
       title,
       kind,
@@ -168,6 +172,8 @@ async function planMigrationForFile(
       confidence,
       reasons: stableUnique(reasons),
       actions,
+      plan_command: `/sediment migrate-one --plan ${sourceDisplay}`,
+      apply_command: `/sediment migrate-one --apply --yes ${sourceDisplay}`,
     },
   };
 }
@@ -258,12 +264,18 @@ export function formatMigrationReportMarkdown(report: MigrationPlanReport): stri
   }
   if (Object.keys(reasonCounts).length === 0) lines.push("- None");
 
+  lines.push("", "## Suggested Single-File Workflow", "");
+  lines.push("1. Pick one migration item from the table below.");
+  lines.push("2. Run its `Plan Command` and review target/frontmatter/body preview.");
+  lines.push("3. Only after review, run its `Apply Command`.");
+  lines.push(`4. Re-run \`/memory migrate --dry-run --report ${report.target}\` after each apply to refresh the queue.`);
+
   lines.push("", "## Migration Items", "");
   if (report.items.length === 0) {
     lines.push("- None");
   } else {
-    lines.push("| Source | Target | Title | Kind | Confidence | Reasons | Actions |");
-    lines.push("|---|---|---|---:|---:|---|---|");
+    lines.push("| Source | Target | Title | Kind | Confidence | Reasons | Actions | Plan Command | Apply Command |");
+    lines.push("|---|---|---|---:|---:|---|---|---|---|");
     for (const item of report.items) {
       lines.push([
         markdownCell(item.source_path),
@@ -273,6 +285,8 @@ export function formatMigrationReportMarkdown(report: MigrationPlanReport): stri
         String(item.confidence),
         markdownCell(item.reasons.join(", ")),
         markdownCell(item.actions.join("; ")),
+        markdownCell(`\`${item.plan_command}\``),
+        markdownCell(`\`${item.apply_command}\``),
       ].join(" | ").replace(/^/, "| ").replace(/$/, " |"));
     }
   }
@@ -317,7 +331,7 @@ export async function writeMigrationReport(
 export function formatMigrationPlan(report: MigrationPlanReport, maxItems = 12): string {
   const lines: string[] = [
     `Memory migrate dry-run: ${report.migrateCount} file(s) need migration, ${report.skippedCount} skipped, ${report.filesScanned} scanned`,
-    "Actual writes are intentionally not available in this read-only extension; sediment/migration writer must apply the plan.",
+    "Actual writes are intentionally not available in this read-only extension; use /sediment migrate-one --plan before /sediment migrate-one --apply --yes.",
   ];
 
   if (report.items.length === 0) return lines.join("\n");
@@ -328,6 +342,8 @@ export function formatMigrationPlan(report: MigrationPlanReport, maxItems = 12):
     lines.push(`  slug=${item.slug} kind=${item.kind} status=${item.status} confidence=${item.confidence}`);
     lines.push(`  reasons: ${item.reasons.join(", ")}`);
     lines.push(`  actions: ${item.actions.join("; ")}`);
+    lines.push(`  plan: ${item.plan_command}`);
+    lines.push(`  apply: ${item.apply_command}`);
   }
   if (report.items.length > maxItems) {
     lines.push(`- ... ${report.items.length - maxItems} more migration item(s) omitted`);
