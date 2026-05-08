@@ -1,5 +1,5 @@
 import type { ProjectEntryDraft } from "./writer";
-import { validateProjectEntryDraft } from "./validation";
+import { type DraftPolicy, validateProjectEntryDraft } from "./validation";
 
 export interface ExtractedMemoryDraft extends ProjectEntryDraft {
   markerIndex: number;
@@ -108,7 +108,7 @@ export function parseExplicitMemoryBlocks(text: string): ExtractedMemoryDraft[] 
   return out;
 }
 
-export function previewExtraction(drafts: ExtractedMemoryDraft[]): ExtractionPreview {
+export function previewExtraction(drafts: ExtractedMemoryDraft[], policy?: DraftPolicy): ExtractionPreview {
   return {
     count: drafts.length,
     drafts: drafts.map((draft) => ({
@@ -117,7 +117,7 @@ export function previewExtraction(drafts: ExtractedMemoryDraft[]): ExtractionPre
       kind: draft.kind,
       status: draft.status,
       confidence: draft.confidence,
-      validationErrors: validateProjectEntryDraft(draft),
+      validationErrors: validateProjectEntryDraft(draft, policy),
     })),
   };
 }

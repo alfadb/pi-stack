@@ -178,14 +178,14 @@
         "autoLlmWriteEnabled": {
           "type": "boolean",
           "default": false,
-          "description": "Policy gate for future automatic LLM writes. Current code does not auto-write LLM candidates; /sediment readiness reports whether this flag and quality thresholds are satisfied."
+          "description": "Master switch for the LLM auto-write lane in the agent_end hook. When false (default), sediment runs only the deterministic explicit-marker extractor. When true AND `/sediment readiness` reports ready (sufficient dry-run samples + pass rate), the hook will additionally invoke the LLM extractor on transcript windows where no MEMORY: block was found. All auto-written entries are subject to the autoWrite* gates below in addition to the standard dedupe/sanitize/lint pipeline."
         },
 
         "minDryRunSamples": {
           "type": "number",
           "default": 20,
           "minimum": 1,
-          "description": "Minimum llm_dry_run audit samples required before future automatic LLM writing may be considered ready."
+          "description": "Minimum llm_dry_run audit samples required before automatic LLM writing may be enabled."
         },
 
         "requiredDryRunPassRate": {
@@ -193,7 +193,33 @@
           "default": 0.9,
           "minimum": 0,
           "maximum": 1,
-          "description": "Required pass rate over llm_dry_run samples before future automatic LLM writing may be considered ready."
+          "description": "Required pass rate over llm_dry_run samples before automatic LLM writing may be enabled."
+        },
+
+        "autoWriteForceProvisional": {
+          "type": "boolean",
+          "default": true,
+          "description": "When the LLM auto-write lane fires, coerce the entry's `status` to `provisional` regardless of what the LLM proposed. Defends against the LLM auto-creating an `active`/`archived` entry that should require human curation. Strongly recommended to leave true; relaxing this widens the LLM's authority over sediment state transitions."
+        },
+
+        "autoWriteDisallowMaxim": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reject any LLM auto-write candidate with `kind: maxim`. Maxims are the highest authority entry kind; we never want an LLM minting them. Strongly recommended to leave true."
+        },
+
+        "autoWriteDisallowArchived": {
+          "type": "boolean",
+          "default": true,
+          "description": "Reject any LLM auto-write candidate whose `status` is `archived`, `deprecated`, or `superseded`. These transitions should follow citation/curation flows, not appear at first creation."
+        },
+
+        "autoWriteMaxConfidence": {
+          "type": "number",
+          "default": 6,
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Cap on `confidence` for LLM auto-written entries. Confidence in [7, 10] is reserved for human-attested entries that have survived peer review or repeated citation. Default 6 keeps auto-written entries clearly second-tier."
         }
       }
     },

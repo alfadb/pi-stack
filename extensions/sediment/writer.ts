@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
-import { type EntryKind, type EntryStatus, validateProjectEntryDraft } from "./validation";
+import { type DraftPolicy, type EntryKind, type EntryStatus, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
 import { normalizeBareSlug, slugify } from "../memory/utils";
 import { ensureSedimentLegacyMigrated, formatLocalIsoTimestamp, sedimentAuditPath, sedimentLocksDir } from "../_shared/runtime";
@@ -31,6 +31,26 @@ export interface WriteProjectEntryOptions {
   projectRoot: string;
   settings: SedimentSettings;
   dryRun?: boolean;
+  /**
+   * Optional policy overlay applied on top of the standard schema check.
+   * Used by the Phase 1.4 LLM auto-write lane to enforce stricter
+   * gates (no maxim, status capped to initial states, confidence
+   * capped). Caller is responsible for assembling this from
+   * `SedimentSettings` (see `buildAutoWritePolicy` in `index.ts`); the
+   * writer does not look at settings directly so explicit MEMORY:
+   * blocks remain unaffected.
+   */
+  policy?: DraftPolicy;
+  /**
+   * If true, the draft's `status` is forcibly rewritten to "provisional"
+   * regardless of whatever the LLM/extractor produced. This is the
+   * sediment-state half of `policy.disallowArchived`: validation alone
+   * would reject `archived/deprecated/superseded`, but for `active`
+   * vs `provisional` distinctions we prefer to coerce silently rather
+   * than fail the whole write — a too-confident `active` from the LLM
+   * is still better captured at `provisional`.
+   */
+  forceProvisional?: boolean;
 }
 
 export interface WriteProjectEntryResult {
@@ -86,6 +106,14 @@ function kindDirectory(kind: EntryKind, status?: EntryStatus): string {
 function normalizeCompiledTruth(title: string, body: string): string {
   let text = body.trim();
   text = text.replace(/^##\s+Timeline\s*[\s\S]*$/m, "").trim();
+  // Defense against frontmatter break-out (G6): a body line that is
+  // exactly `---` would terminate frontmatter on the next read pass
+  // (see `splitFrontmatter` in extensions/memory/parser.ts). Markdown
+  // hr is a real authoring need though, so we don't reject — we escape
+  // by indenting one space, which renders identically in CommonMark
+  // (a paragraph-leading space does not start a code block) but no
+  // longer matches the strict `^---$` frontmatter delimiter regex.
+  text = text.replace(/^---$/gm, " ---");
   if (!/^#\s+/m.test(text)) text = `# ${title}\n\n${text}`;
   return text.trim();
 }
@@ -212,7 +240,7 @@ export async function writeProjectEntry(
     return { slug: normalizeBareSlug(draft.title), path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
   }
 
-  const validationErrors = validateProjectEntryDraft(draft);
+  const validationErrors = validateProjectEntryDraft(draft, opts.policy);
   if (validationErrors.length > 0) {
     const auditPath = await appendAudit(projectRoot, {
       operation: "reject",
@@ -236,7 +264,13 @@ export async function writeProjectEntry(
   const noteSanitize = draft.timelineNote
     ? sanitizeForMemory(draft.timelineNote)
     : { ok: true, text: undefined, replacements: [] as string[] };
-  const failedSanitize = [titleSanitize, bodySanitize, noteSanitize].find((result) => !result.ok);
+  // G8: triggerPhrases are part of frontmatter and otherwise bypass
+  // sanitize. We run each phrase through the same gate; failure of any
+  // phrase fails the whole draft (the dropped-credential alternative is
+  // worse — silently losing trigger phrases would also remove the
+  // signal that something was wrong).
+  const triggerPhraseSanitizes = (draft.triggerPhrases ?? []).map((p) => sanitizeForMemory(p));
+  const failedSanitize = [titleSanitize, bodySanitize, noteSanitize, ...triggerPhraseSanitizes].find((result) => !result.ok);
   if (failedSanitize) {
     const auditPath = await appendAudit(projectRoot, {
       operation: "reject",
@@ -251,6 +285,7 @@ export async function writeProjectEntry(
     ...titleSanitize.replacements,
     ...bodySanitize.replacements,
     ...noteSanitize.replacements,
+    ...triggerPhraseSanitizes.flatMap((s) => s.replacements),
   ];
 
   const safeDraft: ProjectEntryDraft = {
@@ -258,6 +293,15 @@ export async function writeProjectEntry(
     title: titleSanitize.text ?? draft.title,
     compiledTruth: bodySanitize.text ?? draft.compiledTruth,
     timelineNote: draft.timelineNote ? noteSanitize.text : draft.timelineNote,
+    triggerPhrases: draft.triggerPhrases
+      ? triggerPhraseSanitizes.map((s, i) => s.text ?? draft.triggerPhrases![i])
+      : draft.triggerPhrases,
+    // forceProvisional: applied AFTER sanitize so the audit row reflects
+    // the actual stored status. This intentionally happens unconditionally
+    // when set, overriding any LLM-supplied value (validation already
+    // banned archived/deprecated/superseded if disallowArchived is on,
+    // but `active` slipping through is still a downgrade-on-write here).
+    status: opts.forceProvisional ? "provisional" : draft.status,
   };
 
   const { slug, markdown } = buildMarkdown(safeDraft, projectRoot);

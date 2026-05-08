@@ -23,6 +23,17 @@ export interface SedimentSettings {
   autoLlmWriteEnabled: boolean;
   minDryRunSamples: number;
   requiredDryRunPassRate: number;
+  // Phase 1.4 LLM auto-write content gates. These shape the
+  // `DraftPolicy` passed into `validateProjectEntryDraft` and the
+  // `forceProvisional` knob in `writeProjectEntry` whenever sediment
+  // takes the LLM auto-write lane (NOT for explicit MEMORY: blocks,
+  // which are user-attested and pass through without policy overlay).
+  // Defaults are intentionally strict; relaxing them widens the LLM's
+  // attack/error surface.
+  autoWriteForceProvisional: boolean;
+  autoWriteDisallowMaxim: boolean;
+  autoWriteDisallowArchived: boolean;
+  autoWriteMaxConfidence: number;
 }
 
 export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
@@ -41,6 +52,10 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoLlmWriteEnabled: false,
   minDryRunSamples: 20,
   requiredDryRunPassRate: 0.9,
+  autoWriteForceProvisional: true,
+  autoWriteDisallowMaxim: true,
+  autoWriteDisallowArchived: true,
+  autoWriteMaxConfidence: 6,
 };
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -72,5 +87,9 @@ export function resolveSedimentSettings(): SedimentSettings {
     autoLlmWriteEnabled: asBoolean(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     minDryRunSamples: Math.max(1, Math.floor(asNumber(cfg.minDryRunSamples, DEFAULT_SEDIMENT_SETTINGS.minDryRunSamples))),
     requiredDryRunPassRate: Math.min(1, Math.max(0, asNumber(cfg.requiredDryRunPassRate, DEFAULT_SEDIMENT_SETTINGS.requiredDryRunPassRate))),
+    autoWriteForceProvisional: asBoolean(cfg.autoWriteForceProvisional, DEFAULT_SEDIMENT_SETTINGS.autoWriteForceProvisional),
+    autoWriteDisallowMaxim: asBoolean(cfg.autoWriteDisallowMaxim, DEFAULT_SEDIMENT_SETTINGS.autoWriteDisallowMaxim),
+    autoWriteDisallowArchived: asBoolean(cfg.autoWriteDisallowArchived, DEFAULT_SEDIMENT_SETTINGS.autoWriteDisallowArchived),
+    autoWriteMaxConfidence: Math.min(10, Math.max(0, asNumber(cfg.autoWriteMaxConfidence, DEFAULT_SEDIMENT_SETTINGS.autoWriteMaxConfidence))),
   };
 }

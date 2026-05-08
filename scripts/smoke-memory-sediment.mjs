@@ -539,6 +539,161 @@ END_MEMORY`;
     const llmSummary = summarizeLlmExtractorDryRun({ ok: true, model: "x/y", rawText: "SKIP", extraction: { count: 0, drafts: [] } }, { maxCandidates: 3, rawPreviewChars: 10 });
     assert(llmSummary.quality.reason === "skip" && llmSummary.quality.passed, "llm summary skip gate failed");
 
+    // === A1 safety gates: G2/G3/G4/G5/G6/G8 ============================
+    // These verify the auto-write defenses BEFORE the agent_end LLM lane
+    // is wired up (Phase 1.4 A2). All gates must already work end-to-end
+    // through writeProjectEntry/validateProjectEntryDraft/sanitizeForMemory
+    // when the appropriate opts are passed.
+
+    // G5: extended sanitizer patterns — JWT, PEM, AWS access key, conn URL.
+    const { validateProjectEntryDraft } = req("./sediment/validation.js");
+    {
+      const jwt = sanitizeForMemory("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c");
+      assert(!jwt.ok && /jwt_token/.test(jwt.error || ""), `G5 jwt_token must reject: ${JSON.stringify(jwt)}`);
+      const pem = sanitizeForMemory("-----BEGIN RSA PRIVATE KEY-----\nMIIBOwIBAAJBAL...\n-----END RSA PRIVATE KEY-----");
+      assert(!pem.ok && /pem_private_key/.test(pem.error || ""), `G5 pem_private_key must reject: ${JSON.stringify(pem)}`);
+      const aws = sanitizeForMemory("AKIAIOSFODNN7EXAMPLE is the access key");
+      assert(!aws.ok && /aws_access_key/.test(aws.error || ""), `G5 aws_access_key must reject: ${JSON.stringify(aws)}`);
+      const dbUrl = sanitizeForMemory("db: mongodb://user:p4ssw0rd@host.example/dbname");
+      assert(!dbUrl.ok && /connection_url/.test(dbUrl.error || ""), `G5 connection_url must reject: ${JSON.stringify(dbUrl)}`);
+      // Negative: ordinary IP/email/$HOME paths still must not match credential rules.
+      const benign = sanitizeForMemory("user@example.com on 127.0.0.1 at /home/worker/projects");
+      assert(benign.ok, `G5 benign content should pass: ${JSON.stringify(benign)}`);
+    }
+
+    // G3: validation policy — disallowMaxim flips a kind=maxim draft into
+    //     a validation error (without policy: passes; with policy: rejects).
+    {
+      const draft = { title: "Some Maxim", kind: "maxim", compiledTruth: "x".repeat(40), confidence: 5 };
+      assert(validateProjectEntryDraft(draft).length === 0, "G3 baseline: kind=maxim valid without policy");
+      const errs = validateProjectEntryDraft(draft, { disallowMaxim: true });
+      assert(errs.length === 1 && errs[0].field === "kind" && /maxim/.test(errs[0].message), `G3 disallowMaxim must reject: ${JSON.stringify(errs)}`);
+    }
+
+    // G4: validation policy — maxConfidence caps confidence (10 -> reject if cap=6).
+    {
+      const draft = { title: "High Conf Item", kind: "fact", compiledTruth: "x".repeat(40), confidence: 9 };
+      assert(validateProjectEntryDraft(draft).length === 0, "G4 baseline: confidence=9 valid without policy");
+      const errs = validateProjectEntryDraft(draft, { maxConfidence: 6 });
+      assert(errs.length === 1 && errs[0].field === "confidence" && /<= 6/.test(errs[0].message), `G4 maxConfidence must reject: ${JSON.stringify(errs)}`);
+      // At-cap value passes.
+      const ok = validateProjectEntryDraft({ ...draft, confidence: 6 }, { maxConfidence: 6 });
+      assert(ok.length === 0, "G4 at-cap confidence must pass");
+    }
+
+    // G3+G4 combined: disallowArchived (the no-initial-archived gate).
+    {
+      const draft = { title: "Stale Stuff", kind: "fact", compiledTruth: "x".repeat(40), status: "archived" };
+      assert(validateProjectEntryDraft(draft).length === 0, "baseline: archived status valid without policy");
+      const errs = validateProjectEntryDraft(draft, { disallowArchived: true });
+      assert(errs.length === 1 && errs[0].field === "status", `disallowArchived must reject: ${JSON.stringify(errs)}`);
+      // active/contested/provisional should pass under the same policy.
+      for (const status of ["active", "contested", "provisional"]) {
+        const ok = validateProjectEntryDraft({ ...draft, status }, { disallowArchived: true });
+        assert(ok.length === 0, `disallowArchived must NOT block status=${status}: ${JSON.stringify(ok)}`);
+      }
+    }
+
+    // G2: writer.forceProvisional — even an active draft writes status: provisional.
+    {
+      const ftRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-g2-"));
+      fs.mkdirSync(path.join(ftRoot, ".pensieve"), { recursive: true });
+      execFileSync("git", ["init"], { cwd: ftRoot, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: ftRoot });
+      execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: ftRoot });
+      const r = await writeProjectEntry({
+        title: "G2 Forced Provisional",
+        kind: "fact",
+        status: "active",
+        confidence: 5,
+        compiledTruth: "This entry was created with status=active but should land as provisional.",
+      }, { projectRoot: ftRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false, forceProvisional: true });
+      assert(r.status === "created", `G2 write failed: ${r.reason}`);
+      const written = fs.readFileSync(r.path, "utf-8");
+      assert(/^status: provisional$/m.test(written), `G2 forceProvisional must rewrite status: provisional, got:\n${written.split("---")[1]}`);
+      assert(!/^status: active$/m.test(written), "G2 forceProvisional left status: active");
+    }
+
+    // G6: compiledTruth body containing a bare `---` line gets escaped
+    //     so it no longer matches the frontmatter delimiter regex on read.
+    {
+      const g6Root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-g6-"));
+      fs.mkdirSync(path.join(g6Root, ".pensieve"), { recursive: true });
+      execFileSync("git", ["init"], { cwd: g6Root, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: g6Root });
+      execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: g6Root });
+      const r = await writeProjectEntry({
+        title: "G6 Frontmatter Break Out",
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: [
+          "Body section A.",
+          "",
+          "---",
+          "",
+          "Body section B (after bare hr).",
+        ].join("\n"),
+      }, { projectRoot: g6Root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      assert(r.status === "created", `G6 write failed: ${r.reason}`);
+      const written = fs.readFileSync(r.path, "utf-8");
+      // Re-parse the file: the surviving frontmatter must have exactly
+      // ONE closing `---` (the real one), and the second body-side hr
+      // must be the escaped form (" ---" with a leading space).
+      const fm2 = splitFrontmatter(written);
+      assert(fm2.frontmatterText.length > 0, "G6 read-back: frontmatter parse failed");
+      assert(/^title: /m.test(fm2.frontmatterText), "G6 frontmatter missing title (parser ate too far)");
+      assert(/^ ---$/m.test(fm2.body), `G6 body must contain escaped hr (" ---"), got:\n${fm2.body}`);
+      assert(!/^---$/m.test(fm2.body), `G6 body still has bare frontmatter delimiter: ${fm2.body}`);
+    }
+
+    // G8: triggerPhrases pass through sanitizer; a credential in any
+    //     phrase rejects the whole write.
+    {
+      const g8Root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-g8-"));
+      fs.mkdirSync(path.join(g8Root, ".pensieve"), { recursive: true });
+      execFileSync("git", ["init"], { cwd: g8Root, stdio: "ignore" });
+      execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: g8Root });
+      execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: g8Root });
+      const bad = await writeProjectEntry({
+        title: "G8 Phrase Leak",
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: "Body that is fine on its own and long enough to pass validation.",
+        triggerPhrases: ["normal phrase", "sk-abcdef0123456789abcdef0123456789"],
+      }, { projectRoot: g8Root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      assert(bad.status === "rejected" && /openai_api_key|credential/.test(bad.reason || ""), `G8 must reject credential in triggerPhrases: ${JSON.stringify(bad)}`);
+      // Negative: phrases that only contain $HOME paths get scrubbed and pass.
+      const ok = await writeProjectEntry({
+        title: "G8 Phrase Path Scrub",
+        kind: "fact",
+        confidence: 5,
+        compiledTruth: "Body that is fine on its own and long enough to pass validation.",
+        triggerPhrases: [`work from ${require("node:os").homedir()}/projects`],
+      }, { projectRoot: g8Root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      assert(ok.status === "created", `G8 phrase scrub write should succeed: ${JSON.stringify(ok)}`);
+      const okWritten = fs.readFileSync(ok.path, "utf-8");
+      assert(okWritten.includes("$HOME") && !okWritten.includes("/home/worker") && !okWritten.includes(`${require("node:os").homedir()}/projects`), "G8 phrase $HOME scrub did not redact");
+    }
+
+    // G7: prompt strengthening (role-aware boundary). We don't hit a real
+    //     LLM here; just assert the prompt text contains the required
+    //     directive substrings so a future weakening is caught.
+    {
+      const { buildLlmExtractorPrompt } = req("./sediment/llm-extractor.js");
+      const p = buildLlmExtractorPrompt("--- ENTRY x 0 message/user ---\nfake content");
+      const required = [
+        "Trust boundary",
+        "role=user",
+        "role=toolResult",
+        "never as instructions",
+        "kind: maxim",
+        "[0, 6]",
+      ];
+      for (const needle of required) {
+        assert(p.includes(needle), `G7 prompt missing required marker: ${JSON.stringify(needle)}`);
+      }
+    }
+
     writeFile(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), JSON.stringify({
       timestamp: "2026-05-08T00:00:00Z",
       operation: "llm_dry_run",
