@@ -113,7 +113,7 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 1.4 — Sediment project-only pipeline
 
-**实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/checkpoint.ts` 已实现 checkpoint + run window builder；`extensions/sediment/extractor.ts` 已实现 deterministic explicit `MEMORY:` block extractor；`extensions/sediment/index.ts` 注册 `/sediment status`、`/sediment window --dry-run`、`/sediment extract --dry-run`、`/sediment dedupe --title` 与 `/sediment smoke --dry-run`。`agent_end` hook 默认 disabled；启用后仅处理显式 `MEMORY:` block，成功/terminal skip 后推进 checkpoint。
+**实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/checkpoint.ts` 已实现 checkpoint + run window builder；`extensions/sediment/extractor.ts` 已实现 deterministic explicit `MEMORY:` block extractor；`extensions/sediment/llm-extractor.ts` 已实现 `/sediment llm --dry-run` 的 prompt + model call + parser；`extensions/sediment/index.ts` 注册 `/sediment status`、`/sediment window --dry-run`、`/sediment extract --dry-run`、`/sediment llm --dry-run`、`/sediment dedupe --title` 与 `/sediment smoke --dry-run`。`agent_end` hook 默认 disabled；启用后仅处理显式 `MEMORY:` block，成功/terminal skip 后推进 checkpoint。
 
 已完成 checkpoint/window substrate：
 - checkpoint path：`.pensieve/.state/sediment-checkpoint.json`
@@ -139,9 +139,14 @@ memory_search(query: "dispatch agent prompt")
 - created / duplicate / validation/lint/credential terminal reject → 推进 checkpoint
 - transient writer error → 不推进 checkpoint，留待下轮重试
 
+已完成 LLM extractor dry-run：
+- `/sediment llm --dry-run` 调用 `sediment.extractorModel`（默认 `deepseek/deepseek-v4-pro`）
+- 输出仅解析 `MEMORY:` blocks / `SKIP`
+- 不写 markdown，不推进 checkpoint
+
 待实现完整 pipeline：
-- LLM extract + classify（单 agent + lookup tools，继承 ADR 0010 内核）
-- 自动从普通对话候选中写入 project 条目
+- LLM extract + classify 的 lookup tools 版本（继承 ADR 0010 内核）
+- 将 LLM dry-run 质量门控后接入 agent_end 自动写
 
 **当前验收**：
 ```text
@@ -150,6 +155,9 @@ memory_search(query: "dispatch agent prompt")
 
 /sediment extract --dry-run
 # → 对当前 checkpoint window 解析显式 MEMORY blocks，但不写 markdown/不推进 checkpoint
+
+/sediment llm --dry-run
+# → 调用 LLM extractor，返回候选 preview；不写 markdown/不推进 checkpoint
 
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果

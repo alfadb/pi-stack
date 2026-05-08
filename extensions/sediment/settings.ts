@@ -15,6 +15,9 @@ export interface SedimentSettings {
   minWindowChars: number;
   maxWindowChars: number;
   maxWindowEntries: number;
+  extractorModel: string;
+  extractorTimeoutMs: number;
+  extractorMaxRetries: number;
 }
 
 export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
@@ -25,6 +28,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   minWindowChars: 200,
   maxWindowChars: 200_000,
   maxWindowEntries: 200,
+  extractorModel: "deepseek/deepseek-v4-pro",
+  extractorTimeoutMs: 180_000,
+  extractorMaxRetries: 0,
 };
 
 function loadPiStackSettings(): Record<string, unknown> {
@@ -46,5 +52,10 @@ export function resolveSedimentSettings(): SedimentSettings {
     minWindowChars: Math.max(0, asNumber(cfg.minWindowChars, DEFAULT_SEDIMENT_SETTINGS.minWindowChars)),
     maxWindowChars: Math.max(1_000, asNumber(cfg.maxWindowChars, DEFAULT_SEDIMENT_SETTINGS.maxWindowChars)),
     maxWindowEntries: Math.max(1, Math.floor(asNumber(cfg.maxWindowEntries, DEFAULT_SEDIMENT_SETTINGS.maxWindowEntries))),
+    extractorModel: typeof cfg.extractorModel === "string" && cfg.extractorModel.trim()
+      ? cfg.extractorModel.trim()
+      : DEFAULT_SEDIMENT_SETTINGS.extractorModel,
+    extractorTimeoutMs: Math.max(1_000, asNumber(cfg.extractorTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.extractorTimeoutMs)),
+    extractorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.extractorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.extractorMaxRetries))),
   };
 }

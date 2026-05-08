@@ -63,6 +63,7 @@ alfadb/pi-astack/
 │   │   ├── settings.ts                # sediment 配置读取
 │   │   ├── checkpoint.ts              # checkpoint + run window builder
 │   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor
+│   │   ├── llm-extractor.ts           # /sediment llm --dry-run prompt + model call
 │   │   ├── validation.ts              # draft runtime validation
 │   │   ├── dedupe.ts                  # deterministic slug/title duplicate detection
 │   │   ├── sanitizer.ts               # 最小写前脱敏/fail-closed
@@ -172,7 +173,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | modelCurator | `providers`, `hints`, `imageGen` |
 | modelFallback | `fallbackModels` |
 | memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays` |
-| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries` |
+| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries`, `extractorModel`, `extractorTimeoutMs`, `extractorMaxRetries` |
 | vision | `modelPreferences` |
 
 ## 所有权矩阵

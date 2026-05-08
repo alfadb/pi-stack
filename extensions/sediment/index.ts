@@ -12,6 +12,7 @@ import { resolveSedimentSettings } from "./settings";
 import { buildRunWindow, checkpointSummary, hasPensieve, loadCheckpoint, saveCheckpoint } from "./checkpoint";
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
+import { runLlmExtractorDryRun } from "./llm-extractor";
 import { appendAudit, writeProjectEntry, type WriteProjectEntryResult } from "./writer";
 
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
@@ -30,19 +31,19 @@ function registerSedimentCommand(pi: ExtensionAPI) {
     registerCommand?: (name: string, options: {
       description?: string;
       getArgumentCompletions?: (prefix: string) => Array<{ value: string; label: string }> | null;
-      handler: (args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; ui: { notify(message: string, type?: string): void } }) => Promise<void> | void;
+      handler: (args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; modelRegistry?: unknown; signal?: AbortSignal; ui: { notify(message: string, type?: string): void } }) => Promise<void> | void;
     }) => void;
   };
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window/extract/dedupe and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment dedupe --title <title>, /sediment smoke --dry-run",
+    description: "Sediment writer status/window/extract/dedupe and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment llm --dry-run, /sediment dedupe --title <title>, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "extract --dry-run", "dedupe --title ", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "extract --dry-run", "llm --dry-run", "dedupe --title ", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
-    async handler(args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; ui: { notify(message: string, type?: string): void } }) {
+    async handler(args: string, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[] }; modelRegistry?: unknown; signal?: AbortSignal; ui: { notify(message: string, type?: string): void } }) {
       const cwd = path.resolve(ctx.cwd || process.cwd());
       const settings = resolveSedimentSettings();
       const [subcommand = "status", ...rest] = args.trim() ? args.trim().split(/\s+/) : [];
@@ -54,7 +55,8 @@ function registerSedimentCommand(pi: ExtensionAPI) {
             `Git commit: ${settings.gitCommit}`,
             `Lock timeout: ${settings.lockTimeoutMs}ms`,
             `Window: min=${settings.minWindowChars} chars, max=${settings.maxWindowChars} chars, entries=${settings.maxWindowEntries}`,
-            "Extractor: not implemented in this slice",
+            `LLM extractor model: ${settings.extractorModel}`,
+            "Auto LLM extractor: dry-run command only; agent_end uses explicit MEMORY blocks",
           ].join("\n"),
           "info",
         );
@@ -92,6 +94,34 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
+      if (subcommand === "llm") {
+        if (!rest.includes("--dry-run")) {
+          ctx.ui.notify("Usage: /sediment llm --dry-run", "warning");
+          return;
+        }
+        if (!ctx.sessionManager?.getBranch) {
+          ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
+          return;
+        }
+        if (!ctx.modelRegistry) {
+          ctx.ui.notify("Model registry unavailable; cannot run LLM extractor", "error");
+          return;
+        }
+        const checkpoint = await loadCheckpoint(cwd);
+        const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
+        if (window.skipReason) {
+          ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), extraction: previewExtraction([]) }, null, 2), "warning");
+          return;
+        }
+        const result = await runLlmExtractorDryRun(window.text, {
+          settings,
+          modelRegistry: ctx.modelRegistry as Parameters<typeof runLlmExtractorDryRun>[1]["modelRegistry"],
+          signal: ctx.signal,
+        });
+        ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), llm: result }, null, 2), result.ok ? "info" : "error");
+        return;
+      }
+
       if (subcommand === "dedupe") {
         const titleFlagIndex = rest.indexOf("--title");
         const title = titleFlagIndex >= 0 ? rest.slice(titleFlagIndex + 1).join(" ").trim() : rest.join(" ").trim();
@@ -121,7 +151,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment dedupe --title <title> OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment llm --dry-run OR /sediment dedupe --title <title> OR /sediment smoke --dry-run", "warning");
     },
   });
 }

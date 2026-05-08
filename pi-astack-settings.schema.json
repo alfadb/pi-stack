@@ -139,6 +139,26 @@
           "default": 200,
           "minimum": 1,
           "description": "Maximum number of newest session entries considered for a sediment run window."
+        },
+
+        "extractorModel": {
+          "type": "string",
+          "default": "deepseek/deepseek-v4-pro",
+          "description": "Model used by /sediment llm --dry-run. Expected format: provider/modelId. This dry-run command does not write memory or advance checkpoint."
+        },
+
+        "extractorTimeoutMs": {
+          "type": "number",
+          "default": 180000,
+          "minimum": 1000,
+          "description": "Timeout for /sediment llm --dry-run model call."
+        },
+
+        "extractorMaxRetries": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "Max retries for /sediment llm --dry-run model call. Default 0 to avoid hidden repeated extraction costs."
         }
       }
     },
