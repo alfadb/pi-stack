@@ -15,7 +15,7 @@ import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, searchEntries, serializeEntry } from "./search";
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun } from "./migrate";
-import { checkBacklinks, formatBacklinkReport } from "./graph";
+import { checkBacklinks, formatBacklinkReport, formatGraphRebuildReport, rebuildGraphIndex } from "./graph";
 import { clamp, normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
 
 function registerMemoryCommand(pi: ExtensionAPI) {
@@ -29,12 +29,13 @@ function registerMemoryCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("memory", {
-    description: "Memory maintenance commands: /memory lint [path], /memory migrate --dry-run [path], /memory check-backlinks [path]",
+    description: "Memory maintenance commands: /memory lint [path], /memory migrate --dry-run [path], /memory check-backlinks [path], /memory rebuild --graph [path]",
     getArgumentCompletions(prefix: string) {
       const items = [
         "lint", "lint .pensieve",
         "migrate --dry-run", "migrate --dry-run .pensieve",
         "check-backlinks", "check-backlinks .pensieve",
+        "rebuild --graph", "rebuild --graph .pensieve",
       ];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
@@ -77,7 +78,21 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate --dry-run [path] OR /memory check-backlinks [path]", "warning");
+      if (subcommand === "rebuild") {
+        const graphFlag = rest.includes("--graph");
+        if (!graphFlag) {
+          ctx.ui.notify("Usage: /memory rebuild --graph [path]", "warning");
+          return;
+        }
+        const targetParts = rest.filter((part) => part !== "--graph");
+        const targetArg = targetParts.join(" ").trim();
+        const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
+        const report = await rebuildGraphIndex(target, settings, undefined, cwd);
+        ctx.ui.notify(formatGraphRebuildReport(report), report.deadLinkCount > 0 ? "warning" : "info");
+        return;
+      }
+
+      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate --dry-run [path] OR /memory check-backlinks [path] OR /memory rebuild --graph [path]", "warning");
     },
   });
 }

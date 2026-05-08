@@ -25,7 +25,7 @@
 - [x] `memory_search` grep-based 实现（rg 文件发现 + per-file tf-idf + title/slug boost；project 层 + 可选 world 只读）
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
 - [ ] `_index.md` 自动生成（sediment 写入后重建）
-- [ ] graph 派生索引：已实现 in-memory `buildGraphSnapshot` + `/memory check-backlinks [path]` 只读报告；`graph.json` 文件写入仍待 sediment/index writer
+- [x] graph 派生索引：已实现 `buildGraphSnapshot` + `/memory check-backlinks [path]` + `/memory rebuild --graph [path]` 写入 gitignored derived index
 - [ ] Sediment project-only pipeline：extract → sanitize → classify → dedupe（确定性：slug + trigram Jaccard）→ lint → lock → write md → git commit → release → audit
 - [ ] Project scope 的 file lock + 错误恢复
 - [ ] 最小脱敏：credential pattern → 写入拒绝（fail-closed）；$HOME 路径替换
@@ -91,12 +91,13 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 1.3b — graph snapshot + check-backlinks（read-only）
 
-**实现状态（2026-05-08）**：`extensions/memory/graph.ts` 已实现 in-memory `buildGraphSnapshot()` / `checkBacklinks()`，`extensions/memory/index.ts` 注册 human-facing slash command `/memory check-backlinks [path]`。
+**实现状态（2026-05-08）**：`extensions/memory/graph.ts` 已实现 `buildGraphSnapshot()` / `checkBacklinks()` / `rebuildGraphIndex()`，`extensions/memory/index.ts` 注册 human-facing slash commands `/memory check-backlinks [path]` 与 `/memory rebuild --graph [path]`。
 
 - 从 markdown frontmatter relations + body `[[wikilink]]` 构建 graph snapshot
 - 统计 node/edge/orphan/dead link
 - 检查 symmetric relations（`relates_to` / `contested_with`）是否缺反向边
-- 只读报告，不写 `.pensieve/.index/graph.json`
+- `/memory check-backlinks` 只读报告，不写 `.pensieve/.index/graph.json`
+- `/memory rebuild --graph` 原子写入 derived index：project → `.pensieve/.index/graph.json`；world → `.state/index/graph.json`
 
 **当前验收**：
 ```text
@@ -104,11 +105,10 @@ memory_search(query: "dispatch agent prompt")
 # → 返回 dead link / missing symmetric backlink 报告
 ```
 
-**待实现验收**：
+**当前验收**：
 ```text
-# 由 sediment/index writer 执行，非当前 read-only extension
 /memory rebuild --graph .pensieve
-# → 写入 .pensieve/.index/graph.json
+# → 写入 .pensieve/.index/graph.json（derived artifact）
 ```
 
 ### Phase 1.4 — Sediment project-only pipeline

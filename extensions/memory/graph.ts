@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import type { MemorySettings } from "./settings";
 import type { MemoryEntry, Scope } from "./types";
 import { parseEntry, scanStore } from "./parser";
@@ -25,6 +27,7 @@ interface GraphEdge {
 
 export interface GraphSnapshot {
   built_at: string;
+  git_head?: string | null;
   stale: false;
   nodes: Record<string, GraphNode>;
   edges: GraphEdge[];
@@ -52,6 +55,18 @@ export interface BacklinkReport {
   issues: BacklinkIssue[];
 }
 
+export interface GraphRebuildReport {
+  target: string;
+  graph_path: string;
+  nodeCount: number;
+  edgeCount: number;
+  deadLinkCount: number;
+  orphanCount: number;
+  git_head?: string | null;
+}
+
+const execFileAsync = promisify(execFile);
+
 const SYMMETRIC_RELATIONS = new Set(["relates_to", "contested_with"]);
 
 function inferScopeFromTarget(target: string): Scope {
@@ -69,6 +84,17 @@ function storeRootForFile(abs: string): string {
   const idx = parts.lastIndexOf(".pensieve");
   if (idx >= 0) return parts.slice(0, idx + 1).join(path.sep) || path.sep;
   return path.dirname(abs);
+}
+
+async function graphRootForTarget(target: string): Promise<string> {
+  const abs = path.resolve(target);
+  try {
+    const stat = await fs.stat(abs);
+    if (stat.isFile()) return storeRootForFile(abs);
+  } catch {
+    return abs;
+  }
+  return abs;
 }
 
 async function entriesForGraphTarget(
@@ -99,12 +125,33 @@ async function entriesForGraphTarget(
   );
 }
 
+async function gitHead(root: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", root, "rev-parse", "HEAD"], {
+      timeout: 2_000,
+      maxBuffer: 256 * 1024,
+    });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+async function graphIndexPath(target: string): Promise<string> {
+  const root = await graphRootForTarget(target);
+  if (inferScopeFromTarget(root) === "world") {
+    return path.join(root, ".state", "index", "graph.json");
+  }
+  return path.join(root, ".index", "graph.json");
+}
+
 export async function buildGraphSnapshot(
   target: string,
   settings: MemorySettings,
   signal?: AbortSignal,
   cwd = process.cwd(),
 ): Promise<GraphSnapshot> {
+  const root = await graphRootForTarget(target);
   const entries = await entriesForGraphTarget(target, settings, signal, cwd);
   const nodes: Record<string, GraphNode> = {};
   const edges: GraphEdge[] = [];
@@ -146,6 +193,7 @@ export async function buildGraphSnapshot(
 
   return {
     built_at: new Date().toISOString(),
+    git_head: await gitHead(root),
     stale: false,
     nodes,
     edges,
@@ -193,6 +241,39 @@ export async function checkBacklinks(
     missingSymmetricCount: issues.filter((issue) => issue.problem === "missing_symmetric_backlink").length,
     issues,
   };
+}
+
+export async function rebuildGraphIndex(
+  target: string,
+  settings: MemorySettings,
+  signal?: AbortSignal,
+  cwd = process.cwd(),
+): Promise<GraphRebuildReport> {
+  const graph = await buildGraphSnapshot(target, settings, signal, cwd);
+  const outPath = await graphIndexPath(target);
+  await fs.mkdir(path.dirname(outPath), { recursive: true });
+
+  const tmpPath = `${outPath}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(tmpPath, `${JSON.stringify(graph, null, 2)}\n`, "utf-8");
+  await fs.rename(tmpPath, outPath);
+
+  return {
+    target: prettyPath(path.resolve(target), cwd),
+    graph_path: prettyPath(outPath, cwd),
+    nodeCount: graph.stats.node_count,
+    edgeCount: graph.stats.edge_count,
+    deadLinkCount: graph.stats.dead_links.length,
+    orphanCount: graph.stats.orphans.length,
+    git_head: graph.git_head,
+  };
+}
+
+export function formatGraphRebuildReport(report: GraphRebuildReport): string {
+  return [
+    `Memory graph rebuilt: ${report.nodeCount} node(s), ${report.edgeCount} edge(s), ${report.deadLinkCount} dead link(s), ${report.orphanCount} orphan(s)`,
+    `Graph path: ${report.graph_path}`,
+    `Git head: ${report.git_head ?? "unavailable"}`,
+  ].join("\n");
 }
 
 export function formatBacklinkReport(report: BacklinkReport, maxIssues = 20): string {
