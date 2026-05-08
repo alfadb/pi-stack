@@ -45,10 +45,9 @@ alfadb/pi-astack/
 │   └── gstack/                        # submodule → garrytan/gstack@bf65487
 │
 ├── extensions/                        # ▼▼▼ pi 行为扩展，alfadb own ▼▼▼
-│   ├── multi-agent/                   # subtree from alfadb/pi-multi-agent + ADR 0009 重构
+│   ├── dispatch/                      # subtree from alfadb/pi-dispatch + ADR 0009 重构
 │   │   ├── package.json
 │   │   ├── index.ts                   # pi.n() registered tool: dispatch_agent / dispatch_agents
-│   │   │                              #              + multi_dispatch (兼容)
 │   │   │                              #              + vision + imagine
 │   │   ├── runner.ts
 │   │   ├── subagent-tools.ts
@@ -127,7 +126,7 @@ alfadb/pi-astack/
     ├── review.md
     ├── sync-to-main.md
     ├── ship.md                        # from garrytan/gstack
-    └── multi-*.md                     # from alfadb/pi-multi-agent/prompts
+    └── dispatch-*.md                  # from alfadb/pi-dispatch/prompts
 ```
 
 ## 关键变化（v7 vs v6.8）
@@ -153,20 +152,20 @@ alfadb/pi-astack/
 | 目录 | 所有者 | 是否被 pi 加载 | 是否可修改 |
 |---|---|---|---|
 | `vendor/gstack/` | garrytan | ❌ | ❌ 只读 |
-| `extensions/multi-agent/` | alfadb（C 类迁入） | ✅ pi.extensions | ✅ |
+| `extensions/dispatch/` | alfadb（C 类迁入） | ✅ pi.extensions | ✅ |
 | `extensions/sediment/` | alfadb（C 类迁入 + A 类改造） | ✅ pi.extensions | ✅ |
 | `extensions/sediment/prompts/` | alfadb（A 类） | ❌ 主会话不见 | ✅ |
 | `extensions/memory/` | alfadb（v7 新建） | ✅ pi.extensions | ✅ |
 | `extensions/model-curator/` | alfadb（C 类迁入） | ✅ pi.extensions | ✅ |
 | `extensions/browse/` | alfadb（C 类迁入） | ✅ pi.extensions | ✅ |
-| `extensions/multi-agent/input-compat.ts` | alfadb（A 类自有） | 被 handler import | ✅ |
-| `extensions/multi-agent/templates/*` | alfadb（供主会话参考） | ✅ promptSnippet 指向 | ✅ |
+| `extensions/dispatch/input-compat.ts` | alfadb（A 类自有） | 被 handler import | ✅ |
+| `extensions/dispatch/templates/*` | alfadb（供主会话参考） | ✅ promptSnippet 指向 | ✅ |
 | `extensions/model-fallback/` | alfadb（A 类永久 own） | ✅ pi.extensions | ✅ |
 | `skills/memory-wand/` | alfadb（A 类） | ✅ pi.skills | ✅ |
 | `skills/{19 个}/` | alfadb（B 类端口） | ✅ pi.skills | ✅ |
 | `prompts/{commit,plan,review,sync-to-main}.md` | alfadb（A 类） | ✅ pi.prompts | ✅ |
 | `prompts/ship.md` | alfadb（B 类端口） | ✅ pi.prompts | ✅ |
-| `prompts/multi-*.md` | alfadb（C 类迁入） | ✅ pi.prompts | ✅ |
+| `prompts/dispatch-*.md` | alfadb（C 类迁入） | ✅ pi.prompts | ✅ |
 | `defaults/pi-astack.defaults.json` | alfadb | ❌（fallback / 文档示例） | ✅ |
 | `docs/memory-architecture.md` | alfadb（权威设计规范） | ❌ | ✅ |
 | `docs/adr/` | alfadb | ❌ | ✅ |
@@ -212,4 +211,4 @@ alfadb/pi-astack/
 | Vendor sources | `vendor/` | **不被 pi 加载**，仅作参考 |
 | 配置 | 官方 settings chain | 运行时读取 `piStack.*`；`defaults/` 仅 fallback/文档示例 |
 | 内部 prompts（sediment 用） | `extensions/sediment/prompts/` | **不被 pi 加载**，sediment 内部读取 |
-| Multi-agent cookbook | `extensions/multi-agent/templates/` | 主会话 promptSnippet 中提示可读 |
+| Dispatch cookbook | `extensions/dispatch/templates/` | 主会话 promptSnippet 中提示可读 |

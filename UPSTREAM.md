@@ -28,8 +28,8 @@
 | `extensions/memory/` | v7 新建，Facade 模式封装 `memory_search/get/list/neighbors`（替代旧 `extensions/gbrain/`） |
 | `extensions/sediment/` 改造（markdown writer、graph builder、lint、doctor） | v7 自有设计，基于 memory-architecture.md |
 | `extensions/sediment/prompts/` 全套 rubric | pi-astack 私有 |
-| `extensions/multi-agent/` ADR 0009 重构 | v6.5 自有设计 |
-| `extensions/multi-agent/input-compat.ts` + `input-compat.test.ts` | v6.5 自有设计 |
+| `extensions/dispatch/` ADR 0009 重构 | v6.5 自有设计 |
+| `extensions/dispatch/input-compat.ts` + `input-compat.test.ts` | v6.5 自有设计 |
 | `prompts/{commit,plan,review,sync-to-main}.md` | 从 pensieve pipelines 提取后是 pi-astack 私有 |
 | `defaults/pi-astack.defaults.json` | package-local fallback / 文档示例（运行时走官方 pi settings chain） |
 
@@ -37,7 +37,7 @@
 
 | 组件 | 原仓 | 处置 |
 |---|---|---|
-| `extensions/multi-agent/` | `alfadb/pi-multi-agent` | subtree merge，原仓 archive，README 指向 pi-astack |
+| `extensions/dispatch/` | `alfadb/pi-dispatch` | subtree merge，原仓 archive，README 指向 pi-astack |
 | `extensions/sediment/` | `alfadb/pi-sediment` | subtree merge，原仓 archive，README 指向 pi-astack |
 | `extensions/model-curator/` | `~/.pi/agent/skills/pi-model-curator/`（in-tree） | cp 迁入 |
 | `skills/{19 个}/` + `extensions/browse/` + `prompts/ship.md` | `alfadb/pi-gstack` | cp 迁入，原仓 archive |
@@ -152,7 +152,7 @@
 | `~/.pi/.gbrain-source` / `.gbrain-cache/` / `.gbrain-scratch` | 2026-05-07 | 作废（不再依赖 gbrain） |
 | `extensions/gbrain/` | 2026-05-07 | → `extensions/memory/`（`memory_*` tools 替代 `gbrain_*` tools） |
 | `alfadb/pi-gstack` repo | 2026-05-05 | 整体并入 pi-astack（C 类） |
-| `alfadb/pi-multi-agent` repo | 2026-05-05 | subtree merge 入 pi-astack/extensions/multi-agent（C 类） |
+| `alfadb/pi-dispatch` repo | 2026-05-05 | subtree merge 入 pi-astack/extensions/dispatch（C 类） |
 | `alfadb/pi-sediment` repo | 2026-05-05 | subtree merge 入 pi-astack/extensions/sediment（C 类） |
 | `kingkongshot/Pensieve@feature/auto-sediment-hook` 分支 | 2026-05-05 | 删除（ADR 0005） |
 | `kingkongshot/Pensieve@pi` 分支 | 2026-05-05 | 删除（ADR 0005） |

@@ -1,7 +1,7 @@
 {
   "name": "@alfadb/pi-astack",
   "version": "0.1.0",
-  "description": "alfadb's personal pi workflow + memory infrastructure: extensions, skills, prompts built specifically for pi (similar to how gstack is built for claude-code). Sediment writes to two targets — pensieve (project-local .pensieve/ filesystem) and gbrain default (universal engineering principles); main session is read-only on both. ADR 0012 reverted v6.7's two-track gbrain-source design after gbrain v0.27 multi-source isolation proved unimplemented. Vendors garrytan/gstack as port reference; consolidates alfadb-native dispatch / sediment / model-curator / gbrain / retry-stream-eof.",
+  "description": "alfadb's personal pi workflow + memory infrastructure: extensions, skills, prompts built specifically for pi (similar to how gstack is built for claude-code). Memory architecture: pure markdown+git (project-level .pensieve/, world-level ~/.abrain/); main session read-only via memory_search/get/list/neighbors; sediment sidecar sole writer via memory_write/update/deprecate/promote/relate. gbrain entirely removed (2026-05-07, memory-architecture.md). Vendors garrytan/gstack as port reference; consolidates alfadb-native dispatch / model-curator / model-fallback.",
   "keywords": [
     "pi-package",
     "alfadb",
@@ -9,7 +9,7 @@
     "review",
     "qa",
     "memory",
-    "gbrain",
+    "markdown",
     "sediment",
     "dispatch",
     "model-curator"

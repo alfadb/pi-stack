@@ -129,7 +129,7 @@ pi install git:github.com/alfadb/pi-astack
 |---|---|---|
 | A 类：自有功能 | model-fallback / memory-* / sediment 改造 / 4 prompts | ❌ 不进，永久 own |
 | B 类：vendor 移植参考 | garrytan/gstack | ✅ 进，LLM 协作工作流 |
-| C 类：内部组件迁入 | pi-multi-agent / pi-sediment / pi-model-curator / pi-gstack | ❌ 不进（同一作者迁入） |
+| C 类：内部组件迁入 | pi-dispatch / pi-sediment / pi-model-curator / pi-gstack | ❌ 不进（同一作者迁入） |
 
 ## 沉淀
 
