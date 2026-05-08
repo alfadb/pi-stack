@@ -280,7 +280,13 @@ function registerSedimentCommand(pi: ExtensionAPI) {
 export default function (pi: ExtensionAPI) {
   registerSedimentCommand(pi);
 
-  pi.on("agent_end", async (_event: unknown, ctx: { cwd?: string; sessionManager?: { getBranch(): unknown[]; getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null }; ui?: { notify(message: string, type?: string): void } }) => {
+  pi.on("agent_end", async (_event: unknown, ctx: {
+    cwd?: string;
+    sessionManager?: { getBranch(): unknown[]; getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null };
+    modelRegistry?: unknown;
+    signal?: AbortSignal;
+    ui?: { notify(message: string, type?: string): void };
+  }) => {
     const settings = resolveSedimentSettings();
     if (!settings.enabled) return;
 
@@ -300,6 +306,14 @@ export default function (pi: ExtensionAPI) {
     }
     const sessionId = readSessionId(ctx.sessionManager);
     const notify = ctx.ui?.notify?.bind(ctx.ui);
+    // Capture EVERY ctx field we'll need post-await synchronously.
+    // pi may invalidate ctx ("stale ctx") between any await pair if a
+    // newSession/fork/reload/process-shutdown race fires; touching
+    // ctx after invalidation throws "Extension error: stale ctx". This
+    // bit us in A2 because we read ctx.modelRegistry / ctx.signal
+    // INSIDE the auto-write lane after several awaits.
+    const modelRegistry = ctx.modelRegistry;
+    const signal = ctx.signal;
     const settingsSnapshot = snapshotSedimentSettings(settings);
 
     // Ephemeral sessions (`pi --print --no-session`, dispatch_agent
@@ -382,8 +396,8 @@ export default function (pi: ExtensionAPI) {
         sessionId,
         settings,
         window,
-        modelRegistry: (ctx as { modelRegistry?: unknown }).modelRegistry,
-        signal: (ctx as { signal?: AbortSignal }).signal,
+        modelRegistry,
+        signal,
       });
       const tAutoEnd = Date.now();
 
