@@ -157,6 +157,35 @@ function validateTools(toolsStr: string | undefined): ToolValidation {
 
 // ── Subprocess ──────────────────────────────────────────────────
 
+interface RetryEntry {
+  /** 1-based attempt index from pi's auto_retry_start event. */
+  attempt: number;
+  /** First ~120 chars of the error message that triggered this retry. */
+  errorPreview?: string;
+  /** Backoff delay (ms) pi reported before this attempt. */
+  delayMs?: number;
+  /** Wall-clock when dispatch saw the auto_retry_start event. */
+  startedAt: number;
+}
+
+interface RetryHistory {
+  /** One entry per auto_retry_start event observed on the child stdout. */
+  entries: RetryEntry[];
+  /**
+   * Terminal outcome reported by pi via auto_retry_end. Undefined means we
+   * never observed an auto_retry_end (process killed mid-retry, etc.).
+   *
+   * - "succeeded": pi's retry loop produced a non-error assistant message
+   *   before maxRetries was hit. The next message_end after this carries the
+   *   actual successful output.
+   * - "exhausted": pi exhausted maxRetries; lastAssistant stays on the final
+   *   failed message.
+   */
+  finalOutcome?: "succeeded" | "exhausted";
+  /** Attempt number reported by the last auto_retry_end event. */
+  finalAttempt?: number;
+}
+
 interface SubprocessResult {
   output: string;
   error?: string;
@@ -168,6 +197,19 @@ interface SubprocessResult {
     total: number;
     cost: number;
   };
+  /**
+   * Pi internal retry history (auto_retry_start / auto_retry_end events).
+   * Independent of model-fallback. Undefined when no retry was triggered.
+   *
+   * The retry happens INSIDE the same pi subprocess: dispatch sees a failed
+   * message_end, then later a successful message_end (if recovery worked).
+   * lastAssistant tracks the latest message_end, so retry-then-succeed flows
+   * naturally produce stopReason=stop and dispatch reports success. This
+   * field surfaces "how many retries were burned" so the operator knows the
+   * difference between "first try succeeded" and "6th try succeeded after
+   * 5 transient EOFs".
+   */
+  retryHistory?: RetryHistory;
 }
 
 /**
@@ -256,6 +298,7 @@ function runSubprocess(
     const messages: any[] = [];
     let finalOutput = "";
     let lastAssistant: any = null;
+    const retryHistory: RetryHistory = { entries: [] };
 
     const processLines = (chunk: string) => {
       stdoutBuf += chunk;
@@ -277,7 +320,11 @@ function runSubprocess(
               }
 
               // Final text — taken from the LAST assistant message
-              // (earlier ones are intermediate tool-calling turns)
+              // (earlier ones are intermediate tool-calling turns).
+              // On retry: pi emits message_end(error) for the failed
+              // attempt, then later message_end(stop|toolUse) for the
+              // recovered attempt. We just keep overwriting; the last one
+              // wins, which is exactly the right semantics.
               finalOutput = "";
               if (event.message.content) {
                 for (const part of event.message.content) {
@@ -288,6 +335,29 @@ function runSubprocess(
           }
           if (event.type === "tool_result_end" && event.message) {
             messages.push(event.message);
+          }
+          // Pi-internal retry observability. These events come from
+          // agent-session.js _handleRetryableError / _processAgentEvent.
+          if (event.type === "auto_retry_start") {
+            const errorMessage =
+              typeof event.errorMessage === "string" ? event.errorMessage : undefined;
+            retryHistory.entries.push({
+              attempt:
+                typeof event.attempt === "number"
+                  ? event.attempt
+                  : retryHistory.entries.length + 1,
+              errorPreview: errorMessage
+                ? errorMessage.slice(0, 120).replace(/\s+/g, " ").trim()
+                : undefined,
+              delayMs: typeof event.delayMs === "number" ? event.delayMs : undefined,
+              startedAt: Date.now(),
+            });
+          }
+          if (event.type === "auto_retry_end") {
+            retryHistory.finalOutcome = event.success ? "succeeded" : "exhausted";
+            if (typeof event.attempt === "number") {
+              retryHistory.finalAttempt = event.attempt;
+            }
           }
         } catch {
           // Non-JSON line (banner, warning) — ignore in -p mode
@@ -346,6 +416,8 @@ function runSubprocess(
         };
       }
 
+      const retries = retryHistory.entries.length > 0 ? retryHistory : undefined;
+
       if (code !== 0) {
         resolve({
           output: finalOutput,
@@ -353,6 +425,7 @@ function runSubprocess(
           stopReason: lastAssistant?.stopReason,
           durationMs,
           usage,
+          retryHistory: retries,
         });
         return;
       }
@@ -364,6 +437,7 @@ function runSubprocess(
           stopReason: "error",
           durationMs,
           usage,
+          retryHistory: retries,
         });
         return;
       }
@@ -373,6 +447,7 @@ function runSubprocess(
         stopReason: lastAssistant?.stopReason,
         durationMs,
         usage,
+        retryHistory: retries,
       });
     });
 
@@ -389,6 +464,28 @@ function runSubprocess(
 
 // ── Result formatting ───────────────────────────────────────────
 
+/**
+ * One-line retry summary, suitable to splice into formatResult output.
+ * Returns empty string when no retries were observed (vast majority of calls).
+ *
+ * Examples:
+ *   retries: 1 attempt, recovered ✓ (first error: "connection lost — ...")
+ *   retries: 9 attempts, all failed ✗ (first error: "connection lost — ...")
+ *   retries: 3 attempts, status unknown (first error: "...")
+ */
+function formatRetrySummary(history?: RetryHistory): string {
+  if (!history || history.entries.length === 0) return "";
+  const n = history.entries.length;
+  const word = n === 1 ? "attempt" : "attempts";
+  let outcome: string;
+  if (history.finalOutcome === "succeeded") outcome = "recovered ✓";
+  else if (history.finalOutcome === "exhausted") outcome = "all failed ✗";
+  else outcome = "status unknown";
+  const firstErr = history.entries[0]?.errorPreview;
+  const errPart = firstErr ? ` (first error: "${firstErr}")` : "";
+  return `retries: ${n} ${word}, ${outcome}${errPart}`;
+}
+
 function formatResult(
   label: string,
   model: string,
@@ -398,16 +495,18 @@ function formatResult(
   const usageStr = result.usage
     ? ` ↑${result.usage.input} ↓${result.usage.output} $${result.usage.cost.toFixed(4)}`
     : "";
+  const retryLine = formatRetrySummary(result.retryHistory);
+  const retrySuffix = retryLine ? `\n_${retryLine}_` : "";
 
   if (result.error) {
-    return `## ${label} (${model}) ❌ ${dur}\n${result.error}${usageStr ? `\n_${usageStr}_` : ""}`;
+    return `## ${label} (${model}) ❌ ${dur}\n${result.error}${usageStr ? `\n_${usageStr}_` : ""}${retrySuffix}`;
   }
 
   const preview = result.output.length > 500
     ? result.output.slice(0, 500) + "..."
     : result.output;
 
-  return `## ${label} (${model}) ✅ ${dur}${usageStr ? ` _${usageStr}_` : ""}\n\n${preview}`;
+  return `## ${label} (${model}) ✅ ${dur}${usageStr ? ` _${usageStr}_` : ""}${retrySuffix}\n\n${preview}`;
 }
 
 // ── Extension ───────────────────────────────────────────────────
