@@ -227,8 +227,14 @@ async function main() {
     writeFile(path.join(root, ".pensieve", "staging", "beta.md"), makeEntry({ title: "Beta Smell", kind: "smell", status: "provisional", confidence: 2 }));
 
     const search = tools.get("memory_search");
-    const searchRes = await search.execute("smoke", search.prepareArguments({ query: "dispatch facade", limit: 2 }), new AbortController().signal, null, { cwd: root });
-    assert(searchRes.length >= 1 && searchRes[0].slug === "alpha", "memory_search failed");
+    const searchRaw = await search.execute("smoke", search.prepareArguments({ query: "dispatch facade", limit: 2 }), new AbortController().signal, null, { cwd: root });
+    // memory tools wrap results in ToolResult envelope { content: [{ type, text }], isError? }
+    // since commit 7f2b5d8 (fix(memory): wrap tool results in ToolResult shape).
+    // smoke must unwrap to access the business payload (plain JSON array/object).
+    assert(!searchRaw.isError, `memory_search returned isError envelope: ${JSON.stringify(searchRaw)}`);
+    assert(Array.isArray(searchRaw?.content) && searchRaw.content[0]?.type === "text", "memory_search envelope shape regressed (expected { content: [{type:'text', text}] })");
+    const searchRes = JSON.parse(searchRaw.content[0].text);
+    assert(Array.isArray(searchRes) && searchRes.length >= 1 && searchRes[0].slug === "alpha", `memory_search failed: ${JSON.stringify(searchRes)}`);
 
     const graph = await rebuildGraphIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "graph.json not written");
