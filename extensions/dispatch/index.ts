@@ -631,7 +631,30 @@ export default function (pi: ExtensionAPI) {
     }),
 
     prepareArguments(args: Record<string, unknown>) {
-      const raw = coerceTasksParam((args as any).tasks);
+      const rawTasks = (args as any).tasks;
+      const raw = coerceTasksParam(rawTasks);
+      // Defense-in-depth: coerceTasksParam now returns [] on failure rather
+      // than masquerading a string as an array, but we still throw an
+      // actionable error here so the model sees *why* its input was rejected
+      // rather than a generic "No tasks provided" or a downstream crash.
+      // Common failure: hand-stringified array where an inner prompt contains
+      // an unescaped quote (e.g. 中文 prompt with `"..."`), making outer
+      // JSON.parse fail mid-string.
+      if (!Array.isArray(raw) || raw.length === 0) {
+        const got =
+          rawTasks === undefined
+            ? "undefined"
+            : typeof rawTasks === "string"
+              ? `string of length ${rawTasks.length} starting with ${JSON.stringify(rawTasks.slice(0, 40))}`
+              : `${typeof rawTasks} (${Array.isArray(rawTasks) ? "empty array" : "non-array"})`;
+        throw new Error(
+          `dispatch_agents: 'tasks' must be a non-empty array of task objects {model, thinking, prompt}. ` +
+            `Got ${got}. ` +
+            `Pass tasks directly as a JSON array — do NOT wrap the entire array in a JSON string. ` +
+            `If your prompt contains quote characters, the host's tool-call serializer handles escaping; ` +
+            `you only need to author the array structurally.`,
+        );
+      }
       const tasks = raw.slice(0, MAX_PARALLEL).map((t: unknown) => {
         const n = normalizeTaskSpec(t);
         return {

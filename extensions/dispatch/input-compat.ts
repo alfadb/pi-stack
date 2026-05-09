@@ -96,6 +96,15 @@ export function normalizeTaskSpec(raw: unknown): TaskSpec {
 
 /**
  * Coerce the tasks parameter: stringified array → array, single task → [task].
+ *
+ * Returns an empty array (NOT the raw input) when coercion fails. Returning
+ * `raw as any` would let a string sneak past the `unknown[]` signature, after
+ * which `String.prototype.slice` masquerades as `Array.prototype.slice` and
+ * blows up with `raw.slice(...).map is not a function` two frames later. The
+ * canonical failure mode is a model that hand-stringified an array whose
+ * inner string contained an unescaped `"` (e.g. `"...用户给了你"推翻一切"的权力..."`),
+ * which JSON.parse rejects mid-string. We surface that as an empty array so
+ * `prepareArguments` can throw an actionable error instead of a cryptic one.
  */
 export function coerceTasksParam(raw: unknown): unknown[] {
   const unwrapped = unwrapStringified(raw);
@@ -105,8 +114,8 @@ export function coerceTasksParam(raw: unknown): unknown[] {
     // Single task object → wrap in array
     return [unwrapped];
   }
-  // Give up — let schema validator report the error
-  return raw as any;
+  // Give up — fall through to prepareArguments's actionable error path.
+  return [];
 }
 
 // ── error formatting ───────────────────────────────────────────

@@ -20,7 +20,8 @@
     "url": "git@github.com:alfadb/pi-astack.git"
   },
   "scripts": {
-    "smoke:memory": "node scripts/smoke-memory-sediment.mjs"
+    "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
+    "smoke:dispatch": "node scripts/smoke-dispatch-input-compat.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],
