@@ -7,7 +7,11 @@
 > - **scope=project\|world 二元划分（含 4.1 表 / 8 节 sediment 路由 / 9 节 promotion）**：被 brain 内部结构吸收。Lane B（manual promote）和 Lane D（auto-promote）失去意义。新增 Lane G（about-me declare）和 Lane V（vault declare）。
 > - **§7 工具接口**：`memory_search` 等 facade 接口形状保留，但 `scope` 参数语义重新定义（详见 brain-redesign-spec.md §4）。
 >
-> **仍然有效的部分**：sediment writer policy / 7 节 LLM-facing facade 契约 / Compiled Truth + Timeline 双段格式 / Lint 规则 / Brain Health 评分 / 8 节 sediment pipeline 的 extractor/triage/writer/reviewer 内核 / dedupe gates / rolling pass-rate fuse / audit row schema —— 这些与新 brain 物理拓扑正交，继续使用。
+> **仍然有效的部分**：sediment writer policy / 7 节 LLM-facing facade 契约 / Compiled Truth + Timeline 双段格式 / Lint 规则 / Brain Health 评分 / 8 节 sediment pipeline 的 extractor/triage/writer/reviewer 内核 / dedupe gates / rolling pass-rate fuse —— 这些与新 brain 物理拓扑正交，继续使用。
+>
+> **需要随 ADR 0014 同步修订的部分**（v1.1 incorporate Round 3 P0）：
+> - **audit row schema (§8.4)**：`lane` 字段 enum 扩展为 `"explicit" | "auto_write" | "about_me" | "vault_write"`（原ADR 0013 的 `promote` / `auto_promote` 不再使用）。Lane V 另写入独立 log `~/.abrain/.state/vault-events.jsonl`。详 [ADR 0014 §审计扩展](adr/0014-abrain-as-personal-brain.md#审计扩展)。
+> - **T7 lint 规则 (§10.1)**：`scope` frontmatter 字段从 **ERROR**-required 降为 **WARNING**-recommended——新 brain 拓扑下 scope 由目录位置隐式决定（§3.5 deterministic router），不再是显式选择。
 >
 > 阅读本文档时，遇到 `<project>/.pensieve/` 与 `~/.abrain/` 字样请同时参照 [brain-redesign-spec.md](brain-redesign-spec.md) 进行物理路径转换。
 
@@ -734,7 +738,7 @@ promotion:
 | T4 `timeline-bullet-format` | Timeline 每行必须是 `- YYYY-MM-DD \| ...` 格式 | WARNING |
 | T5 `timeline-chronological` | Timeline 条目按日期升序 | WARNING |
 | T6 `timeline-not-empty` | Timeline 至少一行记录 | WARNING |
-| T7 `frontmatter-required` | 必须有 `scope`/`kind`/`status`/`confidence`/`created`/`schema_version`/`title` | ERROR |
+| T7 `frontmatter-required` | 必须有 `kind`/`status`/`confidence`/`created`/`schema_version`/`title`；`scope` recommended 但不必须（新 brain 拓扑下 scope 由目录隐式决定） | ERROR / `scope` 缺失仅 WARNING |
 | T8 `no-code-fence-in-timeline` | Timeline 区域内不能出现 `` ``` `` code fence | ERROR |
 | T9 `no-table-in-timeline` | Timeline 区域内不能出现 Markdown table（`|---|` 分隔行或 `| 表头 |` 行）。注意：Timeline bullet 自身的 `|` 字段分隔符不属于 table | ERROR |
 | T10 `no-nested-list-in-timeline` | Timeline 区域内不能出现缩进子列表（仅允许顶层 `- `） | WARNING |

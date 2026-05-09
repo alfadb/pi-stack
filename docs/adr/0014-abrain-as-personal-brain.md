@@ -1,11 +1,12 @@
 # ADR 0014 — Abrain Personal Brain Redesign（重定位 ~/.abrain 为 alfadb 数字孪生）
 
 - **状态**：Accepted（2026-05-09）
+- **修订**：v1.1（2026-05-09，incorporate Round 3 复核 P0 修订）
 - **日期**：2026-05-09
 - **决策者**：alfadb
 - **依赖**：[ADR 0003](0003-main-session-read-only.md)、[ADR 0010](0010-sediment-single-agent-with-lookup-tools.md)、[ADR 0013](0013-asymmetric-trust-three-lanes.md)、[memory-architecture.md](../memory-architecture.md)
-- **被引用**：[brain-redesign-spec.md](../brain-redesign-spec.md)（详细规范）、待写 `migration/abrain-pensieve-migration.md`、待写 `migration/vault-bootstrap.md`
-- **触发**：2026-05-09 三轮多模型辩论（Opus 4-7 / GPT-5.5 / DeepSeek v4-pro）+ 用户重定位 ~/.abrain
+- **被引用**：[brain-redesign-spec.md](../brain-redesign-spec.md)（详细规范）、[migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)、[migration/vault-bootstrap.md](../migration/vault-bootstrap.md)
+- **触发**：2026-05-09 三轮多模型辩论（Opus 4-7 / GPT-5.5 / DeepSeek v4-pro）+ 用户重定位 ~/.abrain + 一轮 P0 复核（三方 PASS after fixing P0）
 
 ## 背景
 
@@ -58,9 +59,11 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 |---|---|---|---|---|
 | **A** explicit MEMORY | `MEMORY: ... END_MEMORY` | `projects/<active>/` | 高 | ✅ 已有，迁移目标 |
 | **C** auto-write | sediment LLM 后台 extract | `projects/<active>/` 或 `knowledge/` | 中 | ✅ 已有，迁移目标 |
-| **G** about-me declare | `/about-me` 或 `MEMORY-ABOUT-ME:` block | `identity/` 或 `habits/` 或 `skills/` | 高 | 🆕 |
-| **V** vault declare | `/secret <key>` 等系列命令 | 全局或项目级 vault | 最高 | 🆕 |
+| **G** about-me declare | `/about-me` 或 `MEMORY-ABOUT-ME:` block | `identity/` 或 `habits/` 或 `skills/`（按内容路由，**非** lane↔目录绑定） | 高 | 🆕 |
+| **V** vault declare | `/secret <key>` 等系列命令（**同步**：TUI → sediment IPC → 加密落盘 → 立即可用） | 全局或项目级 vault | 最高 | 🆕 |
 | ~~B promote~~ / ~~D auto-promote~~ | — | — | — | ⛔ 失去意义（abrain 内部无 promote） |
+
+> Lane G 的目标列三选一**由 sediment 按内容决定**（detereministic router 见 [spec §3.5](../brain-redesign-spec.md#35-deterministic-router)），不是
 
 ### D4. Vault 双层架构
 
@@ -96,14 +99,14 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 
 ## 关键不变量
 
-1. **ADR 0003 主会话只读不变**：主 session 仍只读，sediment 仍唯一 writer。Lane G 的"用户主动声明"不是主 session 写——是用户输入触发 sediment 落盘。
+1. **ADR 0003 主会话不写记忆类条目**（identity/habits/skills/workflows/projects/knowledge/vault 六个记忆类区域）：主 session 仍只读，sediment 仍唯一 writer。**例外**：Lane V 的 vault 写入是用户物理键入触发的同步管道，由 sediment IPC 同步处理（必须同步才能让 happy path "写完立即 `$VAULT_<key>` 可用"成立，详 spec §6.4.0）——这是对 ADR 0003 的严格补充，不是取消。Lane G 的"用户主动声明"不是主 session 写——是用户输入触发 sediment 落盘（异步 OK）。
 2. **Markdown + git 是 source of truth**（vault 例外，加密 + 不进 git）：索引/derived view 可重建。
-3. **Facade 不暴露 scope/backend/source_path** 给 LLM：LLM 看到的只是结果，scope 是 facade 内部 ranking 用。
-4. **跨 project vault 不互见**：active project 的 vault + 全局 vault 进 LLM context；其他 project 的 vault 连元数据都不暴露。
-5. **vault 明文进 LLM context 必须 user-explicit 授权**：`vault_release` 工具调用 + TUI 弹框确认，best-effort redaction（不是绝对保证）但默认排除是硬不变量。
-6. **sub-pi 默认看不到任何 vault**：父 pi 已有授权不传给子 pi。
-7. **七区互斥**：identity/habits/skills/workflows/projects/knowledge/vault 各自有明确边界，不交叉写入；模糊地带由 sediment prompt 的分类逻辑决定，不是 LLM-facing 选择。
-8. **"删除我所有秘密" = `rm -rf ~/.abrain/vault ~/.abrain/projects/*/vault`**：因 vault 不进 git，删除即彻底（无 git history 残留）。
+3. **Facade 不暴露 scope/backend/source_path** 给 LLM ranking surface：`memory_search(query)` 签名无多余形参（`scope` 不存在于 schema）。例外：`memory_get(slug)` 是 exact lookup/debug view，可返回 scope/source_path 供调试——不是 LLM 选后端的机制。
+4. **跨 project vault 不互见**：active project（**boot-time snapshot**，详 spec §5.4）的 vault + 全局 vault 进 LLM context；其他 project 的 vault 连元数据都不暴露。会话中 bash `cd` 不改变 active project。
+5. **vault 明文进 LLM context 必须 user-explicit 授权**：`vault_release` 工具调用 + TUI 弹框确认；best-effort redaction（不是绝对保证）但默认排除是硬不变量。**补充**：引用了 `$VAULT_*` env 的 bash 命令 stdout/stderr **默认不回流 LLM**，需用户 once-授权（详 spec §6.5.1）——这是 LLM 主动 exfiltration 的机制性防御，不仅依赖 redaction 过滤器。
+6. **sub-pi 默认看不到任何 vault**：父 pi 已有授权不传给子 pi。**机制**：子 pi 启动时 `PI_ABRAIN_DISABLED=1` env 强制 abrain extension 跳过 keychain unlock（详 [vault-bootstrap.md §5](../migration/vault-bootstrap.md#5-每个-pi-进程启动时的-unlock-check)）。
+7. **七区目录互斥**：identity/habits/skills/workflows/projects/knowledge/vault **七个目录**互斥（单条 entry 物理上只在一处），**但** habits/skills 等概念在全局与项目级有镜像目录（`habits/` 与 `projects/<id>/habits/` 并存），由 sediment 按 scope of generalization 决定写哪层。边界路由由 deterministic router 规范（§审计扩展 + spec §3.5）决定，不是 LLM-facing 选择。
+8. **"删除我所有秘密" = `rm -rf ~/.abrain/vault ~/.abrain/projects/*/vault`**：因 vault 不进 git，**git history 无残留**。补充：filesystem 层面的残留（swap / journal / undelete recovery）属 OS-level，超出本 spec 范围。
 
 ## 后果
 
@@ -118,13 +121,15 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 
 ### 坏处
 
-1. **迁移成本**：现有 pi-astack 项目 `.pensieve/` 含 182 entries，必须一次性 mv（详见 §migration）。其他绑定项目同样要走一遍。
+1. **迁移成本**：现有 pi-astack 项目 `.pensieve/` 含 182 entries，必须一次性 mv（详 [migration playbook](../migration/abrain-pensieve-migration.md)）。其他绑定项目同样要走一遍。
 2. **vault 引入 OS keychain 依赖**：systemd user service / launchd 配置首次需要用户手动设置；不同 OS 的实现不同。
 3. **多 pi 并发的边界 case**：聚合文件最后写入赢策略接受了"瞬间不一致"代价。极罕见情况下用户可能看到旧版 _index.md（实际无副作用，因为 derived view）。
 4. **ADR 0013 的 Lane B/D 失去意义**：迁移期需要文档说明"为什么这两个 Lane 在新架构下消失"——避免未来贡献者困惑。
 5. **memory-architecture.md 部分 superseded**：那份文档是 2026-05-07 经两轮三模型评审通过的"权威规范"，现在它的 scope/backend/Facade 部分仍然成立，但物理拓扑（.pensieve/ + ~/.abrain/）需要明确标记 superseded。
 6. **vault 明文 redaction 是 best-effort**：false positive（普通字符串恰好匹配）和 false negative（base64-encoded value 不匹配）都存在。这个 trade-off 比"完全不 redact"好两个数量级，但不是绝对保证——用户已知已选。
 7. **机器被偷或被未授权 ssh 时 vault 全裸**：开机自动解锁 + 无超时 lock 是用户明确选择换便利；这个风险已知已选。
+8. **abrain 主体本身的敏感度**：顶层 identity/values.md / cognitive-profile.md / self-narrative.md 全部进 git。private remote 凭证保护是隐含前置条件——未来需要单独 ADR 处理 abrain repo 本身的供应链安全（commit signing / verified push 等）。
+9. **LLM 主动 exfiltration 是已知攻击面**：`echo $VAULT_xxx | base64` 类命令能让明文绕过字面 redaction。不变量 #5 的补充（引用 `$VAULT_*` 的 bash stdout 默认不回流 LLM）是机制性防御，但 prompt injection 场景下远不是绝对保证。在高价值 vault（如 prod credential）上这是主动选择的 known trade-off。
 
 ### 中性
 
@@ -134,18 +139,44 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 
 ## 实施现状
 
-**未实施**——本 ADR 是设计决策记录。具体实施步骤待写入 `migration/abrain-pensieve-migration.md`：
+**未实施**——本 ADR 是设计决策记录。完整实施 plan 在 [migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)（§1 8-phase plan）与 [migration/vault-bootstrap.md](../migration/vault-bootstrap.md)。下面是 phase 摆跱，详情看两个 sub-spec：
 
-1. sediment writer 加"目标路径切换"逻辑（看 `_bindings.md` 决定写哪）
-2. cwd 绑定 prompt（pi 启动时未绑定 → TUI 提示）
-3. age 加密 + OS keychain 集成（vault 基础设施）
-4. Lane G `/about-me` 命令实现
-5. Lane V `/secret` `/vault import-env` 命令实现
-6. mv 现有 .pensieve/* → ~/.abrain/projects/<id>/
-7. 兼容期 symlink（让旧脚本继续 work）
-8. 验证 1-2 周 → 删 symlink + 清理 fallback
+| Phase | 动作 | 验收 |
+|---|---|---|
+| **P0** | vault-bootstrap（age + OS keychain 平台矩阵 + master key 生成） | `pi vault status` 返回 unlocked |
+| **P1** | 新增 `resolveActiveProject(cwd)` / `resolveBrainPaths()` 单一入口，所有读旧 `.pensieve` 代码改走它 | resolver 单测通 + 现有功能零回归 |
+| **P2** | Facade dual-read：同时读旧 `.pensieve` + 新 `~/.abrain/projects/<id>/` | smoke：旧内容可被找到 + 新空目录不报错 |
+| **P3** | dedupe / projectSlug / lint / index / git-root 全部走 resolver | grep 整 repo 无残留 hard-coded `.pensieve` |
+| **P4** | Freeze write + smoke 1-2 天观察 | 连续 24h 无 split-brain |
+| **P5** | 持锁迁移：sediment lock + manifest 下 mv | manifest 完整 + epoch 写入 |
+| **P6** | Writer cutover：sediment writer 改写新路径 | 一次新写入落地 + audit lane 含新值 |
+| **P7** | Symlink 兼容期 1-2 周 | 无报错 |
+| **P8** | 删 fallback（dual-read / symlink / 旧 config） | 全链路只走新路径 |
 
-预计 1-2 周工程量。
+关键约束：P4 之前可 **完全 revert**（git revert 即可）；P5 之后是 forward-only；P6 之后的 delta 只能走 [migration playbook §3-4](../migration/abrain-pensieve-migration.md#3-rollback-playbookp5-半成品状态) 处理。
+
+预计工程：纯代码 ≈3 天 + 2 周观察期。
+
+## 审计扩展
+
+ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "auto_write" | "auto_promote"`。Lane G/V 引入后，lane enum 必须同步扩展：
+
+```jsonc
+// sediment-events.jsonl — lane 字段在新架构下的枚举
+{
+  "lane": "explicit"      // Lane A — 仍有效
+         | "auto_write"    // Lane C — 仍有效
+         | "about_me"      // Lane G — 新增
+         | "vault_write"   // Lane V — 新增。记录到独立 log `vault-events.jsonl`（§下）
+         // “promote” / “auto_promote” 不再处于枚举内——abrain 内部无 promote
+}
+```
+
+**两个 audit log**：
+- `~/.abrain/.state/sediment-events.jsonl`：Lane A / C / G 都走这里（sediment pipeline 内部事件）
+- `~/.abrain/.state/vault-events.jsonl`：**Lane V 独立 log**（vault 写入是 sediment 同步处理但在不同事务路径，另走一份 log 避免与 agent_end 异步事件联屏造成验证混乱）
+
+[memory-architecture.md](../memory-architecture.md) 的 supersede banner 同步修正为："audit row schema → 扩展 lane 字段，见 ADR 0014"。
 
 ## 与上游 ADR 的关系
 
