@@ -20,6 +20,55 @@ import { checkBacklinks, formatBacklinkReport, formatGraphRebuildReport, rebuild
 import { formatMarkdownIndexRebuildReport, rebuildMarkdownIndex } from "./index-file";
 import { clamp, normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
 
+// ─────────────────────────────────────────────────────────────────────────
+// Tool result wrapper.
+//
+// pi-agent-core's tool execution loop (createToolResultMessage) reads
+// `result.content` directly into `toolResult.message.content`. If a tool
+// `execute()` returns a bare business object (array / plain object), then
+// `message.content === undefined`, and on the next turn pi-ai's provider-side
+// message conversion crashes:
+//
+//   openai-responses-shared.js:161  msg.content.filter(...)
+//   anthropic.js:77                 content.some(...)   (via convertContentBlocks)
+//
+// Both fail with `Cannot read properties of undefined (reading 'filter'|'some')`,
+// silently if the tool call is single-turn (the next turn is what blows up).
+//
+// Fix: every memory tool MUST return a ToolResult-shape: a content array of
+// text/image blocks, with optional `isError`. We JSON-encode business payloads
+// (search results / entry / neighbor list) into a single text block — the LLM
+// sees structured JSON exactly as before, and the provider conversion is happy.
+//
+// Reference shape (matches how dispatch / imagine / vision return):
+//   { content: [{ type: "text", text: "..." }], isError?: boolean }
+// ─────────────────────────────────────────────────────────────────────────
+function wrapToolResult(
+  payload: unknown,
+): { content: Array<{ type: "text"; text: string }>; isError?: boolean } {
+  const isError =
+    !!payload &&
+    typeof payload === "object" &&
+    "ok" in (payload as Record<string, unknown>) &&
+    (payload as Record<string, unknown>).ok === false;
+
+  let text: string;
+  if (typeof payload === "string") {
+    text = payload;
+  } else {
+    try {
+      text = JSON.stringify(payload, null, 2);
+    } catch {
+      text = String(payload);
+    }
+  }
+
+  return {
+    content: [{ type: "text" as const, text }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
+
 function registerMemoryCommand(pi: ExtensionAPI) {
   const maybePi = pi as unknown as {
     registerCommand?: (name: string, options: {
@@ -158,7 +207,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_id: string, params: SearchParams, signal: AbortSignal, _onUpdate: unknown, ctx: { cwd?: string }) {
       const settings = resolveSettings();
       const entries = await loadEntries(ctx.cwd, settings, signal);
-      return searchEntries(entries, params, settings);
+      return wrapToolResult(searchEntries(entries, params, settings));
     },
   });
 
@@ -196,9 +245,15 @@ export default function (pi: ExtensionAPI) {
       const entries = await loadEntries(ctx.cwd, settings, signal);
       const { entry, alternatives } = findEntry(entries, params.slug);
       if (!entry) {
-        return { ok: false, error: `memory entry not found: ${params.slug}`, slug: normalizeBareSlug(params.slug) };
+        return wrapToolResult({
+          ok: false,
+          error: `memory entry not found: ${params.slug}`,
+          slug: normalizeBareSlug(params.slug),
+        });
       }
-      return serializeEntry(entry, entries, !!params.options?.include_related, alternatives);
+      return wrapToolResult(
+        serializeEntry(entry, entries, !!params.options?.include_related, alternatives),
+      );
     },
   });
 
@@ -224,7 +279,7 @@ export default function (pi: ExtensionAPI) {
     async execute(_id: string, params: { filters?: ListFilters }, signal: AbortSignal, _onUpdate: unknown, ctx: { cwd?: string }) {
       const settings = resolveSettings();
       const entries = await loadEntries(ctx.cwd, settings, signal);
-      return listEntries(entries, params.filters ?? {}, settings);
+      return wrapToolResult(listEntries(entries, params.filters ?? {}, settings));
     },
   });
 
@@ -260,9 +315,14 @@ export default function (pi: ExtensionAPI) {
       const entries = await loadEntries(ctx.cwd, settings, signal);
       const target = findEntry(entries, params.slug).entry;
       if (!target) {
-        return { ok: false, error: `memory entry not found: ${params.slug}`, slug: normalizeBareSlug(params.slug), neighbors: [] };
+        return wrapToolResult({
+          ok: false,
+          error: `memory entry not found: ${params.slug}`,
+          slug: normalizeBareSlug(params.slug),
+          neighbors: [],
+        });
       }
-      return {
+      return wrapToolResult({
         slug: target.slug,
         neighbors: neighbors(
           entries,
@@ -270,7 +330,7 @@ export default function (pi: ExtensionAPI) {
           params.options?.hop ?? 1,
           params.options?.max ?? 20,
         ),
-      };
+      });
     },
   });
 }
