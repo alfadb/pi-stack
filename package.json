@@ -21,7 +21,9 @@
   },
   "scripts": {
     "smoke:memory": "node scripts/smoke-memory-sediment.mjs",
-    "smoke:dispatch": "node scripts/smoke-dispatch-input-compat.mjs"
+    "smoke:dispatch": "node scripts/smoke-dispatch-input-compat.mjs",
+    "smoke:fallback-timing": "node scripts/smoke-model-fallback-mutation-timing.mjs",
+    "smoke:paths": "node scripts/smoke-pi-astack-paths.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],

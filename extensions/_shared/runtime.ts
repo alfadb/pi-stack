@@ -99,6 +99,22 @@ export function compactionTunerAuditPath(projectRoot: string): string {
   return path.join(compactionTunerDir(projectRoot), "audit.jsonl");
 }
 
+/* -------- model-fallback ----------------------------------------------- */
+
+export function modelFallbackDir(projectRoot: string): string {
+  return piAstackModuleDir(projectRoot, "model-fallback");
+}
+export function modelFallbackCanaryPath(projectRoot: string): string {
+  return path.join(modelFallbackDir(projectRoot), "canary.log");
+}
+/** Legacy home-level location, used to be `~/.pi-extensions/model-fallback.log`. */
+export function legacyModelFallbackCanaryPath(home: string): string {
+  return path.join(home, ".pi-extensions", "model-fallback.log");
+}
+export function legacyRetryStreamEofPath(home: string): string {
+  return path.join(home, ".pi-extensions", "retry-stream-eof.log");
+}
+
 /* -------- legacy fallback paths ---------------------------------------- *
  * Returned alongside the canonical paths so consumers can read either
  * location during the transition window. Once existing data is migrated,

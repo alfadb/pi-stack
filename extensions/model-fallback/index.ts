@@ -3,11 +3,38 @@
  *
  * 初始模型错误时 pi 内建指数退避重试（依 pi settings#retry.maxRetries）；
  * 耗尽后切成下一个已配置的 fallback 模型继续——直到列表里有人成功，或全部
- * 失败。Falback 模型任一错误直接切（不重试）。
+ * 失败。Fallback 模型任一错误直接切（不重试）。
  *
- * pi agent_end 里扩展先于 pi 的 _handleRetryableError 运行：加 "connection
- * lost — " 前缀触发 pi 重试，或不加前缀让 pi 跳过 retry 分支。切换模型 +
- * 继续走 setTimeout(100ms) 落地到 pi give-up 之后。
+ * 加 "connection lost — " 前缀让 pi 的 retry regex（含 "connection\\.?lost"）能
+ * 命中任意错误上游错误字面不一致的 case，最典型的是 anthropic.js
+ * 抛的 "Anthropic stream ended before message_stop"（regex 要的是 "ended
+ * without"）。不加前缀则让 pi 跳过 retry 分支（用于 fallback 模型，
+ * 不重试）。
+ *
+ * 【为什么 mutation 在 message_end 而不是 agent_end】
+ * pi-coding-agent 的 _handleAgentEvent 是 sync listener，会在 agent_end
+ * 分发时**同步**调用 _createRetryPromiseForAgentEnd 评估
+ * _isRetryableError——这个评估是 race fix，决定 prompt() 是否要等 retry。
+ *
+ * 如果 mutation 在 agent_end handler 里，几个事实会合谋让 retry 完全跳过：
+ *   1. agent_end emit 同步分发 _handleAgentEvent
+ *   2. _createRetryPromiseForAgentEnd 同步评估 —— 读原始 errorMessage
+ *      （如 "stream_read_error"）→ regex 不命中 → _retryPromise 不创建
+ *   3. _processAgentEvent 入 queue，model-fallback agent_end handler
+ *      才进行 mutation——但这时过晚
+ *   4. prompt() 的 waitForRetry 看到 _retryPromise=undefined 立即 resolve
+ *   5. print mode 退出，后续 setTimeout schedule 的 agent.continue() 永不执行
+ *
+ * 把 mutation 提前到 message_end handler（在 agent_end 之前 emit），
+ * 且 message_end 的 _processAgentEvent 是主动 await——在同一个 microtask
+ * drain 中比 agent_end 的同步评估**更早完成**（实证验证：见
+ * scripts/smoke-model-fallback-mutation-timing.mjs）。这样 agent_end
+ * 评估 _isRetryableError 时看到的是 mutated 版本，retry 能正常启动。
+ *
+ * agent_end handler 仍保留：
+ *   - consecutiveErrors 计数 + fallback 调度（走到 give-up 后切模型）
+ *   - 防御式 mutation（如果 message_end 未能 mutate ．例如某些错误路径不
+ *     走 message_end）
  *
  * 扩展自动读取 pi settings.json#retry.maxRetries，对齐 give-up 节点。
  * 旧名 retry-stream-eof → retry-all-errors。
@@ -18,7 +45,13 @@ import type { Model } from "@earendil-works/pi-ai";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { formatLocalIsoTimestamp } from "../_shared/runtime";
+import {
+	formatLocalIsoTimestamp,
+	legacyModelFallbackCanaryPath,
+	legacyRetryStreamEofPath,
+	modelFallbackCanaryPath,
+	modelFallbackDir,
+} from "../_shared/runtime";
 
 // ── Constants ─────────────────────────────────────────────────
 
@@ -57,8 +90,28 @@ function loadPiMaxRetries(): number {
 	return PI_DEFAULT_MAX_RETRIES;
 }
 
-const CANARY_LOG_DIR = path.join(os.homedir(), ".pi-extensions");
-const CANARY_LOG_PATH = path.join(CANARY_LOG_DIR, "model-fallback.log");
+/**
+ * canary.log location
+ *
+ * Was `~/.pi-extensions/model-fallback.log` (home-level, single file across
+ * all projects). Moved 2026-05-09 to `<projectRoot>/.pi-astack/model-fallback/
+ * canary.log` to align with all other pi-astack modules
+ * (sediment / memory / compaction-tuner / imagine all live under
+ * `<projectRoot>/.pi-astack/<module>/`).
+ *
+ * Trade-off accepted with the move: cross-project failure patterns are now
+ * spread across N project log files instead of one global log. Per-project
+ * isolation matches the pi-astack convention and makes `rm -rf .pi-astack/`
+ * a clean way to forget all derived state for one project. If a future
+ * cross-project view is needed, it can be assembled by globbing
+ * `~/<project>/.pi-astack/model-fallback/canary.log` (the literal glob
+ * pattern would close this block comment, so it is rendered with a
+ * placeholder); the canonical sink stays project-scoped.
+ *
+ * Legacy files at `~/.pi-extensions/{model-fallback,retry-stream-eof}.log`
+ * are NOT auto-migrated (cannot attribute history to a single project).
+ * They remain on disk after this change and can be deleted by hand.
+ */
 const CANARY_LOG_MAX_BYTES = 512 * 1024;
 
 /** Delay after pi's give-up logic before we switch model + trigger continuation. */
@@ -89,16 +142,54 @@ function loadConfig(): ModelFallbackConfig {
 
 // ── Canary log (best-effort) ──────────────────────────────────
 
-function canaryLog(line: string): void {
+/**
+ * Append a line to `<projectRoot>/.pi-astack/model-fallback/canary.log`.
+ * Best-effort: any IO error is swallowed (fallback policy still runs).
+ *
+ * `projectRoot` is required — caller must resolve from `ctx.cwd` (or
+ * `process.cwd()` when ctx is unavailable). The path is rebuilt every call
+ * so cwd changes within a long-running pi process route to the right
+ * project's log.
+ */
+function canaryLog(projectRoot: string, line: string): void {
 	try {
-		fs.mkdirSync(CANARY_LOG_DIR, { recursive: true });
+		const dir = modelFallbackDir(projectRoot);
+		const file = modelFallbackCanaryPath(projectRoot);
+		fs.mkdirSync(dir, { recursive: true });
 		try {
-			const stat = fs.statSync(CANARY_LOG_PATH);
-			if (stat.size > CANARY_LOG_MAX_BYTES) fs.unlinkSync(CANARY_LOG_PATH);
+			const stat = fs.statSync(file);
+			if (stat.size > CANARY_LOG_MAX_BYTES) fs.unlinkSync(file);
 		} catch {
 			/* file doesn't exist */
 		}
-		fs.appendFileSync(CANARY_LOG_PATH, `${formatLocalIsoTimestamp()} ${line}\n`);
+		fs.appendFileSync(file, `${formatLocalIsoTimestamp()} ${line}\n`);
+	} catch {
+		/* best-effort */
+	}
+}
+
+/**
+ * One-time noop check: at extension load, if the legacy home-level log files
+ * still exist, log a one-line breadcrumb to the new location so the user
+ * can find them on inspection. We do NOT auto-delete — those files may
+ * contain history from before this migration that is worth keeping.
+ */
+function noteLegacyLogsIfPresent(projectRoot: string): void {
+	try {
+		const home = os.homedir();
+		const legacy = [
+			legacyModelFallbackCanaryPath(home),
+			legacyRetryStreamEofPath(home),
+		];
+		const existing = legacy.filter((p) => {
+			try { fs.statSync(p); return true; } catch { return false; }
+		});
+		if (existing.length > 0) {
+			canaryLog(
+				projectRoot,
+				`legacy-logs-still-on-disk count=${existing.length} paths=[${existing.join(",")}] (safe to rm by hand)`,
+			);
+		}
 	} catch {
 		/* best-effort */
 	}
@@ -133,6 +224,10 @@ export default function (pi: ExtensionAPI) {
 	const tried = new Set<string>(); // keys: "provider/id"
 	let fallbackInFlight = false;
 
+	// resetState() may be called from contexts where we don't have an
+	// extension ctx (e.g., on a fallback's success after switching). In
+	// those cases we use process.cwd() at the moment of reset; for a
+	// long-running pi this is the same as the active project's cwd.
 	const resetState = () => {
 		if (
 			consecutiveErrors !== 0 ||
@@ -141,6 +236,7 @@ export default function (pi: ExtensionAPI) {
 			isOnFallback
 		) {
 			canaryLog(
+				path.resolve(process.cwd()),
 				`reset consecutiveErrors=${consecutiveErrors} tried=[${[...tried].join(",")}] isOnFallback=${isOnFallback} fallbackInFlight=${fallbackInFlight}`,
 			);
 		}
@@ -150,16 +246,46 @@ export default function (pi: ExtensionAPI) {
 		fallbackInFlight = false;
 	};
 
-	// Reset on any successful assistant message.
-	pi.on("message_end", (event, _ctx) => {
+	// At extension activation, surface a one-time pointer to legacy log
+	// files so they don't get forgotten on disk.
+	noteLegacyLogsIfPresent(path.resolve(process.cwd()));
+
+	// message_end handler —— 主要有两件事：
+	//   1. 成功 assistant message 重置 fallback state
+	//   2. 错误 assistant message 在这里提前处理 retry prefix mutation
+	//      —— 必须在 agent_end 同步评估之前完成（详见文件头注释）。
+	// 保持 sync handler——不能加 async，否则 await listener 会意外延迟。
+	pi.on("message_end", (event, ctx: any) => {
 		if (event.message.role !== "assistant") return;
-		const msg = event.message as { stopReason?: string };
+		const msg = event.message as { stopReason?: string; errorMessage?: string };
+
 		if (msg.stopReason !== "error") {
 			resetState();
+			return;
+		}
+
+		// Error path: 提前 mutation。只在初始模型阶段加前缀——fallback 阶段不
+		// 加前缀，让 pi 看到不可 retry 错误、跳过重试分支，交给 agent_end
+		// 的 fallback 逻辑决定是否切下一个模型。
+		if (
+			!isOnFallback &&
+			msg.errorMessage &&
+			!msg.errorMessage.startsWith(RETRYABLE_PREFIX)
+		) {
+			msg.errorMessage = RETRYABLE_PREFIX + msg.errorMessage;
+			const projectRoot = path.resolve(ctx?.cwd || process.cwd());
+			canaryLog(
+				projectRoot,
+				`mutated@message_end errorMessage="${msg.errorMessage.slice(0, 200).replace(/[\r\n]+/g, " ")}"`,
+			);
 		}
 	});
 
-	pi.on("agent_end", async (event, ctx) => {
+	pi.on("agent_end", async (event, ctx: any) => {
+		// Resolve projectRoot once per agent_end — reused by every canaryLog
+		// call below (including the deferred setTimeout closure).
+		const projectRoot = path.resolve(ctx?.cwd || process.cwd());
+
 		// Find last assistant message in the turn's messages.
 		let last: (typeof event.messages)[number] | undefined;
 		for (let i = event.messages.length - 1; i >= 0; i--) {
@@ -187,12 +313,24 @@ export default function (pi: ExtensionAPI) {
 		const threshold = isOnFallback ? fallbackErrorThreshold : initialErrorThreshold;
 		const allowPiAutoRetry = !isOnFallback;
 
+		// 防御式 mutation：正常路径下 message_end handler 已经 mutate 过，这里
+		// idempotent 跳过。但如果 message_end 未被触发过（某些错误路径可能跳过
+		// message_end 直接 emit agent_end），这里还是能加上前缀——但这个路径
+		// 上的 retry 会失效（因为 _createRetryPromiseForAgentEnd 已评估过原始
+		// errorMessage），mutation 只能让 fallback 路径能譯 model-fallback 的意图。
 		if (allowPiAutoRetry && !msg.errorMessage.startsWith(RETRYABLE_PREFIX)) {
 			msg.errorMessage = RETRYABLE_PREFIX + msg.errorMessage;
 			canaryLog(
-				`retryable errorMessage="${msg.errorMessage.slice(0, 200).replace(/[\r\n]+/g, " ")}"`,
+				projectRoot,
+				`mutated@agent_end (defensive—message_end skipped) errorMessage="${msg.errorMessage.slice(0, 200).replace(/[\r\n]+/g, " ")}"`,
 			);
 			ctx.ui?.notify?.("Error detected — auto-retrying", "info");
+		} else if (allowPiAutoRetry) {
+			// 已被 message_end mutate——这是 normal path。仅记录调调用于调试，不 notify。
+			canaryLog(
+				projectRoot,
+				`agent_end-skip-already-mutated errorMessage="${msg.errorMessage.slice(0, 80).replace(/[\r\n]+/g, " ")}"`,
+			);
 		}
 
 		// Trigger our fallback once we hit the per-role threshold. Guarded by
@@ -201,13 +339,13 @@ export default function (pi: ExtensionAPI) {
 
 		if (config.fallbackModels.length === 0) {
 			// No fallback configured → retry-only behavior, no model switching.
-			canaryLog("fallback-disabled (no fallbackModels configured)");
+			canaryLog(projectRoot, "fallback-disabled (no fallbackModels configured)");
 			return;
 		}
 
 		const currentModel = ctx.model;
 		if (!currentModel) {
-			canaryLog("fallback-skip (ctx.model undefined)");
+			canaryLog(projectRoot, "fallback-skip (ctx.model undefined)");
 			return;
 		}
 
@@ -256,7 +394,7 @@ export default function (pi: ExtensionAPI) {
 				`model-fallback: all ${tried.size} fallback model(s) exhausted — giving up`,
 				"error",
 			);
-			canaryLog(`fallback-exhausted tried=[${[...tried].join(",")}]`);
+			canaryLog(projectRoot, `fallback-exhausted tried=[${[...tried].join(",")}]`);
 			resetState();
 			return;
 		}
@@ -281,13 +419,14 @@ export default function (pi: ExtensionAPI) {
 						`model-fallback: setModel("${nextKey}") returned false — fallback aborted`,
 						"error",
 					);
-					canaryLog(`fallback-setModel-failed model=${nextKey}`);
+					canaryLog(projectRoot, `fallback-setModel-failed model=${nextKey}`);
 					fallbackInFlight = false;
 					return;
 				}
 
 				isOnFallback = true;
 				canaryLog(
+					projectRoot,
 					`fallback-switched from=${fromKey} to=${nextKey} role=${becameFallback ? "initial->fallback" : "fallback->fallback"}`,
 				);
 				ctx.ui?.notify?.(`Falling back: ${fromKey} → ${nextKey}`, "info");
@@ -318,7 +457,7 @@ export default function (pi: ExtensionAPI) {
 				);
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
-				canaryLog(`fallback-error ${msg}`);
+				canaryLog(projectRoot, `fallback-error ${msg}`);
 				ctx.ui?.notify?.(
 					`model-fallback: fallback failed: ${msg}`,
 					"error",
