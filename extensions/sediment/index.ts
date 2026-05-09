@@ -397,7 +397,7 @@ export default function (pi: ExtensionAPI) {
     applySedimentStatus(setStatus, sessionId, "idle");
   });
 
-  pi.on("agent_end", async (_event: unknown, ctx: {
+  pi.on("agent_end", async (event: { messages?: ReadonlyArray<{ role?: string; stopReason?: string; errorMessage?: string }> }, ctx: {
     cwd?: string;
     sessionManager?: { getBranch(): unknown[]; getSessionId?(): string | undefined | null; getSessionFile?(): string | undefined | null };
     modelRegistry?: unknown;
@@ -473,6 +473,45 @@ export default function (pi: ExtensionAPI) {
         checkpoint_advanced: false,
         stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
       });
+      return;
+    }
+
+    // Skip sediment when the agent loop ended unhealthy (LLM error or
+    // user-abort). Per spec: do NOT advance checkpoint — the next
+    // successful agent_end will re-process this window so MEMORY: blocks
+    // written before the failure (or regenerated cleanly on retry) are
+    // still recoverable. We still emit one audit row + a footer status
+    // so the skip is visible / traceable.
+    //
+    // Only `error` and `aborted` are treated as unhealthy here. `length`
+    // (token truncation) and `toolUse` (rare at loop end) are left in
+    // the healthy path because MEMORY: blocks typically aren't at the
+    // tail and may still be intact.
+    const lastAssistant = [...(event.messages ?? [])]
+      .reverse()
+      .find((m) => m?.role === "assistant");
+    const unhealthyStopReason =
+      lastAssistant?.stopReason === "error"   ? "agent_error"   :
+      lastAssistant?.stopReason === "aborted" ? "agent_aborted" :
+      null;
+    if (unhealthyStopReason) {
+      await appendAudit(cwd, {
+        operation: "skip",
+        reason: unhealthyStopReason,
+        session_id: sessionId,
+        branch_size: branch.length,
+        stop_reason: lastAssistant?.stopReason,
+        error_message: lastAssistant?.errorMessage,
+        settings_snapshot: settingsSnapshot,
+        extractor: "explicit_marker",
+        parser_version: PARSER_VERSION,
+        checkpoint_advanced: false,
+        stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
+      });
+      const detail = unhealthyStopReason === "agent_error"
+        ? "skip: agent error"
+        : "skip: agent aborted";
+      applySedimentStatus(setStatus, sessionId, "completed", detail);
       return;
     }
 
