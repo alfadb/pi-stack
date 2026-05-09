@@ -64,6 +64,34 @@ function realFileExists(p: string): boolean {
   }
 }
 
+/**
+ * Look up the first GPG secret key id by parsing
+ * `gpg --list-secret-keys --with-colons`. Returns null if no secret keys
+ * or gpg fails. Used by detectBackend's Tier 1 gpg-file path.
+ *
+ * Output format ref: gpg(1) --with-colons. We grab the `sec:` line and
+ * field 5 (long key id, e.g. ABCD1234EF567890).
+ */
+function realGpgFirstSecretKey(): string | null {
+  try {
+    const out = execFileSync("gpg", ["--list-secret-keys", "--with-colons"], {
+      stdio: ["ignore", "pipe", "ignore"],
+      encoding: "utf8",
+      timeout: 2000, // gpg-agent slowness should not block pi start
+    });
+    for (const line of out.split("\n")) {
+      if (line.startsWith("sec:")) {
+        const fields = line.split(":");
+        const keyId = fields[4]; // 5th field (1-indexed: keyid)
+        if (keyId && keyId.length > 0) return keyId;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function buildRealDeps(): DetectDeps {
   return {
     commandExists: realCommandExists,
@@ -75,6 +103,7 @@ function buildRealDeps(): DetectDeps {
       DISPLAY: process.env.DISPLAY,
       WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
     },
+    gpgFirstSecretKey: realGpgFirstSecretKey,
   };
 }
 

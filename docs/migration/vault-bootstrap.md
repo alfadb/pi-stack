@@ -1,28 +1,61 @@
-# Migration — Vault Bootstrap（age 加密 + OS keychain 集成）
+# Migration — Vault Bootstrap（age 加密 + portable identity）
 
 > **状态**：待实施
 > **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D4 / [brain-redesign-spec.md](../brain-redesign-spec.md) §6
 > **关联**：本文件解决 Round 3 复核 P0-B2（OS keychain 跨平台承诺不成立）
+>
+> **v1.4 重写**（2026-05-09）：v1.0-1.3 矩阵假设用户在 macOS / Linux desktop 上跑 pi，把 "CI / 容器" 划成 "不支持 vault"。**实际上 alfadb 主开发环境就是容器**——这是 design-from-stereotype 错误。v1.4 矩阵改为 portable-identity 优先（ssh-key / gpg-file / passphrase 三选一覆盖几乎所有用户），desktop keychain (mac/secret-service/pass) 降为 optional optimization。容器从 "不支持" 升 first-class。
 
-## 1. 平台支持矩阵
+## 1. 平台支持矩阵（v1.4 重写）
 
-ADR 0014 §D4 把 "OS keychain 自动解锁" 写为硬事实。**实际上跨平台支持参差**——本文件给出 fail-closed 的统一矩阵：每个平台都能跑，能力差异透明化。
+**核心转变**：vault unlock 不再依赖 OS keychain（受限于 desktop session），而是依赖**用户已有的便携加密 identity**——大多数 dev 用户都有 ssh key 或 GPG identity（git push 已经用上），age 原生支持这两者作 recipient，零额外 glue。
 
-| 平台 | Master key 后端 | Auto-unlock 能力 | 取不到 master key 时行为 |
-|---|---|---|---|
-| **macOS** | Keychain Services（`security` CLI） | ✅ 登录 session 内自动可用 | fail-closed |
-| **Linux desktop**（GNOME / KDE） | Secret Service via `libsecret` (`secret-tool`) | ✅ 桌面 session 内自动可用 | fail-closed，提示 unlock |
-| **Linux headless / server** | `pass`（gpg-encrypted file at `~/.password-store/abrain/master`），或 fallback `~/.abrain/.vault-master.age`（用户 GPG identity 加密） | ⚠️ 需用户主动 `pass git pull` 或 GPG agent 解锁 | fail-closed，CLI 提示运行 `pi vault unlock` |
-| **WSL** | 桥接 Windows Credential Manager（`wsl-credential-helper`），或退回 Linux headless 路径 | ⚠️ 视用户配置而定 | fail-closed |
-| **CI / 容器** | 不支持 vault | ❌ 永不解锁 | bash 注入拒绝；`vault_release` 工具不可用 |
+### 1.1 Tier 1 — primary（每个用户能命中至少一个）
 
-**平台检测**：pi 启动时按以下顺序探测，第一个成功的为该 host 的 backend：
-1. `$SECRETS_BACKEND` env override（用户强制）
-2. macOS：`uname -s` = Darwin → Keychain
-3. Linux + `$DISPLAY` 或 `$WAYLAND_DISPLAY` → Secret Service
-4. Linux + `pass` 命令存在 + `~/.password-store/abrain/` 存在 → pass
-5. Linux + `~/.abrain/.vault-master.age` 存在 → GPG-file fallback
-6. 都没有 → 写 `~/.abrain/.state/vault-disabled` flag，vault 子系统全部 disable
+| Backend | 触发条件 | Master key 存储 | Unlock 机制 | Auto-unlock 等价物 |
+|---|---|---|---|---|
+| **`ssh-key`** ★推荐 | `~/.ssh/id_ed25519` 或 `~/.ssh/id_rsa` 存在 + 对应 `.pub` 存在 | `~/.abrain/.vault-master.age` 加密给 ssh public key（`age -R ~/.ssh/id_*.pub`） | `age -d -i ~/.ssh/id_*` | ssh-agent cache（用户 git push 时已解锁） |
+| **`gpg-file`** | `gpg --list-secret-keys` 非空 | `~/.abrain/.vault-master.age` 加密给 GPG identity（`age -e -r <gpg-id>` via gpg pipe） | gpg-agent decrypt | gpg-agent cache TTL（用户调到 28800s ≈ 8h ≈ macOS Keychain "unlocked while logged in" 等价） |
+| **`passphrase-only`** | 全部 portable identity 不可用 | `~/.abrain/.vault-master.age` 用 age scrypt（passphrase）加密 | main pi 启动时 prompt（必须有 /dev/tty） | ❌ 每次 pi 启动都需输入；session 内复用 |
+
+**为什么 ssh-key 排第一**（v1.4 实证）：
+- alfadb 主用容器开发——容器里 ssh-agent 已经在 git push 路径上 unlocked
+- 容器内默认无 GPG keyring（`gpg --list-secret-keys` 空），gpg-file 路径要先 setup
+- age v1.0+ 原生支持 ssh recipient（实测：`age -R ssh.pub` + `age -d -i ssh-key` roundtrip 通），无 glue
+
+### 1.2 Tier 2 — optimization（如果恰好可用，UX 更顺）
+
+| Backend | 触发条件 | 何时优先 |
+|---|---|---|
+| **`macos`** | `uname -s = Darwin` + `security` CLI | macOS 桌面用户：master key 存 Keychain，登录 session 内自动可用 |
+| **`secret-service`** | Linux + (`$DISPLAY` 或 `$WAYLAND_DISPLAY`) + `secret-tool` 在 PATH | GNOME / KDE 桌面：master key 存 secret service，桌面 session 内自动可用 |
+| **`pass`** | `pass` CLI + `~/.password-store/abrain/` 存在 | 已重度用 pass 的用户 |
+
+**Tier 2 的定位**：相对 Tier 1 的好处是"unlock 时机更早 / cache 更稳"。但 Tier 1 已经覆盖所有用户，Tier 2 缺失不影响功能。
+
+### 1.3 Tier 3 — disabled
+
+用户 opt-out（写 `~/.abrain/.state/vault-disabled` flag，或 detection 全部 fail 的极端情况）。vault 子系统全 off，其他 abrain 功能不受影响。
+
+### 1.4 平台检测优先级
+
+pi 启动时按以下顺序探测，第一个成功的为该 host 的 backend：
+
+1. `$SECRETS_BACKEND` env override（用户强制；invalid 值 fall through 不静默接受）
+2. **`ssh-key`**：`~/.ssh/id_ed25519`(`.pub`) 或 `~/.ssh/id_rsa`(`.pub`) 同时存在
+3. **`gpg-file`**：`gpg` 在 PATH + `gpg --list-secret-keys --with-colons` 至少一行 `sec:` 开头
+4. `macos`：`uname -s = Darwin` + `security` CLI
+5. `secret-service`：Linux + (`$DISPLAY` 或 `$WAYLAND_DISPLAY`) + `secret-tool` 在 PATH
+6. `pass`：`pass` CLI + `~/.password-store/abrain/` 存在
+7. **`passphrase-only`**：abrain extension 已激活（兜底；要求 main pi 进程有 tty——sub-pi 无 tty 也无 master key 访问需求）
+8. `disabled`：以上全部 fail（极少见——passphrase-only 几乎总能 fall back 命中）
+
+**关键变化对比 v1.3**：
+- ssh-key 是新加的 Tier 1，**容器场景头号选择**
+- gpg-file 从 "fallback" 升 Tier 1
+- desktop keychain (mac/secret-service/pass) 从 Tier 1 降 Tier 2 optimization
+- 容器/CI 不再是 "不支持"——passphrase-only 兜底（CI 场景仍可手动 disable）
+- gpg-file detection 从 "`.vault-master.age` 文件存在" 改为 "用户有 GPG secret key"——`.vault-master.age` 不存在意味着"未 init"不是"backend 不可用"
 
 ## 2. Fail-closed 原则
 
@@ -40,9 +73,9 @@ ADR 0014 §D4 把 "OS keychain 自动解锁" 写为硬事实。**实际上跨平
 
 启动时 vault disabled 状态在 TUI footer 持续可见（"vault: locked"），用户能立刻看到。
 
-## 3. Master key 生成 + 注册流程
+## 3. Master key 生成 + 注册流程（v1.4 重写）
 
-首次安装 abrain 后跑 `pi vault init`：
+首次安装 abrain 后跑 `pi vault init`。**所有 backend 共享同一 install 临时目录语义**，不同仅在加密路径：
 
 ```bash
 # 0. 创建 install 临时目录（v1.2 修正，Round 4 Opus P1 3-5）——
@@ -52,84 +85,164 @@ mkdir -p ~/.abrain/.state/install
 chmod 700 ~/.abrain/.state/install
 INSTALL_TMP=$(mktemp -d -p ~/.abrain/.state/install)
 
-# 1. 生成 age master key
-age-keygen -o $INSTALL_TMP/master.age 2>&1
-#   输出：Public key: age1xxx...
+# 1. 生成 age master keypair (全部 backend 共享这一步)
+age-keygen -o "$INSTALL_TMP/master.age" 2>"$INSTALL_TMP/master.pub"
+#   master.age:  AGE-SECRET-KEY-... (secret)
+#   master.pub:  Public key: age1xxx...
 
-# 2. 把 secret key 注册到 OS keychain
+# 2. 根据检测出的 backend 加密为密文、着陆起点路径
 case "$BACKEND" in
-  macos)
-    security add-generic-password -s "alfadb-abrain-master" \
-      -a "$USER" -w "$(cat $INSTALL_TMP/master.age)" -U
-    ;;
-  secret-service)
-    secret-tool store --label="alfadb abrain master" \
-      service abrain key master <<< "$(cat $INSTALL_TMP/master.age)"
-    ;;
-  pass)
-    pass insert -m abrain/master <<< "$(cat $INSTALL_TMP/master.age)"
+  ssh-key)
+    # Tier 1 primary —— 加密给用户 ssh public key。解锁靠 ssh-agent / ssh key passphrase。
+    age -R "$SSH_PUBKEY_PATH" -o ~/.abrain/.vault-master.age "$INSTALL_TMP/master.age"
+    # 记录 unlock 说明：这个 vault 靠 ssh-key 解锁
+    echo "backend=ssh-key" > ~/.abrain/.vault-backend
+    echo "identity=$SSH_PUBKEY_PATH" >> ~/.abrain/.vault-backend
     ;;
   gpg-file)
-    age -e -r "$(gpg --list-keys --with-colons | awk -F: '/^pub/{print $5; exit}')" \
-      -o ~/.abrain/.vault-master.age $INSTALL_TMP/master.age
+    # Tier 1 primary —— 加密给用户 GPG identity。解锁靠 gpg-agent。
+    GPG_RECIPIENT=$(gpg --list-secret-keys --with-colons \
+      | awk -F: '/^sec/{print $5; exit}')
+    gpg --encrypt --recipient "$GPG_RECIPIENT" --output ~/.abrain/.vault-master.age \
+      "$INSTALL_TMP/master.age"
+    echo "backend=gpg-file" > ~/.abrain/.vault-backend
+    echo "identity=$GPG_RECIPIENT" >> ~/.abrain/.vault-backend
+    ;;
+  passphrase-only)
+    # Tier 1 fallback —— age scrypt mode。要求 main pi 进程有 /dev/tty（sub-pi 无 tty 以 PI_ABRAIN_DISABLED=1 跳过）。
+    # init 时 prompt 两次验证，后续启动 prompt 一次。
+    age -p -o ~/.abrain/.vault-master.age "$INSTALL_TMP/master.age"  # /dev/tty interactive
+    echo "backend=passphrase-only" > ~/.abrain/.vault-backend
+    ;;
+  macos)
+    # Tier 2 optimization —— master.age 存 Keychain，.vault-master.age 不使用。
+    security add-generic-password -s "alfadb-abrain-master" \
+      -a "$USER" -w "$(cat "$INSTALL_TMP/master.age")" -U
+    echo "backend=macos" > ~/.abrain/.vault-backend
+    ;;
+  secret-service)
+    # Tier 2 optimization
+    secret-tool store --label="alfadb abrain master" \
+      service abrain key master <<< "$(cat "$INSTALL_TMP/master.age")"
+    echo "backend=secret-service" > ~/.abrain/.vault-backend
+    ;;
+  pass)
+    # Tier 2 optimization
+    pass insert -m abrain/master <<< "$(cat "$INSTALL_TMP/master.age")"
+    echo "backend=pass" > ~/.abrain/.vault-backend
     ;;
 esac
 
-# 3. 把 public key 写入 ~/.abrain/.vault-pubkey（明文，用于加密时引用）
-grep "Public key:" $INSTALL_TMP/master.age | awk '{print $3}' > ~/.abrain/.vault-pubkey
+# 3. 把 public key 写入 ~/.abrain/.vault-pubkey（明文，vaultWriter 加密时引用）
+grep "Public key:" "$INSTALL_TMP/master.pub" | awk '{print $3}' > ~/.abrain/.vault-pubkey
 
 # 4. 销毁临时文件 + 整个 install 目录
-shred -u $INSTALL_TMP/master.age 2>/dev/null
-rm -rf $INSTALL_TMP
+shred -u "$INSTALL_TMP/master.age" "$INSTALL_TMP/master.pub" 2>/dev/null
+rm -rf "$INSTALL_TMP"
 ```
+
+**v1.4 设计决定**：
+- **写 `~/.abrain/.vault-backend`**（v1.4 新）：记录 init 时选的 backend，未来启动时不重新探测——避免用户后加入 GPG key 导致检测跳到不同 backend。主动切 backend 需 `pi vault migrate-backend <new>`。
+- **ssh-key 与 gpg-file 共用 `~/.abrain/.vault-master.age`**：两者都是加密文件路径，区别仅在 recipient。这让子系统代码卷一样，unlock helper 读 `.vault-backend` 选解密工具。
+- **passphrase-only 不能 sub-pi**：age scrypt 要 /dev/tty，sub-pi 无 tty。但 sub-pi 本就 PI_ABRAIN_DISABLED=1 看不到 vault，没事。
 
 **安全声明**：
-- master key 在生成与注册期间临时落 `~/.abrain/.state/install/`（与 abrain 同文件系统，shred 有效）。不使用 `/tmp`（可能是 tmpfs / NFS，shred 不生效）
-- 备份责任在用户：建议 `pi vault export-master --to <usb-key>` 加密备份到外部介质（命令尚未实施，列入 backlog）
-- master key rotation：当前 spec 不支持。若 rotation 必要：人工 unlock 全部 vault 文件 → 用新 key 重新加密 → 注册新 key 到 keychain。复杂度高，列入 backlog
+- master key 在生成与加密期间临时落 `~/.abrain/.state/install/`（与 abrain 同文件系统，shred 有效）。不使用 `/tmp`（可能是 tmpfs / NFS，shred 不生效）
+- 备份责任在用户：ssh-key / gpg-file backend 下 master key 已加密为 `~/.abrain/.vault-master.age`，可随 abrain 一起 git push 备份（重要：ss key 本身 不 备份到 git）。macOS / pass / secret-service 下 master key 在 keychain，需依赖平台自身同步机制
+- master key rotation：当前 spec 不支持。若 rotation 必要：人工 unlock 全部 vault 文件 → 用新 key 重新加密 → 注册新 key。复杂度高，列入 backlog
 
-## 4. 首次启动 onboarding flow
+## 4. 首次启动 onboarding flow（v1.4 重写）
 
-pi 启动时首次未检测到任何 master key 后端可用：
+pi 启动时首次未检测到初始化过的 vault（`~/.abrain/.vault-backend` 不存在）。**不是选 "init / 跳过"而是选哪个 backend init**——菜单动态生成，只列出该机器上 detection 发现的可用 backend。
 
 ```
-┌─ Vault setup ──────────────────────────────────────┐
-│                                                    │
-│  abrain vault 尚未初始化。选择：                   │
-│                                                    │
-│  [1] 现在初始化（生成 master key）                 │
-│  [2] 跳过（vault 子系统将 disabled，可稍后初始化）│
-│  [3] 我已经在另一台机器初始化 → 帮我导入           │
-│                                                    │
-└────────────────────────────────────────────────────┘
+┌─ Vault setup ───────────────────────────────────────────────┐
+│                                                            │
+│  abrain vault 尚未初始化。检测到以下可用 backend：         │
+│                                                            │
+│  [1] ssh-key       (~/.ssh/id_ed25519)         ★推荐       │
+│  [2] gpg-file      (GPG identity 0xABC123)                 │
+│  [3] passphrase    (每次 pi 启动 prompt)                   │
+│                                                            │
+│  [i] 我已经在另一台机器初始化 → 帮我导入（§6）             │
+│  [s] 暂不初始化（vault disabled，不影响其他 abrain 功能）  │
+│                                                            │
+└────────────────────────────────────────────────────────────┘
 ```
 
-选 [1] → 跑 §3 流程，结束后 `pi vault status` 应显示 `unlocked`。
-选 [2] → 写 `~/.abrain/.state/vault-disabled` flag，pi 继续运行（其他功能不受影响）。
-选 [3] → 进入跨设备导入流程（详见 §6）。
+菜单是动态的：detection 跑完后列出**所有**命中的可用 backend（不是首个命中的）让用户选。passphrase 永远在底（其他都 fail 时作 fallback）。
 
-## 5. 每个 pi 进程启动时的 unlock check
+常见场景菜单预期：
+
+| 场景 | 菜单 |
+|---|---|
+| 容器开发者（alfadb 主场景） | `[1] ssh-key` + `[3] passphrase` |
+| Linux 桌面 + GPG sign commits | `[1] ssh-key` + `[2] gpg-file` + `[secret-service]` + `[3] passphrase` |
+| macOS Keychain 用户 | `[1] ssh-key` + `[macos]` + `[3] passphrase` |
+| 全新环境（无 ssh 无 gpg） | `[3] passphrase` 一项 + `[s]` |
+
+选任一 backend → 跑 §3 流程对应路径 + 写 `~/.abrain/.vault-backend`，结束后 `pi vault status` 显示 `unlocked`。
+选 [s] → 写 `~/.abrain/.state/vault-disabled` flag，pi 继续运行。
+选 [i] → 跨设备导入流程（§6）。
+## 5. 每个 pi 进程启动时的 unlock check（v1.4 重写）
+
+v1.4 启动 **不重跑 detection chain**——读 `~/.abrain/.vault-backend` 拿 init 时记录的 backend。这避免环境变化（加入 GPG key / 卸载 ssh-key / 临时无 ssh-agent）让启动跳到不同 backend 造成 unlock 失败。
 
 ```typescript
 // pseudo-code in extensions/abrain/vault.ts
 async function loadMasterKey(): Promise<MasterKey | null> {
-  // (a) extension activate 头部的 enforceable guard——v1.2 补，Round 4 GPT P0-N2
-  if (process.env.PI_ABRAIN_DISABLED === "1") {
-    log.info("abrain disabled by env (typical: sub-pi via dispatch_agents)");
-    return null;  // fail-closed、不跳 keychain backend
-  }
+  // (a) sub-pi guard —— v1.2 补，Round 4 GPT P0-N2。
+  // 在 extension activate 顶部已处理（v1.4 P0a 已实施）。这里是 belt-and-suspenders。
+  if (process.env.PI_ABRAIN_DISABLED === "1") return null;
   if (existsSync("~/.abrain/.state/vault-disabled")) return null;
 
-  const backend = detectBackend();
+  // (b) 读 init 时记录的 backend，不重跑 detection
+  const backendInfo = readBackendFile("~/.abrain/.vault-backend");
+  if (!backendInfo) {
+    log.info("vault not initialized, run /vault init");
+    return null;
+  }
+
+  // (c) 按 backend 选解密工具。每个 helper 严禁用 argv 传 master key——
+  // 都从加密文件读、输出 stdout pipe，中间不作为参数出现（process listing 防泄）。
   try {
-    const secret = await backend.fetchSecret("alfadb-abrain-master");
-    return parseMasterKey(secret);
+    let plaintext: Buffer;
+    switch (backendInfo.backend) {
+      case "ssh-key":
+        // age 原生支持 ssh key 作 identity。ssh key 有 passphrase 且 ssh-agent 未 unlock 时 prompt。
+        plaintext = await execAge(["-d", "-i", backendInfo.identity, "~/.abrain/.vault-master.age"]);
+        break;
+      case "gpg-file":
+        // 加密文件本身是 GPG 包（v1.4 §3 init 用 gpg --encrypt 不是 age -e -r）。
+        // 解密对称走 gpg --decrypt，gpg-agent 提供 cache。
+        plaintext = await execGpg(["--decrypt", "~/.abrain/.vault-master.age"]);
+        break;
+      case "passphrase-only":
+        // age scrypt 要 /dev/tty 交互 prompt。sub-pi 不会到这里 (a) 已拦。
+        plaintext = await execAge(["-d", "~/.abrain/.vault-master.age"]);
+        break;
+      case "macos":
+        plaintext = await execSecurity(["find-generic-password", "-s", "alfadb-abrain-master", "-w"]);
+        break;
+      case "secret-service":
+        plaintext = await execSecretTool(["lookup", "service", "abrain", "key", "master"]);
+        break;
+      case "pass":
+        plaintext = await execPass(["show", "abrain/master"]);
+        break;
+    }
+    return parseMasterKey(plaintext);
   } catch (err) {
     log.warn(`vault locked: ${err.message}`);
     return null;  // fail-closed
   }
 }
 ```
+
+**安全考虑**：
+- `plaintext` 仅在本函数范围存在，返回后 GC 可回收。`MasterKey` 对象在 main pi 内存中驻留至 vault 子系统关闭。
+- helper 函数严禁用 `argv` 传 master key——`/proc/<pid>/cmdline` 同 host 其他进程可读。都从加密文件读入、输出 stdout pipe。
+- `gpg-file` 与 `ssh-key` 加密文件路径相同（`~/.abrain/.vault-master.age`）但 envelope 格式不同：ssh-key 路径是 age envelope，gpg-file 路径是 GPG envelope。`.vault-backend` 决定走哪个解密工具——不要靠魔数嗅探。
 
 ### Sub-pi enforce——三层机制性（v1.2 补，Round 4 GPT P0-N2）
 
@@ -204,13 +317,32 @@ rsync -av --delete ~/.abrain/ user@deviceB:.abrain/
 - 同步等待用户 TUI 输入完毕后立即返回——`$VAULT_<key>` 在下一条 bash 命令里立即可用
 - 写入失败（keychain unlock 失败 / vault-events append 失败 / 加密失败）TUI 立刻报错，不进入 partial state
 
-## 8. 验收 checklist
+## 8. 验收 checklist（v1.4 重写）
 
-vault-bootstrap 完成后必须验证：
+vault-bootstrap 完成后必须验证。**按 backend 分类，只验证该 host 实际能跳的路径**。
 
-- [ ] `pi vault status` 在每个支持平台返回 `unlocked`
-- [ ] `pi vault status` 在 fail-closed 场景（keychain locked / disabled）返回 `locked` 而非 crash
+### Tier 1 主要验收（必须走）
+
+- [ ] `pi vault init` 在容器 (Linux + ssh-key 可用) 进行 → 选 [1] ssh-key → init 成功 → `~/.abrain/.vault-master.age` + `~/.abrain/.vault-backend` 生成
+- [ ] init 后 `pi vault status` 返回 `unlocked` (backend=ssh-key, identity=...)
+- [ ] **fail-closed 场景**：ab init 后手动 `mv ~/.abrain/.vault-master.age{,.bak}` → `pi vault status` 返回 `locked`而非 crash
+- [ ] **fail-closed 场景 2**：init 后 `chmod 000 ~/.ssh/id_ed25519` → `pi vault status` 返回 `locked` (decrypt failed)
+
+### 公共验收（与 backend 无关，必须走）
+
 - [ ] `/secret test-key test-value` 落盘成功 + 立刻 `bash -c 'echo $VAULT_test_key'` 解密注入正确
 - [ ] `vault forget test-key` rm 加密文件 + 后续 `$VAULT_test_key` 报 not-found
-- [ ] sub-pi 启动时 `PI_ABRAIN_DISABLED=1` 生效，sub-pi 内 `vault list` 拒绝
-- [ ] vault 文件全部 .gitignored（`git status` 干净）
+- [ ] **sub-pi 隔离**：`scripts/smoke-vault-subpi-isolation.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 dispatch spawn 生效）
+- [ ] **sub-pi extension guard**：`scripts/smoke-abrain-backend-detect.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 abrain extension activate 顶部生效，registerCommand 零次调用）
+- [ ] vault 文件全部 .gitignored（`git status` 干净）——`.vault-master.age` 除外（v1.4）：ss-key/gpg-file 路径下此文件是加密的，**可以**随 abrain 一起 git push 备份（ssh/gpg key 本身不上 git）
+
+### Tier 2 optimization 验收（仅在该 backend 上 host 实际可用时走）
+
+- [ ] macOS host：`pi vault init` 选 [macos] → `security find-generic-password -s alfadb-abrain-master` 返回 加密 secret
+- [ ] Linux desktop + secret-tool host：`pi vault init` 选 [secret-service] → `secret-tool lookup service abrain key master` 返回 secret
+- [ ] pass user host：`pi vault init` 选 [pass] → `pass show abrain/master` 返回 secret
+
+### 容器 / CI 场景验收（v1.4 新加）
+
+- [ ] **容器 ssh-key 路径 e2e**：worker container 上跑 `pi vault init` 选 ssh-key → init 成功 → `pi vault status = unlocked`。这是 alfadb 主场景。
+- [ ] **CI 场景**（无 ssh-key 无 GPG）：detection 跳到 passphrase-only。CI 推荐主动 disable：`touch ~/.abrain/.state/vault-disabled`。
