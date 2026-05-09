@@ -26,6 +26,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 
 // ── pi-astack settings loader ──────────────────────────────
 // pi-astack uses its own settings file (not pi's settings.json) to keep our
@@ -304,10 +305,20 @@ export default function (pi: ExtensionAPI) {
 
     if (ctx.hasUI) {
       try {
+        // Total models actually available for dispatch — includes both
+        // curated (kept after whitelist) and raw providers (e.g. github-copilot,
+        // which model-curator passes through untouched). Falls back to getAll()
+        // if getAvailable isn't exposed by this pi version.
+        let totalAvailable = totalKept;
+        try {
+          const list = reg.getAvailable ? reg.getAvailable() : reg.getAll();
+          totalAvailable = Array.isArray(list) ? list.length : totalKept;
+        } catch { /* keep totalKept fallback */ }
+
         const status = totalMissing > 0
-          ? `📋 curated (${totalKept}✓ ${totalMissing}!)`
-          : `📋 curated (${totalKept} models)`;
-        ctx.ui.setStatus("model-curator", status);
+          ? `📋 ${totalAvailable} models (${totalKept}✓ ${totalMissing}!)`
+          : `📋 ${totalAvailable} models`;
+        ctx.ui.setStatus(FOOTER_STATUS_KEYS.modelCurator, status);
       } catch { /* ignore */ }
     }
 

@@ -36,6 +36,7 @@ import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { evaluateLlmAutoWriteReadiness, evaluateRollingGate, formatLlmAutoWriteReadiness, formatLlmDryRunReport, readLlmDryRunReport, type RollingGateState } from "./report";
 import type { DraftPolicy } from "./validation";
 import { appendAudit, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult } from "./writer";
+import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 
 // ---------------------------------------------------------------
 // Phase 1.4 A2: in-process state for the auto-write lane.
@@ -78,7 +79,7 @@ const autoWriteDisabledBySession = new Map<string, string>();
 const autoWriteInFlight = new Map<string, Promise<void>>();
 
 /** Status key for ctx.ui.setStatus(). */
-const SEDIMENT_STATUS_KEY = "sediment";
+const SEDIMENT_STATUS_KEY = FOOTER_STATUS_KEYS.sediment;
 
 /**
  * Footer status state machine for the sediment extension.

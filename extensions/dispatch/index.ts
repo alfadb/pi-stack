@@ -22,6 +22,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { coerceTasksParam, normalizeTaskSpec } from "./input-compat";
+import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 
 // ── Constants ───────────────────────────────────────────────────
 
@@ -30,6 +31,80 @@ const MAX_CONCURRENCY = 4;
 const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
 
 const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
+
+// ── Footer status state machine ────────────────────────────────────────────────
+//
+// Mirrors the sediment extension's status discipline so users get a
+// consistent vocabulary across pi-astack extensions:
+//
+//   idle      no dispatch tool has been called yet, or the most recent
+//             completion was already cleared by a fresh agent_start
+//   running   one or more sub-agents are in flight — footer shows live
+//             counters: running/failed/success/total
+//   completed all sub-agents finished without errors
+//   failed    at least one sub-agent errored or timed out
+//
+// Transitions:
+//   - session_start                          -> idle
+//   - agent_start                            -> idle (resets prev result)
+//   - dispatch_agent / dispatch_agents start -> running
+//   - dispatch finishes, no errors           -> completed
+//   - dispatch finishes with any error       -> failed
+//
+// Concurrent dispatch tool calls are theoretically possible (pi default
+// is parallel tool mode) but semantically unusual — a model wanting
+// parallelism uses dispatch_agents(tasks[]) rather than firing two tool
+// calls. We accept simple last-writer-wins overlap rather than
+// maintaining a multi-call counter.
+
+const DISPATCH_STATUS_KEY = FOOTER_STATUS_KEYS.dispatch;
+
+type DispatchState = "idle" | "running" | "completed" | "failed";
+
+interface DispatchCounts {
+  running: number;
+  failed: number;
+  success: number;
+  total: number;
+}
+
+/** Format the footer status string. Exported for smoke tests — the
+ *  formatting itself is informational, do not depend on it elsewhere. */
+export function renderDispatchStatus(
+  state: DispatchState,
+  counts?: DispatchCounts,
+  durationMs?: number,
+): string {
+  const c = counts
+    ? ` ${counts.running}/${counts.failed}/${counts.success}/${counts.total}`
+    : "";
+  const dur = typeof durationMs === "number"
+    ? ` (${(durationMs / 1000).toFixed(1)}s)`
+    : "";
+  switch (state) {
+    case "idle":      return "💤 dispatch idle";
+    case "running":   return `📡 dispatch${c}`;
+    case "completed": return `✅ dispatch${c}${dur}`;
+    case "failed":    return `⚠️  dispatch${c}${dur}`;
+  }
+}
+
+/**
+ * Apply a dispatch state to ctx.ui.setStatus. Tolerates older pi versions
+ * without setStatus and stale-ctx late fires (try/catch wrapper).
+ */
+function applyDispatchStatus(
+  ctx: { ui?: { setStatus?(extId: string, message?: string): void } },
+  state: DispatchState,
+  counts?: DispatchCounts,
+  durationMs?: number,
+): void {
+  const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
+  if (!setStatusRaw) return;
+  try {
+    setStatusRaw(DISPATCH_STATUS_KEY, renderDispatchStatus(state, counts, durationMs));
+  } catch { /* best-effort */ }
+}
 
 // ── Prompt file helper ──────────────────────────────────────────
 
@@ -338,6 +413,16 @@ function formatResult(
 // ── Extension ───────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // Footer status: reset to idle on session/agent boundaries so the
+  // previous turn's completed/failed result doesn't linger past the
+  // next user message. Mirrors sediment's lifecycle.
+  pi.on("session_start", async (_event: unknown, ctx: any) => {
+    applyDispatchStatus(ctx, "idle");
+  });
+  pi.on("agent_start", async (_event: unknown, ctx: any) => {
+    applyDispatchStatus(ctx, "idle");
+  });
+
   // ═══════════════════════════════════════════════════════════════
   // dispatch_agent
   // ═══════════════════════════════════════════════════════════════
@@ -385,9 +470,29 @@ export default function (pi: ExtensionAPI) {
       }
 
       const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-      ctx.ui.setStatus("Dp", "⏳");
-      const result = await runSubprocess(params.model, params.thinking, params.prompt, signal, timeoutMs);
-      ctx.ui.setStatus("Dp", undefined);
+      const startedAt = Date.now();
+      applyDispatchStatus(ctx, "running", { running: 1, failed: 0, success: 0, total: 1 });
+      // runSubprocess returns a Promise that may reject if its constructor
+      // synchronously throws (e.g. promptArg's fs.mkdirSync / writeFileSync
+      // hits a disk-full or permission error). Catch here so the footer
+      // status doesn't get stuck in `running` and the user still gets
+      // an actionable tool-result error.
+      let result: SubprocessResult;
+      try {
+        result = await runSubprocess(params.model, params.thinking, params.prompt, signal, timeoutMs);
+      } catch (err: any) {
+        result = {
+          output: "",
+          error: `dispatch crashed: ${err?.message ?? String(err)}`,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+      const durationMs = Date.now() - startedAt;
+      if (result.error) {
+        applyDispatchStatus(ctx, "failed", { running: 0, failed: 1, success: 0, total: 1 }, durationMs);
+      } else {
+        applyDispatchStatus(ctx, "completed", { running: 0, failed: 0, success: 1, total: 1 }, durationMs);
+      }
 
       const text = formatResult("dispatch", params.model, result);
 
@@ -452,36 +557,64 @@ export default function (pi: ExtensionAPI) {
       const dispatchStart = Date.now();
       const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-      // Concurrency-limited worker pool with status bar progress
+      // Concurrency-limited worker pool with status bar progress.
+      // Counters track running/failed/success/total — the unstarted
+      // count is implicit (total - running - failed - success).
       const results: SubprocessResult[] = new Array(tasks.length);
       let nextIdx = 0;
-      let done = 0;
       let running = 0;
+      let success = 0;
+      let failed = 0;
       const total = tasks.length;
 
-      const updateStatus = () => ctx.ui.setStatus("Dp", `${running}/${done}/${total}`);
-      updateStatus();
+      const updateRunning = () =>
+        applyDispatchStatus(ctx, "running", { running, failed, success, total });
+      updateRunning();
 
       const worker = async () => {
         while (true) {
           const i = nextIdx++;
           if (i >= total) return;
           const t = tasks[i];
-          results[i] = await runSubprocess(
-            t.model, t.thinking, t.prompt, signal,
-            t.timeoutMs ?? timeoutMs,
-            (pid) => { running++; updateStatus(); },
-          );
+          // Track running by slot occupancy (worker has a task in flight)
+          // rather than by onSpawn callback. runSubprocess does NOT call
+          // onSpawn when signal is already aborted or when spawn()
+          // synchronously fails — if we relied on onSpawn for running++,
+          // the matching running-- would still fire and make the counter
+          // negative.
+          running++;
+          updateRunning();
+          let res: SubprocessResult;
+          try {
+            res = await runSubprocess(
+              t.model, t.thinking, t.prompt, signal,
+              t.timeoutMs ?? timeoutMs,
+            );
+          } catch (err: any) {
+            res = {
+              output: "",
+              error: `dispatch crashed: ${err?.message ?? String(err)}`,
+              durationMs: 0,
+            };
+          }
+          results[i] = res;
           running--;
-          done++;
-          updateStatus();
+          if (res.error) failed++;
+          else success++;
+          updateRunning();
         }
       };
 
       const workers = new Array(Math.min(MAX_CONCURRENCY, total)).fill(null).map(() => worker());
       await Promise.allSettled(workers);
-      ctx.ui.setStatus("Dp", undefined);
-      const totalWall = ((Date.now() - dispatchStart) / 1000).toFixed(1);
+      const totalWallMs = Date.now() - dispatchStart;
+      const totalWall = (totalWallMs / 1000).toFixed(1);
+      const finalState: DispatchState = failed > 0 ? "failed" : "completed";
+      applyDispatchStatus(
+        ctx, finalState,
+        { running: 0, failed, success, total },
+        totalWallMs,
+      );
 
       // Log parallelism: serial time estimate vs actual
       const serialEstimate = results.reduce((s, r) => s + r.durationMs, 0);
