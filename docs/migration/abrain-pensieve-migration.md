@@ -16,7 +16,7 @@
 | **P2** Facade dual-read | `memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 同时读旧 `.pensieve` 和新 `~/.abrain/projects/<id>/`，结果合并去重 | P1 完成 | smoke：旧 .pensieve 内容仍可被找到 + 新空目录不报错 | 关闭 dual-read flag，仅读旧 |
 | **P3** Dedupe / projectSlug / lint / index / git-root 全部走 resolver | 把 `extensions/sediment/{writer,dedupe}.ts` 中 grep 出的所有 hard-coded `.pensieve` 路径改走 resolver | P2 通过 | grep 整 repo 无残留 hard-coded `.pensieve`（除 migration 脚本本身） | 单文件 revert |
 | **P4** Freeze write + smoke | sediment 仍写旧 `.pensieve`（writer 路径暂不变），但 read 全链路已切——跑 1-2 天观察 audit / search / dedupe 是否一致 | P3 通过 | 连续 24h 无 split-brain 报错 | 留在 P4，read-side 已稳定 |
-| **P5** 持锁迁移 | 全局获取 sediment lock + 暂停 auto-write → 写 `migration_manifest.jsonl` → mv 文件 → 写 `migration_epoch` → 释放锁 | P4 稳定 | manifest 完整 + 文件 mv 完成 | rollback playbook §3 |
+| **P5** 持锁迁移 | 走 §6 quiescence 协议（`pi brain pause` → acquire global lock → drain assert → manifest snapshot → mv → epoch → release → resume）——详§6 | P4 稳定 | manifest 完整 + epoch 写入 + drain assert 过 | rollback playbook §3 |
 | **P6** Writer cutover | sediment writer 改写新路径；旧 `.pensieve` 可写为只读（chmod -w） | P5 完成 | 一次新写入落地 + audit 行 lane 字段含新值 | rollback playbook §4 |
 | **P7** Symlink 兼容期 | `<cwd>/.pensieve` → `~/.abrain/projects/<id>/` 软链，让旧脚本继续 work；验证 1-2 周 | P6 完成 | 1-2 周无报错 | 删 symlink，旧脚本各自适配 |
 | **P8** 清理 fallback | 删除 dual-read 代码、删 symlink、删 `.pensieve/config.yml` 兼容路径；写 `.pensieve` 进 .gitignore | P7 验证完 | 全链路只走新路径 | 重新加 dual-read（代价不大） |
@@ -121,7 +121,7 @@ pi smoke:memory && pi smoke:dispatch && pi smoke:fallback-timing && pi smoke:pat
 - audit log 的 timeline 会出现"P6 commit → 多条新 audit row → revert"的非线性 history
 - git history 留下回退轨迹（可读但不美观）
 
-## 5. 验收 checklist
+## 5. 验收 checklist (适用于每个 phase 离开前)
 
 每个 phase 离开前必须跑：
 
@@ -139,7 +139,95 @@ P8 离开前**额外**跑：
 - [ ] 新建一个测试项目，从空开始跑一遍 `MEMORY:` block + `/about-me` + `/secret`，验证三条 lane 都正常落地
 - [ ] 老项目回灌一次 sediment（重跑历史 transcript），新写入路径正确
 
-## 6. 时间预算
+## 6. P5 Quiescence 协议（v1.2 补，Round 4 GPT P0-N3）
+
+> **为什么需要这个节**：v1.1 §1 P5 只写“全局获取 sediment lock + 暂停 auto-write”六个字，未定义：哪个 lock 是全局权威、所有 writer 是否都检查同一 pause flag、在飞 Lane C background 如何 drain、其他 pi 在 agent_end 是阻塞还是跳过、P4 仍写旧 .pensieve 的最后一批 delta 如何 flush。下面是可执行协议。
+
+### 统一状态路径
+
+```
+~/.abrain/.state/sediment-paused          # flag file，stat 存在即 paused
+~/.abrain/.state/sediment-global.lock     # 全局互斥锁（write/git/migration 共享）
+~/.abrain/.state/sediment-inflight/<pid>  # 每个 sediment writer 在干活时 touch 该文件，完成后 rm
+```
+
+### Writer-side 义务（所有 sediment writer / vaultWriter 遵守）
+
+```typescript
+async function sedimentWrite(entry) {
+  if (existsSync("~/.abrain/.state/sediment-paused")) {
+    auditAppend({ op: "skip-due-to-pause", entry });
+    return;  // 不阻塞 TUI、不排队、丢弃本轮写入安排下轮 agent_end 重试
+  }
+  const inflightFlag = `~/.abrain/.state/sediment-inflight/${process.pid}`;
+  await fs.writeFile(inflightFlag, Date.now().toString());
+  try {
+    // 获取全局锁 (···) → 写 (···) → 释放锁
+  } finally {
+    await fs.unlink(inflightFlag);
+  }
+}
+```
+
+### Migration tool 义务
+
+```bash
+# pi brain pause 命令的完整实现
+pi_brain_pause() {
+  # 1. 写 pause flag——后续所有 sediment 写入将 skip
+  touch ~/.abrain/.state/sediment-paused
+
+  # 2. 获取全局锁（限时，避免被拋弃锁卡住）
+  exec 9>~/.abrain/.state/sediment-global.lock
+  flock --timeout=300 9 || { echo "FAIL: cannot acquire global lock in 5min"; exit 2; }
+
+  # 3. drain inflight：等待所有 sediment-inflight/<pid> 文件消失（最多 60s）
+  for i in $(seq 1 60); do
+    if [ -z "$(ls ~/.abrain/.state/sediment-inflight/ 2>/dev/null)" ]; then
+      break
+    fi
+    sleep 1
+  done
+  if [ -n "$(ls ~/.abrain/.state/sediment-inflight/ 2>/dev/null)" ]; then
+    echo "WARN: 有 sediment writer drain 超时，pid: $(ls ~/.abrain/.state/sediment-inflight/)"
+    echo "  选择：取消 (rm pause + release lock) 或强进（风险：被 drain 不事件可能覆盖迁移中的 .pensieve）"
+    read -p "取消吗？[Y/n] " ans
+    [ "$ans" != "n" ] && { rm ~/.abrain/.state/sediment-paused; flock -u 9; exit 3; }
+  fi
+
+  # 4. drain 过后 fd 9 仍持 lock——migration tool 现在可以安全进行 mv
+  echo "✓ paused + locked + drained. ready for migration."
+}
+
+# pi brain resume 命令
+pi_brain_resume() {
+  flock -u 9                          # 释放全局锁
+  rm ~/.abrain/.state/sediment-paused # 取消 pause flag
+  echo "✓ sediment resumed."
+}
+```
+
+### P5 完整流程
+
+```bash
+pi brain pause                                     # §上
+write_manifest_begin                               # §2
+for file in <cwd>/.pensieve/{decisions,knowledge,maxims,observations,habits,status.md}/**; do
+  mv $file ~/.abrain/projects/<id>/...
+  append_manifest_mv
+done
+write_manifest_epoch                               # §2
+write_manifest_end
+pi brain resume                                    # §上
+```
+
+### Sub-pi、agent_end 与 §上协议的交互
+
+- **agent_end 规律调用 sediment**：agent_end handler 按§上 Writer-side 义务 — 看到 paused 则 skip、audit 记一行 “skip-due-to-pause”。这不会丢数据：sediment extractor 是从 transcript 重新提炼的，下轮 agent_end 重启后重跑同样能抽取。如果考虑提炼费用，能将待汇报 entry 写临时进 queue——但 v1.2 不作此要求。
+- **vaultWriter 遵守同义务**：paused 期间 `/secret` TUI 亦拒绝（报错“abrain paused for migration”）。Migration window 期间用户不能写新 secret——可接受。
+- **Sub-pi 隔离**：子 pi 仍以 `PI_ABRAIN_DISABLED=1` 启动（§vault-bootstrap §5），与上述协议不相干。
+
+## 7. 时间预算
 
 按 Phase 依赖：
 - P0–P1：0.5 天（resolver 是新代码，单测好覆盖）

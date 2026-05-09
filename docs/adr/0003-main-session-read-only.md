@@ -1,10 +1,11 @@
 # ADR 0003 — 主会话只读，sediment 单写
 
 - **状态**: Accepted。**Guard 实现已过时**（2026-05-07）— memory-architecture.md §6.1 定义了新的读工具 `memory_search/get/list/neighbors` 替代 `gbrain_search/get/query`。Guard 的拦截目标从 gbrain CLI/bash 变为 memory write tools（仅 sediment 可见）。读写分离核心原则不变。
+- **2026-05-09 补充**（由 [ADR 0014 v1.2](0014-abrain-as-personal-brain.md) 带入）：主会话只读原则**不取消**，但明确补充为 “LLM 不发起任何 brain 写入”：Lane V 的 vault 写入是用户物理键入 `/secret` TUI 命令触发 main pi 进程内 vaultWriter library 同步调用——LLM tool surface 中没有任何 vault mutation 入口，该路径不进 LLM 重译。Lane G `/about-me` 仍走 sediment 异步。sediment 仍为记忆类写入的唯一 writer。详见 ADR 0014 §关键不变量 #1。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
 - **依赖**: ADR 0002（superseded by memory-architecture.md）/ ADR 0004（sediment 写入）
-- **后续**: [memory-architecture.md](../memory-architecture.md) §6（新 tool 接口），§8（读写分离与 sediment 行为）
+- **后续**: [memory-architecture.md](../memory-architecture.md) §6（新 tool 接口），§8（读写分离与 sediment 行为）；[ADR 0014](0014-abrain-as-personal-brain.md)（vault 写入例外）
 
 ## 背景
 

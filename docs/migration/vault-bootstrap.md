@@ -45,38 +45,46 @@ ADR 0014 §D4 把 "OS keychain 自动解锁" 写为硬事实。**实际上跨平
 首次安装 abrain 后跑 `pi vault init`：
 
 ```bash
+# 0. 创建 install 临时目录（v1.2 修正，Round 4 Opus P1 3-5）——
+#    不能用 /tmp：tmpfs 上 shred 是 no-op；NFS-mounted /tmp 同样无意义。
+#    用 ~/.abrain/.state/install/ 保证与 abrain 同文件系统，shred 有效。
+mkdir -p ~/.abrain/.state/install
+chmod 700 ~/.abrain/.state/install
+INSTALL_TMP=$(mktemp -d -p ~/.abrain/.state/install)
+
 # 1. 生成 age master key
-age-keygen -o /tmp/abrain-master.age 2>&1
+age-keygen -o $INSTALL_TMP/master.age 2>&1
 #   输出：Public key: age1xxx...
 
 # 2. 把 secret key 注册到 OS keychain
 case "$BACKEND" in
   macos)
     security add-generic-password -s "alfadb-abrain-master" \
-      -a "$USER" -w "$(cat /tmp/abrain-master.age)" -U
+      -a "$USER" -w "$(cat $INSTALL_TMP/master.age)" -U
     ;;
   secret-service)
     secret-tool store --label="alfadb abrain master" \
-      service abrain key master <<< "$(cat /tmp/abrain-master.age)"
+      service abrain key master <<< "$(cat $INSTALL_TMP/master.age)"
     ;;
   pass)
-    pass insert -m abrain/master <<< "$(cat /tmp/abrain-master.age)"
+    pass insert -m abrain/master <<< "$(cat $INSTALL_TMP/master.age)"
     ;;
   gpg-file)
     age -e -r "$(gpg --list-keys --with-colons | awk -F: '/^pub/{print $5; exit}')" \
-      -o ~/.abrain/.vault-master.age /tmp/abrain-master.age
+      -o ~/.abrain/.vault-master.age $INSTALL_TMP/master.age
     ;;
 esac
 
 # 3. 把 public key 写入 ~/.abrain/.vault-pubkey（明文，用于加密时引用）
-grep "Public key:" /tmp/abrain-master.age | awk '{print $3}' > ~/.abrain/.vault-pubkey
+grep "Public key:" $INSTALL_TMP/master.age | awk '{print $3}' > ~/.abrain/.vault-pubkey
 
-# 4. 销毁临时文件
-shred -u /tmp/abrain-master.age 2>/dev/null || rm -P /tmp/abrain-master.age 2>/dev/null || rm /tmp/abrain-master.age
+# 4. 销毁临时文件 + 整个 install 目录
+shred -u $INSTALL_TMP/master.age 2>/dev/null
+rm -rf $INSTALL_TMP
 ```
 
 **安全声明**：
-- master key 在生成与注册期间临时落 `/tmp`（`shred -u` / `rm -P` 销毁）。无完美保证，但 install-time 一次性窗口的风险用户已知已选
+- master key 在生成与注册期间临时落 `~/.abrain/.state/install/`（与 abrain 同文件系统，shred 有效）。不使用 `/tmp`（可能是 tmpfs / NFS，shred 不生效）
 - 备份责任在用户：建议 `pi vault export-master --to <usb-key>` 加密备份到外部介质（命令尚未实施，列入 backlog）
 - master key rotation：当前 spec 不支持。若 rotation 必要：人工 unlock 全部 vault 文件 → 用新 key 重新加密 → 注册新 key 到 keychain。复杂度高，列入 backlog
 
@@ -105,6 +113,11 @@ pi 启动时首次未检测到任何 master key 后端可用：
 ```typescript
 // pseudo-code in extensions/abrain/vault.ts
 async function loadMasterKey(): Promise<MasterKey | null> {
+  // (a) extension activate 头部的 enforceable guard——v1.2 补，Round 4 GPT P0-N2
+  if (process.env.PI_ABRAIN_DISABLED === "1") {
+    log.info("abrain disabled by env (typical: sub-pi via dispatch_agents)");
+    return null;  // fail-closed、不跳 keychain backend
+  }
   if (existsSync("~/.abrain/.state/vault-disabled")) return null;
 
   const backend = detectBackend();
@@ -118,9 +131,45 @@ async function loadMasterKey(): Promise<MasterKey | null> {
 }
 ```
 
-注意：**多个 pi 进程同时启动会各自调 keychain backend**。OS keychain（macOS Keychain / Secret Service / pass）都是 user-level acl 而非 process-level，所以同一 user 下任何 pi 进程都能拿到 master key——这是 ADR 0014 §关键不变量 #6（"sub-pi 默认看不到任何 vault"）的隐含前提：
+### Sub-pi enforce——三层机制性（v1.2 补，Round 4 GPT P0-N2）
 
-> **重要**：sub-pi 进程（dispatch_agents 启动的子 pi）虽然技术上能从 keychain 拿到 master key，但 abrain extension 在 sub-pi 中**强制 disabled**——通过 `PI_ABRAIN_DISABLED=1` env 变量传递，子 pi 启动时跳过 vault 加载（写入空白 master key 状态）。这让 §6.7 "sub-pi 隔离" 不只是 documentation 而是机制性的。
+ADR 0014 §关键不变量 #6 要求 "sub-pi 默认看不到任何 vault" 是**机制性的**不只是 documentation。下面三点同时生效：
+
+#### (a) `dispatch_agents` spawn 强制 env override（不允许上层覆盖）
+
+```typescript
+// extensions/dispatch/index.ts
+const childEnv: NodeJS.ProcessEnv = {
+  ...process.env,                       // 先继承父环境
+  PI_ABRAIN_DISABLED: "1",              // 后强制覆盖——不允许上层 export PI_ABRAIN_DISABLED=0
+};
+spawn("pi", args, { env: childEnv });
+```
+
+这里顺序重要：`...process.env` 在前、`PI_ABRAIN_DISABLED: "1"` 在后。如果用户 `export PI_ABRAIN_DISABLED=0` 也会被后的覆写掩盖。
+
+#### (b) extension activate 顶层位置的 hard guard（不仅 loadMasterKey 处，上面的伪代码可见）
+
+```typescript
+// extensions/abrain/index.ts
+export function activate(api: PiExtensionAPI) {
+  if (process.env.PI_ABRAIN_DISABLED === "1") {
+    api.log.info("abrain extension disabled (sub-pi mode)");
+    return;  // 无 tool 注册、无事件订阅、无 vault metadata 加载
+  }
+  // 正常启动路径
+  api.registerTool("vault_release", ···);
+  api.subscribe("agent_end", ···);
+}
+```
+
+#### (c) Smoke 验证 enforcement——不是靠 documentation、是靠测试
+
+`scripts/smoke-vault-subpi-isolation.mjs`（待写）验证：
+1. 父 pi 启动后 `pi vault status` = unlocked
+2. dispatch_agents 子 pi 进程调用 `pi vault status`返回 locked/disabled
+3. dispatch_agents 子 pi 中调用 `pi vault list` 拒绝（不返回任何 metadata）
+4. 即使用户设 `PI_ABRAIN_DISABLED=0` env，dispatch_agents 子 pi 仍然 disabled（验证 spawn override 顺序正确）
 
 ## 6. 跨设备导入（手动）
 
@@ -148,12 +197,12 @@ rsync -av --delete ~/.abrain/ user@deviceB:.abrain/
 
 ## 7. 与 Lane V 同步语义的衔接
 
-详见 [brain-redesign-spec.md §6.4.0](../brain-redesign-spec.md#640-vault-写入的执行者与同步语义)。简言之：
+详见 [brain-redesign-spec.md §6.4.0](../brain-redesign-spec.md#640-vault-写入的执行者与同步语义)。简言之（v1.2 修正，Round 4 N1）：
 
-- `/secret` 命令由 sediment 进程**同步**处理（不走 agent_end 异步队列）
-- 落盘步骤：plaintext → age encrypt（用 `~/.abrain/.vault-pubkey`）→ atomic rename 到 `vault/<key>.md.age`
+- `/secret` 命令由 **main pi 进程内同步调用 vaultWriter library** 处理（不走 sediment IPC / 不走 agent_end 异步）。vaultWriter 是 `extensions/abrain/vault-writer.ts`，复用 sediment 的 validation/audit substrate 但代码共享不是进程共享。避免 daemon / socket / peer credential 三层新工程面
+- 落盘步骤：flock(vault 目录) → age encrypt(plaintext, `~/.abrain/.vault-pubkey`) → 先 append `vault-events.jsonl` + fsync → atomic rename 到 `vault/<key>.md.age` → append `_meta/<key>.md` → unflock
 - 同步等待用户 TUI 输入完毕后立即返回——`$VAULT_<key>` 在下一条 bash 命令里立即可用
-- 写入失败（如 keychain unlock 失败）TUI 立刻报错，不进入 partial state
+- 写入失败（keychain unlock 失败 / vault-events append 失败 / 加密失败）TUI 立刻报错，不进入 partial state
 
 ## 8. 验收 checklist
 
