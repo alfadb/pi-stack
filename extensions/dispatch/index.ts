@@ -278,9 +278,18 @@ function runSubprocess(
     signal.addEventListener("abort", onAbort, { once: true });
 
     try {
+      // env override: force PI_ABRAIN_DISABLED=1 in sub-pi to enforce ADR 0014
+      // invariant #6 (sub-pi 默认看不到任何 vault). Order matters: ...process.env
+      // first, PI_ABRAIN_DISABLED last — so user's `export PI_ABRAIN_DISABLED=0`
+      // cannot bypass. See migration/vault-bootstrap.md §5 layer (a).
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        PI_ABRAIN_DISABLED: "1",
+      };
       child = spawn("pi", args, {
         stdio: ["ignore", "pipe", "pipe"],
         shell: false,
+        env: childEnv,
       });
       if (child.pid) onSpawn?.(child.pid);
     } catch (e: any) {

@@ -172,40 +172,60 @@ async function sedimentWrite(entry) {
 ### Migration tool 义务
 
 ```bash
-# pi brain pause 命令的完整实现
+# pi brain pause 命令的完整实现（v1.3 修订，Round 5 DS P0-B：加 trap EXIT 避免 pause flag 泄漏）
 pi_brain_pause() {
+  # 关键：设置 EXIT trap —— 任何退出路径（抢锁失败 / drain 超时 / crash / kill）
+  # 都会清理 pause flag。这是 v1.2 后的核心修复：避免两个 migration tool
+  # 同时跑时后出发者退出但泄漏 flag，sediment 永久被 paused。
+  trap 'rm -f ~/.abrain/.state/sediment-paused' EXIT
+
   # 1. 写 pause flag——后续所有 sediment 写入将 skip
   touch ~/.abrain/.state/sediment-paused
 
   # 2. 获取全局锁（限时，避免被拋弃锁卡住）
   exec 9>~/.abrain/.state/sediment-global.lock
-  flock --timeout=300 9 || { echo "FAIL: cannot acquire global lock in 5min"; exit 2; }
+  if ! flock --timeout=300 9; then
+    # 抢锁失败 —— 另一个 migration tool 在跑。trap 会自动清 flag。
+    echo "FAIL: cannot acquire global lock in 5min (another migration in progress?)"
+    exit 2
+  fi
 
-  # 3. drain inflight：等待所有 sediment-inflight/<pid> 文件消失（最多 60s）
-  for i in $(seq 1 60); do
+  # 3. drain inflight：等待所有 sediment-inflight/<pid> 文件消失
+  # v1.3 修正（Round 5 GPT P0-2）：drain timeout 不能硬编码 60s —— sediment
+  # extractor 默认 timeout 180s。读 settings 拿 `extractorTimeoutMs` 加 30s margin。
+  EXTRACTOR_TIMEOUT_MS=$(jq -r '.sediment.extractorTimeoutMs // 180000' \
+    ~/.pi/agent/settings.json 2>/dev/null || echo 180000)
+  DRAIN_TIMEOUT=$(( (EXTRACTOR_TIMEOUT_MS / 1000) + 30 ))
+  for i in $(seq 1 $DRAIN_TIMEOUT); do
     if [ -z "$(ls ~/.abrain/.state/sediment-inflight/ 2>/dev/null)" ]; then
       break
     fi
     sleep 1
   done
   if [ -n "$(ls ~/.abrain/.state/sediment-inflight/ 2>/dev/null)" ]; then
-    echo "WARN: 有 sediment writer drain 超时，pid: $(ls ~/.abrain/.state/sediment-inflight/)"
-    echo "  选择：取消 (rm pause + release lock) 或强进（风险：被 drain 不事件可能覆盖迁移中的 .pensieve）"
+    echo "WARN: 有 sediment writer drain 超时（${DRAIN_TIMEOUT}s），pid: $(ls ~/.abrain/.state/sediment-inflight/)"
+    echo "  选择：取消 (trap 自动清 flag + release lock) 或强进（风险：被 drain 不事件可能覆盖迁移中的 .pensieve）"
     read -p "取消吗？[Y/n] " ans
-    [ "$ans" != "n" ] && { rm ~/.abrain/.state/sediment-paused; flock -u 9; exit 3; }
+    [ "$ans" != "n" ] && exit 3   # trap 负责清理
   fi
 
   # 4. drain 过后 fd 9 仍持 lock——migration tool 现在可以安全进行 mv
+  # 但现在要取消 trap ——避免 migration 成功后 shell 退出时 trap 清了我们还要用的 flag。
+  # migration_tool 负责后续调 pi_brain_resume 显式清理。
+  trap - EXIT
   echo "✓ paused + locked + drained. ready for migration."
 }
 
-# pi brain resume 命令
+# pi brain resume 命令。v1.3 修订：先 rm pause flag 再 release lock，
+# 避免 resume 后 pause flag 短暂残留窗口中 sediment 被错误 skip。
 pi_brain_resume() {
-  flock -u 9                          # 释放全局锁
-  rm ~/.abrain/.state/sediment-paused # 取消 pause flag
+  rm -f ~/.abrain/.state/sediment-paused   # 先取消 pause
+  flock -u 9                                # 再释放 lock
   echo "✓ sediment resumed."
 }
 ```
+
+**为什么 trap EXIT 是必要的**（v1.3 补）：不仅避免抢锁失败后的泄漏（v1.2 问题），还覆盖 `kill -9 $$` 、ssh 断连、bash crash 等意外退出路径。Migration tool 本身被人工强杀是真实场景。
 
 ### P5 完整流程
 
@@ -223,9 +243,19 @@ pi brain resume                                    # §上
 
 ### Sub-pi、agent_end 与 §上协议的交互
 
-- **agent_end 规律调用 sediment**：agent_end handler 按§上 Writer-side 义务 — 看到 paused 则 skip、audit 记一行 “skip-due-to-pause”。这不会丢数据：sediment extractor 是从 transcript 重新提炼的，下轮 agent_end 重启后重跑同样能抽取。如果考虑提炼费用，能将待汇报 entry 写临时进 queue——但 v1.2 不作此要求。
-- **vaultWriter 遵守同义务**：paused 期间 `/secret` TUI 亦拒绝（报错“abrain paused for migration”）。Migration window 期间用户不能写新 secret——可接受。
-- **Sub-pi 隔离**：子 pi 仍以 `PI_ABRAIN_DISABLED=1` 启动（§vault-bootstrap §5），与上述协议不相干。
+- **agent_end 规律调用 sediment**：v1.2 原描述“paused 则 skip、下轮 agent_end 重提炼”——**v1.3 修正（Round 5 GPT P0-2）这是 silent drop 不是 retry**，原因：sediment auto-write lane 在启动 bg promise 前已 `saveSessionCheckpoint(...)`，若 pause 发生在 LLM extractor 5-30s 期间，扣默认 timeout 180s：
+  1. checkpoint 已前进
+  2. LLM 返回后 writer 看到 paused → skip
+  3. 下轮 agent_end **不**重跑同一窗口（checkpoint 已前进）
+  4. 这个窗口的记忆**静默丢失**
+
+  v1.3 修复（上面 Writer-side 义务伪代码同步调整）：**pause 期间 sediment auto-write bg promise 不 advance checkpoint**。具体：
+  - bg promise 启动前检查 pause flag，若 paused 则 不 调 saveSessionCheckpoint，skip + audit `op=skip-due-to-pause-precheckpoint`
+  - bg promise 运行中遇 pause（LLM extractor 返回后 writer 看到 paused）→ 不 advance checkpoint + skip + audit `op=skip-due-to-pause-extractor-returned`——下轮 agent_end 看到 checkpoint 未动会重跑同一窗口重提炼
+  - 只有 write/create/reject audit 完成后才 advance checkpoint
+  - 代价：pause / resume 之际某些 transcript 窗口会被重提炼一次，增加 LLM call—— 但 迁移窗口是一次性、重提炼成本低，远优于 silent drop
+- **vaultWriter 遵守同义务**：paused 期间 `/secret` TUI 亦拒绝（报错“abrain paused for migration”）。vaultWriter 本身入口加 `existsSync("~/.abrain/.state/sediment-paused")` 检查（v1.3 明确，Round 5 DS corner case 5.2）：不依赖 sediment writer 逻辑那一层 guard。Migration window 期间用户不能写新 secret——可接受。
+- **Sub-pi 隔离**：子 pi 仍以 `PI_ABRAIN_DISABLED=1` 启动（§vault-bootstrap §5 + extensions/dispatch/index.ts spawn env override，v1.3 已实施 + smoke:vault-subpi-isolation 验证），与上述协议不相干。
 
 ## 7. 时间预算
 

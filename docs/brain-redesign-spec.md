@@ -1,10 +1,19 @@
 # Brain Redesign Spec
 
-> **状态**：v1.2 — incorporate Round 4 复核 P0 修订（2026-05-09）。
+> **状态**：v1.3 — incorporate Round 5 复核 P0 修订（2026-05-09）。
 >
 > Baseline v1.0 accepted alongside [ADR 0014](adr/0014-abrain-as-personal-brain.md)；v1.1 完成 Round 3 P0 闭合；v1.2 完成 Round 4 P0 闭合。
 >
-> **v1.2 变更点**（三家 Round 4 复核 → PASS after fixing P0，五个新 P0）：
+> **v1.3 变更点**（三家 Round 5 复核 → 1 PASS after fixing P0 / 2 CONDITIONAL，5 个新 P0）：
+> - **真代码修订**：`extensions/dispatch/index.ts` 的 `runSubprocess()` 加 `env: { ...process.env, PI_ABRAIN_DISABLED: "1" }` env override（v1.2 文档写了但代码未实施——GPT P0-1）；加 `smoke:vault-subpi-isolation` 验证 5 项不变量
+> - §6.4.0 audit 顺序**内部矛盾修复**（DS P0-A）：选顺序 A（rename 在前 audit 在后）+ 加 crash recovery（启动时 scan vault vs audit log）
+> - migration §6 `pi brain pause` 加 `trap EXIT` cleanup（DS P0-B）：抢锁失败 / crash 均不泄 pause flag
+> - vaultWriter trust 边界明确化（Opus NP0-1）：删错乱 `parent_pid != pi_pid` wording；明示 bash 通用工具（`secret-tool` + `age` / `node -e require()` / direct fs）是 known residual surface；坐偏入 §坟处 #10
+> - 不变量 #1 wording 拆为 mechanic + best-effort 两段（Opus NP1-1）
+> - migration §6 P5 silent drop 修复（GPT P0-2）：paused 期间 sediment bg checkpoint **不前进**，避免已 advance checkpoint 后 LLM 返回看见 paused 静默丢
+> - 4 个 P1 顺手：staging 加 session-start-epoch / cross-log timestamp 契约 / ADR §D3 staging 第四出口 / substrate API 边界清单
+>
+> **v1.2 变更点**（三家 Round 4 复核 → PASS after fixing P0，5 个新 P0）：
 > - §6.4.0 vault 写入**模型重写**：sediment IPC → main pi 调 vaultWriter library（避免 daemon / socket auth / peer credential，与 ADR D6 不做 daemon 一致）
 > - §6.4.0 + §11.2 补 vault concurrency lock：vault 目录级 flock + `_meta/<key>.md` append-only 结构
 > - §11.2 dedupe 行 wording 修正：从“中期方案 dedupe”改为“接受最后写入赢（不假装解决 race）”
@@ -263,7 +272,7 @@ sediment 收到后写到 `identity/` 或 `habits/` 或 `skills/`（看内容由 
 | 跨项目世界 fact / pattern（不依赖项目上下文） | `knowledge/` |
 | 技术 / 元能力 inventory | `skills/` |
 
-**Stage 3 — ambiguous 处理**：如果两阶段后 sediment 仍无法唯一决定（多个 aboutness 特征同时命中或 `routing_confidence < 0.6`），默认写入到 `projects/<active>/observations/staging/<YYYY-MM-DD>.md`（**per-day per-pi-process** 文件，文件名补 `--<pid>` 避免同天多 pi 并发 append race，Round 4 Opus corner case 4）。**不直接写 identity/habits**——不变量 #1 的 trust budget 下漂移代价高。
+**Stage 3 — ambiguous 处理**：如果两阶段后 sediment 仍无法唯一决定（多个 aboutness 特征同时命中或 `routing_confidence < 0.6`），默认写入到 `projects/<active>/observations/staging/<YYYY-MM-DD>--<pid>--<session-start-epoch>.md`——v1.3 补 session-start-epoch（Round 5 DS P1-C）避免 pid 复用：pi A 退出后 pid 被 pi B 拿到会写到同一文件造成两个 session entries 混同文件。session-start-epoch = pi 进程启动时 `Date.now()`，单调递增。**不直接写 identity/habits**——不变量 #1 的 trust budget 下漂移代价高。
 
 #### Staging lifecycle（v1.2 补，Round 4 Opus P1 3-3）
 
@@ -486,19 +495,75 @@ user 键入 `/secret <key> <value>`  (TUI command, not LLM tool)
   → `$VAULT_<key>` 立即在后续 bash 可用
 ```
 
-**不走 sediment IPC**、**不引入新进程**。vaultWriter library 在 `extensions/abrain/vault-writer.ts`，复用 sediment 的 validation/audit substrate（frontmatter schema / dedupe gate / lint）但是代码共享不是进程共享。
+**不走 sediment IPC**、**不引入新进程**。vaultWriter library 在 `extensions/abrain/vault-writer.ts`。
+
+#### vaultWriter substrate API 边界（v1.3 补，Round 5 Opus NP1-4）
+
+vaultWriter 复用 sediment 的 substrate但**仅限以下明确清单**，避免隐式耦合到 sediment 的 `.pensieve` / project scope / sediment audit 路径：
+
+- `extensions/_shared/entry-substrate/frontmatter.ts`（待抽）：frontmatter schema 验证
+- `extensions/_shared/entry-substrate/sanitize.ts`（待抽）：plaintext 表净化、non-printable 过滤
+- `extensions/_shared/entry-substrate/atomic-write.ts`（待抽）：write tmp + fsync + atomic rename helper
+- `extensions/_shared/audit/append.ts`（待抽）：audit jsonl append + fsync，per-stream（sediment-events vs vault-events）
+
+**明确不在 substrate 中**（vaultWriter **不**应该 import）：
+- `extensions/sediment/writer.ts`（含 `.pensieve` / project slug / sediment checkpoint 耦合）
+- `extensions/sediment/dedupe.ts`（vault 不需语义 dedupe——同 key 覆写走事务 lock，不是语义 dedupe）
+- `extensions/sediment/index.ts`（agent_end handler）
+
+P3 实施阶段交付 vaultWriter × sediment substrate 的 contract test（migration §5 验收清单）——sediment 改 substrate 时必跑该测试。
 
 #### 主 session LLM enforcement（ADR 0003 补充不取消）
 
-- LLM tool call surface 中没有 `vault_write` / `vault_put` / `secret_*` 入口
-- `/secret` 是 TUI command——用户键盘输入、TUI 询问、发出调用。LLM 看到的仅是 “<user-typed: /secret ···>” 类记录（不含 value）
-- bash 如果生成 `pi /secret ···` 调用（汇总调试场景）仅不住 LLM 与用户边界二者需 LLM 在后续在 main pi 的 调试接口 仅不会走 vaultWriter——abrain/vault handler 在启动时检查并拒绝 LLM bash 调用 self pi binary（`if (parent_pid != pi_pid) reject`）
+v1.3 将不变量 #1 wording 拆为两段（Round 5 Opus NP1-1：避免“修辞先于机制”）：
 
-#### 事务语义
+**层 1 mechanic enforcement**（机制性不变量）：LLM tool call surface 中**没有**定制 brain mutation tool——没有 `vault_write` / `vault_put` / `secret_*` / `brain_write` 这类专门入口。sediment 仍为异步记忆写入唯一 dedicated writer；vaultWriter library **仅在 abrain extension activate 期间被 TUI command handler 同进程调用**。
 
-- 同步返回前：加密文件 atomic rename 到最终路径 + `_meta/<key>.md` append + `vault-events.jsonl` append + fsync
-- audit 写入顺序（v1.2 明确，Round 4 DS P1-2）：**先** append `vault-events.jsonl` → fsync → **再** atomic rename 加密文件。vault-events append 失败则整个操作 fail，不写加密文件，TUI 报错。代价是一次额外 fsync，vault 写入频率极低可接受
-- 失败场景（keychain locked / 磁盘满 / age 库调用错 / vault-events append 失败）TUI 立刻报错，不进入 partial state
+**层 2 best-effort residual surface**（已知 trade-off，不是机制保证）：LLM 仍可通过通用 tool（bash / edit / write / dispatch_agents）间接写 brain SOT——例如：
+
+```bash
+# bash 路径一：直接调 keychain + age CLI、手写加密文件
+secret-tool lookup service abrain key master | age -e -r $(cat ~/.abrain/.vault-pubkey) > ~/.abrain/vault/foo.md.age
+# bash 路径二：node -e require vaultWriter library 直接调用
+node -e 'require("/path/to/extensions/abrain/vault-writer.js").writeSecret("key","v")'
+# bash 路径三：bash spawn 子 pi（不走 dispatch_agents）不带 PI_ABRAIN_DISABLED
+pi /secret malicious-key "$(cat ~/.ssh/id_ed25519)"
+```
+
+这三条路径**都**可能被 prompt injection 诱导。层 1 机制不覆盖它们。防御手段是装装装：§6.5.1 stdout 默认不回流（限 exfiltration）、§6.6 redaction（限明文看见）、sediment audit 后置检测（限事后追责）——三者合起来压低面但不消除。列为已知 trade-off于 ADR 0014 §坟处 #10。
+
+vaultWriter library 本身的保护（限制层 1 范围严格）：不在 module-level export 公开 `writeSecret` API。只在 abrain extension 调 `activate(api)` 后、通过闭包深处的 `__internalWriter` 返回给 TUI command handler。`require(".../vault-writer.js").writeSecret(···)` 尝试遇到 `undefined is not a function`——以这个机制防 "node -e require attack"（bash 路径二）。bash 路径一与三仍是 residual surface。
+
+#### 事务语义（v1.3 统一顺序，Round 5 DS P0-A）
+
+v1.2 同节内两处顺序描述自相矛盾（流程图 vs 文字）。v1.3 选 **顺序 A（rename 在前、audit 在后）**——理由：secret 是 source of truth、audit 是 derived；数据不丢优先级 > 可追溯；orphan audit row 恢复难于缺失 audit row。
+
+```
+flock(vault_dir + '/.lock')
+  → age-encrypt(value, vault_pubkey) → write tmp + fsync
+  → atomic rename → vault/<key>.md.age          (★ SOT 已落盘 ★)
+  → append _meta/<key>.md + fsync
+  → append vault-events.jsonl + fsync
+→ unflock
+→ 返回 TUI
+```
+
+**Crash recovery**：如果 crash 发生在 atomic rename 之后、vault-events append 之前，secret 已落盘但 audit 没有 row——这是“丢 audit 不丢 secret”，多于 “丢 secret 但有 audit”。息复活：
+
+vaultWriter library 启动时跳一次 reconcile：
+```typescript
+// pseudo-code
+for each *.md.age in vault/:
+  if file.mtime > last-vault-events.jsonl ts:
+    if no "create" audit row for this slug since file.mtime:
+      append { op: "recovered_missing_audit", slug, mtime, recovered_ts: now() }
+```
+
+这个 reconcile **不在 hot path**——仅 vaultWriter 初始化时跑一次，后续写入不检查。
+
+**失败场景**（同 v1.2）：keychain locked / 磁盘满 / age 库调用错 / vault-events append 失败。但添加：如果 rename 已成功但 vault-events append 失败，TUI 报错但 secret 已落盘可用；下次启动 reconcile 补 audit row。
+
+**Paused-reject 路径的 plaintext 残留**（v1.3 补，Round 5 Opus NP1-5）：migration 期间用户键入 `/secret` 被拒 —— user typed plaintext 在 reject return 前驻留 main pi node.js heap。同 §6.5 execve 临界区存在 sub-ms 级窗口，主 pi crash 且 core dump 在该窗口发生可能泄一个 key。列为已知 trade-off，不进一步防御。
 
 #### Vault concurrency（v1.2 补，Round 4 DS P0-1/P0-2）
 

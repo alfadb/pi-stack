@@ -1,7 +1,7 @@
 # ADR 0014 — Abrain Personal Brain Redesign（重定位 ~/.abrain 为 alfadb 数字孪生）
 
 - **状态**：Accepted（2026-05-09）
-- **修订**：v1.2（2026-05-09，incorporate Round 4 复核 P0 修订）、v1.1（2026-05-09，incorporate Round 3 复核 P0 修订）
+- **修订**：v1.3（2026-05-09，incorporate Round 5 复核 P0 修订，含首次真代码修订）、v1.2（2026-05-09，incorporate Round 4 复核 P0 修订）、v1.1（2026-05-09，incorporate Round 3 复核 P0 修订）
 - **日期**：2026-05-09
 - **决策者**：alfadb
 - **依赖**：[ADR 0003](0003-main-session-read-only.md)、[ADR 0010](0010-sediment-single-agent-with-lookup-tools.md)、[ADR 0013](0013-asymmetric-trust-three-lanes.md)、[memory-architecture.md](../memory-architecture.md)
@@ -63,7 +63,7 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 | **V** vault declare | `/secret <key>` 等系列命令（**同步**：user slash → main pi 进程内 vaultWriter library 同步调用 → 加密落盘 → 立即可用。**不走 sediment IPC**（v1.2 修订 N1） | 全局或项目级 vault | 最高 | 🆕 |
 | ~~B promote~~ / ~~D auto-promote~~ | — | — | — | ⛔ 失去意义（abrain 内部无 promote） |
 
-> Lane G 的目标列三选一**由 sediment 按内容决定**（deterministic router 见 [spec §3.5](../brain-redesign-spec.md#35-deterministic-router)），不是 Lane 与目录的硬绑定。Lane G 保证 trust=高，目录由内容路由。
+> Lane G 的目标在 identity / habits / skills 三区中按内容路由（deterministic router 见 [spec §3.5](../brain-redesign-spec.md#35-deterministic-router)），不是 Lane 与目录的硬绑定。Lane G 保证 trust=高，目录由内容路由。**低置信样本（`routing_confidence < 0.6`）进 §3.5 staging review queue——不直接落 identity/habits**（v1.3 补，Round 5 Opus NP1-2：三区不是唯一出口，staging 是第四出口）。
 
 ### D4. Vault 双层架构
 
@@ -99,7 +99,10 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 
 ## 关键不变量
 
-1. **主 session LLM 不发起任何 brain 写入**（identity/habits/skills/workflows/projects/knowledge/vault 七区全部）：LLM tool call surface 中没有任何 brain mutation 入口。sediment 仍为异步记忆写入的唯一 writer（Lane A/C/G）。**Lane V 例外**（v1.2 重写，Round 4 N1）：user slash command `/secret`（用户物理键入）触发 main pi 进程内 `vaultWriter` library 同步调用（复用 sediment validation/audit substrate 但不走 sediment IPC——避免 daemon / socket auth / peer credential 三层新工程面，详 spec §6.4.0）。Lane G `/about-me` 仍走 sediment 异步 agent_end 路径。关键区分：**LLM 不能**发起 vault 写入（LLM tool surface 无该入口）；**用户能**通过 slash 同步写入（user typing 是面向 TUI 的独立路径，不进 LLM tool surface）。
+1. **LLM tool surface 中没有定制 brain mutation tool**（v1.3 拆为 mechanic + best-effort 两段，Round 5 Opus NP1-1）：
+   - **层 1 mechanic 不变量**：LLM 可调用的 tool 集中**没有** `vault_write` / `vault_put` / `secret_*` / `brain_write` 这类专门的 brain mutation 入口。sediment 仍为异步记忆写入唯一 dedicated writer（Lane A/C/G）；vaultWriter library **仅在 abrain extension activate 期间被 TUI command handler 同进程调用**（不在 module-level export 中公开、`require()` 取不到 `writeSecret`——详 spec §6.4.0）。
+   - **层 2 best-effort residual surface**（已知 trade-off）：LLM 仍可通过通用 tool（bash / edit / write / dispatch_agents）间接写 brain SOT——例如 bash `secret-tool lookup` + `age -e` 手写加密文件、bash `pi /secret` spawn 子 pi（不走 dispatch_agents 路径）。防御手段：§6.5.1 stdout 默认不回流 + §6.6 redaction + sediment audit 后置检测三者叠加，但**不是机制保证**。详 §坟处 #10。
+   - **Lane V 同步路径**（v1.2 引入）：user slash command `/secret`（用户物理键入）触发 main pi 进程内 vaultWriter 同步调用。user typing 是面向 TUI 的独立路径，不进 LLM tool surface，**由层 1 不变量保护**。Lane G `/about-me` 仍走 sediment 异步 agent_end 路径。
 2. **Markdown + git 是 source of truth**（vault 例外，加密 + 不进 git）：索引/derived view 可重建。
 3. **Facade 不暴露 scope/backend/source_path** 给 LLM ranking surface：`memory_search(query)` 签名无多余形参（`scope` 不存在于 schema）。例外：`memory_get(slug)` 是 exact lookup/debug view，可返回 scope/source_path 供调试——不是 LLM 选后端的机制。
 4. **跨 project vault 不互见**：active project（**boot-time snapshot**，详 spec §5.4）的 vault + 全局 vault 进 LLM context；其他 project 的 vault 连元数据都不暴露。会话中 bash `cd` 不改变 active project。
@@ -130,6 +133,7 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 7. **机器被偷或被未授权 ssh 时 vault 全裸**：开机自动解锁 + 无超时 lock 是用户明确选择换便利；这个风险已知已选。
 8. **abrain 主体本身的敏感度**：顶层 identity/values.md / cognitive-profile.md / self-narrative.md 全部进 git。private remote 凭证保护是隐含前置条件——未来需要单独 ADR 处理 abrain repo 本身的供应链安全（commit signing / verified push 等）。
 9. **LLM 主动 exfiltration 是已知攻击面**：`echo $VAULT_xxx | base64` 类命令能让明文绕过字面 redaction。不变量 #5 的补充（引用 `$VAULT_*` 的 bash stdout 默认不回流 LLM）是机制性防御，但 prompt injection 场景下远不是绝对保证。在高价值 vault（如 prod credential）上这是主动选择的 known trade-off。
+10. **LLM 通用 tool 间接写 brain 是 known residual surface**（v1.3 补，Round 5 Opus NP0-1）：不变量 #1 的层 1 mechanic 仅覆盖定制 mutation tool。LLM 仍可以通过 bash 调 `secret-tool` + `age` CLI 手写加密文件、通过 bash spawn 子 pi（不走 dispatch_agents）、通过 edit/write 工具直接改 markdown SOT。这些路径被 §6.5.1/6.6/sediment audit 三重防护层 best-effort 覆盖，但不是机制保证。与 #9 同类主动选择的 trade-off——补充说明 §不变量 #1 的层 2。
 
 ### 中性
 
@@ -158,6 +162,8 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 预计工程：纯代码 ≈3 天 + 2 周观察期。
 
 ## 审计扩展
+
+**Cross-log timestamp 契约**（v1.3 补，Round 5 DS P1-D）：sediment-events.jsonl 与 vault-events.jsonl 均为独立日志流，**跨流事件顺序仅按各自行内 `timestamp` 字段关联**（均为 `new Date().toISOString()`，同进程同时钟源）。两个流之间**无全局序列号保证**，审计回放时按 timestamp 做 merge-sort 得到 best-effort 时序。两流共享同一 audit row schema base（`{ts, op, lane, slug, ...}`），lane-specific 字段加在 schema 末尾；sediment substrate 改 base schema 时 vaultWriter 必须同步跟随，由 §vaultWriter substrate API 边界的 contract test（spec §6.4.0）覆盖。
 
 ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "auto_write" | "auto_promote"`。Lane G/V 引入后，lane enum 必须同步扩展：
 

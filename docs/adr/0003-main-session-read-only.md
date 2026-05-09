@@ -1,11 +1,15 @@
 # ADR 0003 — 主会话只读，sediment 单写
 
 - **状态**: Accepted。**Guard 实现已过时**（2026-05-07）— memory-architecture.md §6.1 定义了新的读工具 `memory_search/get/list/neighbors` 替代 `gbrain_search/get/query`。Guard 的拦截目标从 gbrain CLI/bash 变为 memory write tools（仅 sediment 可见）。读写分离核心原则不变。
-- **2026-05-09 补充**（由 [ADR 0014 v1.2](0014-abrain-as-personal-brain.md) 带入）：主会话只读原则**不取消**，但明确补充为 “LLM 不发起任何 brain 写入”：Lane V 的 vault 写入是用户物理键入 `/secret` TUI 命令触发 main pi 进程内 vaultWriter library 同步调用——LLM tool surface 中没有任何 vault mutation 入口，该路径不进 LLM 重译。Lane G `/about-me` 仍走 sediment 异步。sediment 仍为记忆类写入的唯一 writer。详见 ADR 0014 §关键不变量 #1。
+- **2026-05-09 补充**（由 [ADR 0014 v1.3](0014-abrain-as-personal-brain.md) 带入）：主会话只读原则**不取消**，但补充为两层：
+  - **层 1 mechanic**：LLM tool call surface 中**没有**定制 brain mutation tool——没有 `vault_write`/`brain_write` 这类专门入口。Lane V 的 `/secret` 是用户物理键入 TUI 命令触发 main pi 进程内 vaultWriter library 同步调用（不进 LLM tool surface）。Lane G `/about-me` 仍走 sediment 异步。sediment 仍为记忆类写入的唯一 dedicated writer。
+  - **层 2 best-effort residual surface**（已知 trade-off）：LLM 仍可通过通用 tool（bash / edit / write / dispatch_agents）间接写 brain SOT（例如 bash 调 `secret-tool` + `age` 手写加密文件、bash spawn 子 pi、edit/write 改 markdown SOT）。这些路径**不被机制拦截**，靠 §6.5.1 stdout 默认不回流 + §6.6 redaction + sediment audit 后置检测三重防护层 best-effort 覆盖。详 ADR 0014 §坟处 #10。
+
+  本 ADR 主体描述的 bash regex / postgres 凭证隔离 / protected paths guard 已被 memory-architecture.md §6 的 tool registration 分离替代——主 session 不注册定制 mutation tool 但仍能通过通用 bash/edit 间接触达 brain SOT。详 ADR 0014 §坟处 #10 与不变量 #1 的精确 wording。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
 - **依赖**: ADR 0002（superseded by memory-architecture.md）/ ADR 0004（sediment 写入）
-- **后续**: [memory-architecture.md](../memory-architecture.md) §6（新 tool 接口），§8（读写分离与 sediment 行为）；[ADR 0014](0014-abrain-as-personal-brain.md)（vault 写入例外）
+- **后续**: [memory-architecture.md](../memory-architecture.md) §6（新 tool 接口），§8（读写分离与 sediment 行为）；[ADR 0014 v1.3](0014-abrain-as-personal-brain.md)（不变量 #1 拆为 mechanic + best-effort 两层；vault 写入例外；坟处 #10 LLM 通用 tool 间接写 brain residual surface）
 
 ## 背景
 
