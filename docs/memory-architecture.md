@@ -1,12 +1,26 @@
 # Pi 知识管理架构设计
 
+> ⚠️ **部分 superseded by [ADR 0014](adr/0014-abrain-as-personal-brain.md)（2026-05-09）**
+>
+> 本文档的以下部分**已被 ADR 0014 + [brain-redesign-spec.md](brain-redesign-spec.md) 取代**：
+> - **§4.1 三层 Scope（Session / Project / World）的物理拓扑**：`<project>/.pensieve/` 物理位置已废止；项目知识迁入 `~/.abrain/projects/<id>/`。所有数据统一在 `~/.abrain/` 内部按七区结构（identity/skills/habits/workflows/projects/knowledge/vault）组织。
+> - **scope=project\|world 二元划分（含 4.1 表 / 8 节 sediment 路由 / 9 节 promotion）**：被 brain 内部结构吸收。Lane B（manual promote）和 Lane D（auto-promote）失去意义。新增 Lane G（about-me declare）和 Lane V（vault declare）。
+> - **§7 工具接口**：`memory_search` 等 facade 接口形状保留，但 `scope` 参数语义重新定义（详见 brain-redesign-spec.md §4）。
+>
+> **仍然有效的部分**：sediment writer policy / 7 节 LLM-facing facade 契约 / Compiled Truth + Timeline 双段格式 / Lint 规则 / Brain Health 评分 / 8 节 sediment pipeline 的 extractor/triage/writer/reviewer 内核 / dedupe gates / rolling pass-rate fuse / audit row schema —— 这些与新 brain 物理拓扑正交，继续使用。
+>
+> 阅读本文档时，遇到 `<project>/.pensieve/` 与 `~/.abrain/` 字样请同时参照 [brain-redesign-spec.md](brain-redesign-spec.md) 进行物理路径转换。
+
+---
+
 > 基于 2026-05-06 用户原始架构想法，通过五轮 T0 深度讨论 + 完备性审查 + qmd 集成方案 + 两轮最终评审逐步细化而成。
 > 讨论与审查参与者：Claude Opus 4 / GPT-5.5 / DeepSeek V4 Pro
 > 最终评审（2026-05-07）：两轮三模型双盲审查 CONDITIONAL → 修订后 PASS
+> **2026-05-09 后续修订**：物理拓扑被 ADR 0014 supersede（见上方 banner）。
 
 **读者前提**：本文档假设读者了解 pi 的基本概念——pi 是一个 TypeScript TUI 编码 agent 框架，通过 `extension` 机制注册工具和生命周期钩子（`activate()`/`agent_end`），配置分布在 `<project>/.pi/agent/settings.json`（运行偏好）和 `<project>/.pensieve/config.yml`（项目知识配置）。pi 是长生命周期进程，主 session 和 dispatch 子进程通过工具与 LLM 交互，sediment sidecar 是 pi 的后台写入扩展。
 
-**文档角色**：本文档是 Pi 知识管理系统的 **权威设计规范**——定义了数据模型、存储拓扑、工具接口、sediment 行为、演化机制。所有实施以此文档为准。
+**文档角色**：本文档**曾经**是 Pi 知识管理系统的权威设计规范（v1.0，2026-05-07）；自 ADR 0014 起，物理拓扑部分由 [brain-redesign-spec.md](brain-redesign-spec.md) 接管，本文档的 sediment internals / facade 契约 / lint / health 部分仍是权威。
 
 ---
 
