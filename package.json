@@ -24,7 +24,8 @@
     "smoke:dispatch": "node scripts/smoke-dispatch-input-compat.mjs",
     "smoke:fallback-timing": "node scripts/smoke-model-fallback-mutation-timing.mjs",
     "smoke:paths": "node scripts/smoke-pi-astack-paths.mjs",
-    "smoke:vault-subpi-isolation": "node scripts/smoke-vault-subpi-isolation.mjs"
+    "smoke:vault-subpi-isolation": "node scripts/smoke-vault-subpi-isolation.mjs",
+    "smoke:abrain": "node scripts/smoke-abrain-backend-detect.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],
