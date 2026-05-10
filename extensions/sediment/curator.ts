@@ -14,6 +14,7 @@ interface ModelRegistryLike {
 export type CuratorDecision =
   | { op: "create"; rationale?: string }
   | { op: "update"; slug: string; patch: ProjectEntryUpdateDraft; rationale?: string }
+  | { op: "delete"; slug: string; reason: string; rationale?: string }
   | { op: "skip"; reason: string; rationale?: string };
 
 export interface CuratorAudit {
@@ -95,6 +96,12 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
     return { op: "update", slug, patch, ...(rationale ? { rationale } : {}) };
   }
 
+  if (op === "delete") {
+    const slug = asString(obj.slug);
+    if (!slug || !allowedSlugs.has(slug)) throw new Error(`curator delete slug is not an allowed neighbor: ${slug || "<missing>"}`);
+    return { op: "delete", slug, reason: asString(obj.reason) ?? rationale ?? "deleted by sediment curator", ...(rationale ? { rationale } : {}) };
+  }
+
   if (op === "create") {
     return { op: "create", ...(rationale ? { rationale } : {}) };
   }
@@ -149,11 +156,13 @@ function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): 
     "- {\"op\":\"create\", \"rationale\": string}",
     "- {\"op\":\"update\", \"slug\": one_of_neighbors, \"patch\": {\"title\"?: string, \"kind\"?: string, \"status\"?: string, \"confidence\"?: number, \"compiled_truth\"?: string, \"trigger_phrases\"?: string[]}, \"timeline_note\": string, \"rationale\": string}",
     "- {\"op\":\"skip\", \"reason\": string, \"rationale\": string}",
+    "- {\"op\":\"delete\", \"slug\": one_of_neighbors, \"reason\": string, \"rationale\": string}",
     "",
     "Rules:",
     "- Prefer update over create when the candidate refines, implements, corrects, or supersedes a neighbor.",
     "- Prefer skip when the candidate adds no durable information beyond a neighbor.",
     "- Use create only when no neighbor is the same evolving knowledge unit.",
+    "- Use delete only for clear junk/noise or when the candidate establishes that an existing neighbor should be removed rather than archived/updated. Git history is the rollback surface.",
     "- For update, compiled_truth should be the new current best truth, not an append-only delta. Preserve useful stable context from the old entry when needed.",
     "- timeline_note should be short and evidence-based.",
     "- Do not invent slugs. Update slug must be one of the neighbor slugs.",

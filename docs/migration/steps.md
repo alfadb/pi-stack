@@ -44,7 +44,7 @@
 - generated `_index.md` 是否可构建
 - migration pending count
 - migration backup count / state（`restorable_remove_target`、`target_modified`、`already_restored` 等）
-- sediment `llm_dry_run` pass/fail/pass-rate
+- sediment auto-write audit / curator decision counts
 
 **验收**：
 ```text
@@ -169,7 +169,7 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 1.4 — Sediment project-only pipeline
 
-**实现状态（2026-05-08）**：`extensions/sediment/writer.ts` 已实现 project-only writer substrate；`extensions/sediment/checkpoint.ts` 已实现 per-session checkpoint + RMW 锁 + run window builder；`extensions/sediment/extractor.ts` 已实现 fence-aware deterministic explicit `MEMORY:` block extractor；`extensions/sediment/llm-extractor.ts` 已实现 prompt (含 Trust Boundary role-aware 指令) + model call + parser；`extensions/sediment/index.ts` 注册 全部 `/sediment` 子命令 + `agent_end` hook。底层走 deterministic explicit `MEMORY:` lane；**LLM auto-write lane 已接入 hook**（Phase 1.4 A2，2026-05-08），在显式 miss 后、`autoLlmWriteEnabled=true` 且 readiness/rolling/rate/sampling 全部放行后调用 LLM。
+**实现状态（2026-05-10）**：`extensions/sediment/writer.ts` 已实现 project-only create/update/delete substrate；`extensions/sediment/checkpoint.ts` 已实现 per-session checkpoint + RMW 锁 + run window builder；`extensions/sediment/extractor.ts` 已实现 fence-aware deterministic explicit `MEMORY:` block extractor；`extensions/sediment/llm-extractor.ts` 已实现 prompt (含 Trust Boundary role-aware 指令) + model call + parser；`extensions/sediment/curator.ts` 已接入 ADR 0015 `memory_search` lookup loop；`extensions/sediment/index.ts` 注册 `/sediment` 子命令 + `agent_end` hook。底层走 deterministic explicit `MEMORY:` lane；**LLM auto-write lane 已接入 hook并按 ADR 0016 删除 readiness/rolling/rate/sampling/G2-G13 机械门控**：显式 miss 后直接调用 LLM extractor + curator，git/audit 作为回滚面。
 
 已完成 checkpoint/window substrate：
 - checkpoint path：`.pi-astack/sediment/checkpoint.json`
@@ -181,13 +181,7 @@ memory_search(query: "dispatch agent prompt")
 已完成 writer substrate：
 - validate：runtime 检查 title/kind/status/confidence/compiledTruth
 - sanitize：credential pattern 命中 fail-closed；`$HOME` 路径替换；IP/email redact
-- deterministic dedupe：
-  - **HARD signal**（无条件 reject）：slug 精确相等 OR 标题 word-trigram Jaccard ≥ 0.7
-  - **SOFT signal G13**（`policy.disallowNearDuplicate` 控制）：char-trigram Jaccard ≥ 0.20 AND 共享 rare token (df ≤ 2，长度过滤后) AND 同 kind
-    - 校准：vs 真实 .pensieve/ (177 entries) flag 率 2/15576，零误伤
-    - LLM auto-write lane 默认开启 (`autoWriteDisallowNearDuplicate: true`)；explicit `MEMORY:` lane 默认关闭（用户亲手输入可记录改述）
-    - 触发理由：今天首批 auto-writes 出现 `normalizebareslug` 同义双 entry（word-trigram = 0.000，char-trigram = 0.267，shared rare token `normalizebareslug`）
-  - 命中 hard reject duplicate；命中 soft + 策略开 reject `near_duplicate`；都返回 `DedupeResult` 含 match metadata
+- storage-only dedupe：仅 slug 精确相等无条件 reject，防止同一路径覆盖。旧 word-trigram / G13 rare-token 机械语义 dedupe 已按 ADR 0016 删除；语义重复交给 `memory_search` + curator 决定 update/skip/merge/create。
 - lint：写前调用 T1-T10 lint，error 阻断写入
 - lock：`.pi-astack/sediment/locks/sediment.lock`，超时可配置
 - write：tmp → rename 原子写入 markdown
@@ -202,16 +196,8 @@ memory_search(query: "dispatch agent prompt")
 - 新写入的 `created` / `updated` / timeline 首行使用本地 ISO datetime（精确到毫秒 + 时区），避免一天几十条 entry 时 date-only 无法排序
 - transient writer error → 不推进 checkpoint，留待下轮重试
 
-已完成 LLM extractor dry-run：
-- `/sediment llm --dry-run` 调用 `sediment.extractorModel`（默认 `deepseek/deepseek-v4-pro`）
-- 输出仅解析 `MEMORY:` blocks / `SKIP`
-- 不写 markdown，不推进 checkpoint
-- 写入 audit：`.pi-astack/sediment/audit.jsonl` 的 `llm_dry_run` 事件
-- quality gate：`skip` / `valid_candidates` pass；`model_error` / `unparseable_output` / `validation_errors` / `too_many_candidates` fail/warn
-- raw output 只存 SHA-256 + 截断 preview（默认 1000 chars）
-- `/sediment llm-report [--limit N]` 汇总最近 `llm_dry_run` 质量样本
-- `/sediment readiness` 根据 `autoLlmWriteEnabled` / `minDryRunSamples` / `requiredDryRunPassRate` 评估未来自动 LLM 写入是否可放行（当前仍不自动写）
-- **Readiness gate 样本已太期**（2026-05-08）：`scripts/seed-llm-dry-runs.mjs` 一次性脚本跨过 24 个样本（`deepseek-v4-pro` via sub2api）。结果：23/24 PASS（`pass rate 0.958` ≥ 0.9，samples 24 ≥ 20，`policyPassed: true`）。唯一 blocker为 `autoLlmWriteEnabled: false` 这个显式闸门。脚本是一次性 evidence-collection 工具，不是长期运行的 subsystem；类似 migration apply，不要扩展为 queue/dashboard。
+已删除 LLM extractor dry-run/readiness 链：
+- **ADR 0016 更新（2026-05-10）**：`/sediment llm --dry-run`、`/sediment llm-report`、`/sediment readiness`、`scripts/seed-llm-dry-runs.mjs` 与 `llm_dry_run` readiness gate 已删除。auto-write 不再需要 dry-run 样本；git + audit 是回滚面。
 
 已完成 migration apply 安全入口：
 - `/sediment migrate-one --plan <file>`：只预览单文件迁移结果，不写入、不 audit、不重建 derived artifacts
@@ -229,16 +215,15 @@ memory_search(query: "dispatch agent prompt")
 
 已完成 LLM auto-write lane（A1 + A2 + A3，2026-05-08）：
 - A1（安全前置 G2-G8）：`writeProjectEntry.opts.policy` + `forceProvisional`；`validateProjectEntryDraft(draft, policy)` overlay（`disallowMaxim` / `disallowArchived` / `maxConfidence`）；sanitizer 扩 4 pattern（JWT / PEM / AWS / connection URL）；`normalizeCompiledTruth` 对 `^---$` body 行退转；triggerPhrases 过 sanitizer；extractor prompt 加 Trust Boundary 指令。
-  - **ADR 0016 更新（2026-05-10）**：上述 G2-G13 机械语义 gate 保留为 `autoWriteSemanticPolicy="mechanical"` legacy/emergency mode；默认 `autoWriteSemanticPolicy="llm"`，不再强制 provisional、不禁 maxim、不 cap confidence、不用 G13 hard reject 代替语义判断。hard gate 收敛为敏感信息 + 存储完整性。
-  - 新增 `updateProjectEntry(slug, patch, ...)` writer substrate；`extensions/sediment/curator.ts` 已接入 `memory_search` lookup loop，当前支持 create/update/skip subset，避免 append-only 新增。
+  - **ADR 0016 更新（2026-05-10）**：G2-G13 / readiness / rolling / rate / sampling 机械门控已删除；不再强制 provisional、不禁 maxim、不 cap confidence、不用 G13 hard reject 代替语义判断。hard gate 收敛为敏感信息 + 存储完整性。
+  - 新增 `updateProjectEntry(slug, patch, ...)` writer substrate；`extensions/sediment/curator.ts` 已接入 `memory_search` lookup loop，当前支持 create/update/delete/skip subset，避免 append-only 新增。
 - A2（接入 + G9-G12）：`agent_end` 在 `parseExplicitMemoryBlocks(window) === []` 之后调用 `tryAutoWriteLane`。闸门顺序：
-  1. modelRegistry 存在 → `evaluateLlmAutoWriteReadiness(report, policy)` → `evaluateRollingGate(rollingReport, ...)` → `decideAutoWriteEligibility({sessionId, settings, readiness, rolling})`
-  2. 全部放行后：`runLlmExtractorDryRun()` → `parseExplicitMemoryBlocks(rawText)` → `previewExtraction(drafts, policy)` → 过滤 schema 违反项 → `writeProjectEntry({...draft, policy, forceProvisional})`；默认 ADR 0016 `llm` mode 下 policy 为空、forceProvisional=false，LLM 决定 kind/status/confidence
-  3. 写后重新 `evaluateRollingGate` 跳闸检查；跳闸后该 sessionId 本进程不再调 LLM（`autoWriteDisabledBySession` Map）。
-- G9 audit：`operation: "auto_write"` 含 candidate_count / candidates / results / **raw_text 全文** (cap `autoWriteRawAuditChars` 默认 8000) / rolling / stage_ms.llm_total。如果 LLM 打一鱼三天这些都够复现。
-- G10 rolling 闸门：`autoWriteRollingWindowSamples`/`autoWriteRollingPassRate` 两个 settings；跳闸是 **进程内** 状态，pi 重启重置（不改 settings.json，避免 “不可逆” 问题）。
-- G11 独立模型：复用现有 `extractorModel` settings（默认 deepseek-v4-pro）；不强制隔离主会话模型，仅靠 settings 表达意图。
-- G12 速率闸门：`autoWriteMaxPerHour` (默认 6) 滑动 1 小时窗口；`autoWriteSampleEveryNRuns` (默认 1) 确定性采样步进。两者进程内 Map，pi 重启重置。
+  1. modelRegistry 存在 + `autoLlmWriteEnabled=true`
+  2. `runLlmExtractorDryRun()` → `parseExplicitMemoryBlocks(rawText)` → `previewExtraction(drafts)` schema-only 过滤
+  3. `curateProjectDraft()` 调 `memory_search` 找近邻 → curator LLM 输出 create/update/delete/skip
+  4. `writeProjectEntry()` / `updateProjectEntry()` / `deleteProjectEntry()` 写盘；git/audit 负责回滚与追踪。
+- audit：`operation: "auto_write"` 含 candidate_count / candidates / results / curator decisions / **raw_text 全文** (cap `autoWriteRawAuditChars` 默认 8000) / stage_ms.llm_total。如果 LLM 打一鱼三天这些都够复现。
+- 独立模型：复用现有 `extractorModel` settings（默认 deepseek-v4-pro）；不强制隔离主会话模型，仅靠 settings 表达意图。
 
 已完成 LLM auto-write lane A3（实战 burn-in + 修复，2026-05-08）：
 - 首日 6 次 fire 共 14 候选，落盘 12，被新 G13 + 手动 prune 后留存 7。
@@ -250,8 +235,7 @@ memory_search(query: "dispatch agent prompt")
   - `agent_start` 当上轮终态 (completed/failed) → 重置 idle；当 running/idle 不动
   - `agent_end` 进入 running，bg 完成后 → completed（`N entries` / `LLM returned skip` / `ineligible`）或 failed（`LLM error` / `bg threw`）
   - 用户感知：`💪 sediment idle` / `📝 sediment running: auto-write (model=...)` / `✅ sediment completed: N entries` / `⚠️ sediment failed: <reason>`
-- **Rolling gate de-tuning**：`extractorMaxCandidates` 3→5（prompt 已 cap 2，3-4 是 benign overshoot 不算 runaway）；`autoWriteRollingWindowSamples` 20→30（单行影响 5%→3.3%，跨"半天"smooth）。
-- **G13 soft near-duplicate**：见 dedupe substrate 节；阻止 LLM 重复改述同一洞察（首日撞了 `normalizebareslug` 双 entry）。
+- **历史注记**：Rolling/G13 曾在 burn-in 期存在，ADR 0016 后已删除；重复改述由 curator update/skip/merge/delete 处理。
 - **Extractor model 临时切换**（settings.json）：`deepseek/deepseek-v4-pro` → `openai/gpt-5.4-mini`，因 deepseek API 当日 hang（flash 和 pro 都 30s+ 无输出）；hot-reload 即刻生效。deepseek 恢复后回切。
 
 剩余待实现 pipeline：
@@ -265,15 +249,6 @@ memory_search(query: "dispatch agent prompt")
 
 /sediment extract --dry-run
 # → 对当前 checkpoint window 解析显式 MEMORY blocks，但不写 markdown/不推进 checkpoint
-
-/sediment llm --dry-run
-# → 调用 LLM extractor，返回候选 preview；不写 markdown/不推进 checkpoint
-
-/sediment llm-report --limit 20
-# → 汇总 llm_dry_run pass/fail、reason 分布、候选数量和最近 preview/hash
-
-/sediment readiness
-# → 检查 dry-run 样本数/通过率/autoLlmWriteEnabled 是否满足 LLM auto-write lane 门禁
 
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果
@@ -294,11 +269,11 @@ memory_search(query: "dispatch agent prompt")
 # → 从 backup 恢复原 source；若 target 与迁移生成内容一致则删除 target，并重建 graph/index
 ```
 
-**待实现验收**：
+**当前 live 验收**：
 - sediment 在 agent_end 后自动运行
-- 新洞察写入 `.pensieve/knowledge/` 或 `.pensieve/staging/`
-- 重复洞察被 SKIP_DUPLICATE
-- audit log 记录完整 pipeline
+- 新洞察 create 到 `.pensieve/knowledge/` 或 `.pensieve/staging/`
+- 重复/旧洞察由 curator 输出 update/skip/merge（当前实现 create/update/skip subset）
+- audit log 记录完整 pipeline + curator decisions
 
 ---
 
@@ -409,7 +384,7 @@ echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
 npm run smoke:memory
 ```
 
-覆盖 memory + sediment 的关键路径：tool/command 注册、frontmatter EOF parsing、lint、search、graph/index rebuild、migration dry-run report、doctor-lite、sanitize、writer、dedupe、checkpoint window、explicit extractor、LLM dry-run summary/report/readiness、world `ABRAIN_ROOT` generated paths。
+覆盖 memory + sediment 的关键路径：tool/command 注册、frontmatter EOF parsing、lint、search、graph/index rebuild、migration dry-run report、doctor-lite、sanitize、writer create/update、storage-only dedupe、checkpoint window、explicit extractor、LLM extractor summary、world `ABRAIN_ROOT` generated paths。
 
 ### 安全测试
 - memory_write/update/deprecate 工具仅 sediment 可见

@@ -149,14 +149,13 @@ async function main() {
     const { planMigrationDryRun, writeMigrationReport } = req("./memory/migrate.js");
     const { runDoctorLite } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
-    const { writeProjectEntry, updateProjectEntry } = req("./sediment/writer.js");
+    const { deleteProjectEntry, writeProjectEntry, updateProjectEntry } = req("./sediment/writer.js");
     const { listMigrationBackups, migrateOne, restoreMigrationBackup } = req("./sediment/migration.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     const { buildRunWindow, saveCheckpoint, loadCheckpoint, loadSessionCheckpoint, saveSessionCheckpoint } = req("./sediment/checkpoint.js");
     const { detectProjectDuplicate } = req("./sediment/dedupe.js");
     const { parseExplicitMemoryBlocks } = req("./sediment/extractor.js");
     const { summarizeLlmExtractorDryRun } = req("./sediment/llm-extractor.js");
-    const { readLlmDryRunReport, evaluateLlmAutoWriteReadiness } = req("./sediment/report.js");
     const { sanitizeForMemory } = req("./sediment/sanitizer.js");
     const compactionTunerExt = req("./compaction-tuner/index.js").default;
     const { classifyDecision, DEFAULT_COMPACTION_TUNER_SETTINGS } = req("./compaction-tuner/index.js");
@@ -603,82 +602,25 @@ END_MEMORY`;
     const llmSummary = summarizeLlmExtractorDryRun({ ok: true, model: "x/y", rawText: "SKIP", extraction: { count: 0, drafts: [] } }, { maxCandidates: 3, rawPreviewChars: 10 });
     assert(llmSummary.quality.reason === "skip" && llmSummary.quality.passed, "llm summary skip gate failed");
 
-    // === A1 safety gates: G2/G3/G4/G5/G6/G8 ============================
-    // These verify the auto-write defenses BEFORE the agent_end LLM lane
-    // is wired up (Phase 1.4 A2). All gates must already work end-to-end
-    // through writeProjectEntry/validateProjectEntryDraft/sanitizeForMemory
-    // when the appropriate opts are passed.
+    // === Safety/storage checks retained after ADR 0016 ==================
+    // Only sensitive-info and storage-integrity checks remain hard gates.
 
-    // G5: extended sanitizer patterns — JWT, PEM, AWS access key, conn URL.
-    const { validateProjectEntryDraft } = req("./sediment/validation.js");
+    // Sensitive-info sanitizer patterns — JWT, PEM, AWS access key, conn URL.
     {
       const jwt = sanitizeForMemory("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c");
-      assert(!jwt.ok && /jwt_token/.test(jwt.error || ""), `G5 jwt_token must reject: ${JSON.stringify(jwt)}`);
+      assert(!jwt.ok && /jwt_token/.test(jwt.error || ""), `jwt_token must reject: ${JSON.stringify(jwt)}`);
       const pem = sanitizeForMemory("-----BEGIN RSA PRIVATE KEY-----\nMIIBOwIBAAJBAL...\n-----END RSA PRIVATE KEY-----");
-      assert(!pem.ok && /pem_private_key/.test(pem.error || ""), `G5 pem_private_key must reject: ${JSON.stringify(pem)}`);
+      assert(!pem.ok && /pem_private_key/.test(pem.error || ""), `pem_private_key must reject: ${JSON.stringify(pem)}`);
       const aws = sanitizeForMemory("AKIAIOSFODNN7EXAMPLE is the access key");
-      assert(!aws.ok && /aws_access_key/.test(aws.error || ""), `G5 aws_access_key must reject: ${JSON.stringify(aws)}`);
+      assert(!aws.ok && /aws_access_key/.test(aws.error || ""), `aws_access_key must reject: ${JSON.stringify(aws)}`);
       const dbUrl = sanitizeForMemory("db: mongodb://user:p4ssw0rd@host.example/dbname");
-      assert(!dbUrl.ok && /connection_url/.test(dbUrl.error || ""), `G5 connection_url must reject: ${JSON.stringify(dbUrl)}`);
+      assert(!dbUrl.ok && /connection_url/.test(dbUrl.error || ""), `connection_url must reject: ${JSON.stringify(dbUrl)}`);
       // Negative: ordinary IP/email/$HOME paths still must not match credential rules.
       const benign = sanitizeForMemory("user@example.com on 127.0.0.1 at /home/worker/projects");
-      assert(benign.ok, `G5 benign content should pass: ${JSON.stringify(benign)}`);
+      assert(benign.ok, `benign content should pass: ${JSON.stringify(benign)}`);
     }
 
-    // G3: validation policy — disallowMaxim flips a kind=maxim draft into
-    //     a validation error (without policy: passes; with policy: rejects).
-    {
-      const draft = { title: "Some Maxim", kind: "maxim", compiledTruth: "x".repeat(40), confidence: 5 };
-      assert(validateProjectEntryDraft(draft).length === 0, "G3 baseline: kind=maxim valid without policy");
-      const errs = validateProjectEntryDraft(draft, { disallowMaxim: true });
-      assert(errs.length === 1 && errs[0].field === "kind" && /maxim/.test(errs[0].message), `G3 disallowMaxim must reject: ${JSON.stringify(errs)}`);
-    }
-
-    // G4: validation policy — maxConfidence caps confidence (10 -> reject if cap=6).
-    {
-      const draft = { title: "High Conf Item", kind: "fact", compiledTruth: "x".repeat(40), confidence: 9 };
-      assert(validateProjectEntryDraft(draft).length === 0, "G4 baseline: confidence=9 valid without policy");
-      const errs = validateProjectEntryDraft(draft, { maxConfidence: 6 });
-      assert(errs.length === 1 && errs[0].field === "confidence" && /<= 6/.test(errs[0].message), `G4 maxConfidence must reject: ${JSON.stringify(errs)}`);
-      // At-cap value passes.
-      const ok = validateProjectEntryDraft({ ...draft, confidence: 6 }, { maxConfidence: 6 });
-      assert(ok.length === 0, "G4 at-cap confidence must pass");
-    }
-
-    // G3+G4 combined: disallowArchived (the no-initial-archived gate).
-    {
-      const draft = { title: "Stale Stuff", kind: "fact", compiledTruth: "x".repeat(40), status: "archived" };
-      assert(validateProjectEntryDraft(draft).length === 0, "baseline: archived status valid without policy");
-      const errs = validateProjectEntryDraft(draft, { disallowArchived: true });
-      assert(errs.length === 1 && errs[0].field === "status", `disallowArchived must reject: ${JSON.stringify(errs)}`);
-      // active/contested/provisional should pass under the same policy.
-      for (const status of ["active", "contested", "provisional"]) {
-        const ok = validateProjectEntryDraft({ ...draft, status }, { disallowArchived: true });
-        assert(ok.length === 0, `disallowArchived must NOT block status=${status}: ${JSON.stringify(ok)}`);
-      }
-    }
-
-    // G2: writer.forceProvisional — even an active draft writes status: provisional.
-    {
-      const ftRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-g2-"));
-      fs.mkdirSync(path.join(ftRoot, ".pensieve"), { recursive: true });
-      execFileSync("git", ["init"], { cwd: ftRoot, stdio: "ignore" });
-      execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: ftRoot });
-      execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: ftRoot });
-      const r = await writeProjectEntry({
-        title: "G2 Forced Provisional",
-        kind: "fact",
-        status: "active",
-        confidence: 5,
-        compiledTruth: "This entry was created with status=active but should land as provisional.",
-      }, { projectRoot: ftRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false, forceProvisional: true });
-      assert(r.status === "created", `G2 write failed: ${r.reason}`);
-      const written = fs.readFileSync(r.path, "utf-8");
-      assert(/^status: provisional$/m.test(written), `G2 forceProvisional must rewrite status: provisional, got:\n${written.split("---")[1]}`);
-      assert(!/^status: active$/m.test(written), "G2 forceProvisional left status: active");
-    }
-
-    // G6: compiledTruth body containing a bare `---` line gets escaped
+    // compiledTruth body containing a bare `---` line gets escaped
     //     so it no longer matches the frontmatter delimiter regex on read.
     {
       const g6Root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-g6-"));
@@ -687,7 +629,7 @@ END_MEMORY`;
       execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: g6Root });
       execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: g6Root });
       const r = await writeProjectEntry({
-        title: "G6 Frontmatter Break Out",
+        title: "Frontmatter Break Out",
         kind: "fact",
         confidence: 5,
         compiledTruth: [
@@ -698,19 +640,19 @@ END_MEMORY`;
           "Body section B (after bare hr).",
         ].join("\n"),
       }, { projectRoot: g6Root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-      assert(r.status === "created", `G6 write failed: ${r.reason}`);
+      assert(r.status === "created", `frontmatter breakout write failed: ${r.reason}`);
       const written = fs.readFileSync(r.path, "utf-8");
       // Re-parse the file: the surviving frontmatter must have exactly
       // ONE closing `---` (the real one), and the second body-side hr
       // must be the escaped form (" ---" with a leading space).
       const fm2 = splitFrontmatter(written);
-      assert(fm2.frontmatterText.length > 0, "G6 read-back: frontmatter parse failed");
-      assert(/^title: /m.test(fm2.frontmatterText), "G6 frontmatter missing title (parser ate too far)");
-      assert(/^ ---$/m.test(fm2.body), `G6 body must contain escaped hr (" ---"), got:\n${fm2.body}`);
-      assert(!/^---$/m.test(fm2.body), `G6 body still has bare frontmatter delimiter: ${fm2.body}`);
+      assert(fm2.frontmatterText.length > 0, "frontmatter breakout read-back: frontmatter parse failed");
+      assert(/^title: /m.test(fm2.frontmatterText), "frontmatter breakout frontmatter missing title (parser ate too far)");
+      assert(/^ ---$/m.test(fm2.body), `frontmatter breakout body must contain escaped hr (" ---"), got:\n${fm2.body}`);
+      assert(!/^---$/m.test(fm2.body), `frontmatter breakout body still has bare frontmatter delimiter: ${fm2.body}`);
     }
 
-    // G8: triggerPhrases pass through sanitizer; a credential in any
+    // triggerPhrases pass through sanitizer; a credential in any
     //     phrase rejects the whole write.
     {
       const g8Root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-g8-"));
@@ -719,27 +661,27 @@ END_MEMORY`;
       execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: g8Root });
       execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: g8Root });
       const bad = await writeProjectEntry({
-        title: "G8 Phrase Leak",
+        title: "Phrase Leak",
         kind: "fact",
         confidence: 5,
         compiledTruth: "Body that is fine on its own and long enough to pass validation.",
         triggerPhrases: ["normal phrase", "sk-abcdef0123456789abcdef0123456789"],
       }, { projectRoot: g8Root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-      assert(bad.status === "rejected" && /openai_api_key|credential/.test(bad.reason || ""), `G8 must reject credential in triggerPhrases: ${JSON.stringify(bad)}`);
+      assert(bad.status === "rejected" && /openai_api_key|credential/.test(bad.reason || ""), `trigger phrase sanitizer must reject credential in triggerPhrases: ${JSON.stringify(bad)}`);
       // Negative: phrases that only contain $HOME paths get scrubbed and pass.
       const ok = await writeProjectEntry({
-        title: "G8 Phrase Path Scrub",
+        title: "Phrase Path Scrub",
         kind: "fact",
         confidence: 5,
         compiledTruth: "Body that is fine on its own and long enough to pass validation.",
         triggerPhrases: [`work from ${require("node:os").homedir()}/projects`],
       }, { projectRoot: g8Root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-      assert(ok.status === "created", `G8 phrase scrub write should succeed: ${JSON.stringify(ok)}`);
+      assert(ok.status === "created", `trigger phrase scrub write should succeed: ${JSON.stringify(ok)}`);
       const okWritten = fs.readFileSync(ok.path, "utf-8");
-      assert(okWritten.includes("$HOME") && !okWritten.includes("/home/worker") && !okWritten.includes(`${require("node:os").homedir()}/projects`), "G8 phrase $HOME scrub did not redact");
+      assert(okWritten.includes("$HOME") && !okWritten.includes("/home/worker") && !okWritten.includes(`${require("node:os").homedir()}/projects`), "trigger phrase $HOME scrub did not redact");
     }
 
-    // G7: prompt strengthening (role-aware boundary + durability test).
+    // Prompt strengthening (role-aware boundary + durability test).
     // We don't hit a real LLM here; just assert the prompt text
     // contains the required directive substrings so a future weakening
     // is caught.
@@ -763,7 +705,7 @@ END_MEMORY`;
         "Title hygiene",
       ];
       for (const needle of required) {
-        assert(p.includes(needle), `G7 prompt missing required marker: ${JSON.stringify(needle)}`);
+        assert(p.includes(needle), `prompt missing required marker: ${JSON.stringify(needle)}`);
       }
     }
 
@@ -801,237 +743,6 @@ END_MEMORY`;
       assert(dup.duplicate && dup.reason === "slug_exact", `dedupe must see same title: ${JSON.stringify(dup)}`);
     }
 
-    // === Soft near-duplicate detection (added 2026-05-08) ================
-    // The deterministic dedupe layer's word-trigram jaccard misses pairs
-    // like:
-    //   t1 = "normalizeBareSlug Breaks on Titles Containing Forward Slash"
-    //   t2 = "normalizeBareSlug Must Not Be Used for Free-Text Titles"
-    // because they share zero word-trigrams. The soft signal
-    // (char-trigram >= 0.20 AND shared rare token (df<=2) AND same
-    // kind) catches these. The signal MUST also be conservative
-    // enough to spare unrelated pairs and pairs that share only
-    // common tokens.
-    {
-      const { detectProjectDuplicate } = req("./sediment/dedupe.js");
-      const ndRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-neardup-"));
-      fs.mkdirSync(path.join(ndRoot, ".pensieve"), { recursive: true });
-
-      // Seed entry with a rare technical token.
-      const seed = await writeProjectEntry({
-        title: "normalizeBareSlug Breaks on Titles Containing Forward Slash",
-        kind: "fact",
-        confidence: 5,
-        compiledTruth: "normalizeBareSlug treats / as a path separator and silently truncates titles. This is a real bug.",
-      }, { projectRoot: ndRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-      assert(seed.status === "created", `near-dup seed failed: ${seed.reason}`);
-
-      // Same insight, completely different phrasing. Word-trigram = 0,
-      // char-trigram ~ 0.27, shared rare token "normalizebareslug".
-      const candTitle = "normalizeBareSlug Must Not Be Used for Free-Text Titles";
-
-      // (1) Without policy.disallowNearDuplicate: the soft signal is
-      //     exposed (nearDuplicate=true) but writeProjectEntry still
-      //     allows the write. Explicit MEMORY: lane behavior.
-      const dupCheck = await detectProjectDuplicate(ndRoot, candTitle, { kind: "fact" });
-      assert(!dupCheck.duplicate, `should NOT be hard duplicate: ${JSON.stringify(dupCheck)}`);
-      assert(dupCheck.nearDuplicate === true, `should be soft near-duplicate: ${JSON.stringify(dupCheck)}`);
-      assert(dupCheck.reason === "near_duplicate_rare_token", `wrong reason: ${dupCheck.reason}`);
-      assert(
-        dupCheck.nearDuplicateDetail?.sharedRareTokens.includes("normalizebareslug"),
-        `expected shared rare token 'normalizebareslug': ${JSON.stringify(dupCheck.nearDuplicateDetail)}`,
-      );
-      assert(
-        dupCheck.nearDuplicateDetail.charTrigramScore >= 0.20,
-        `char trigram below threshold: ${dupCheck.nearDuplicateDetail.charTrigramScore}`,
-      );
-
-      // Explicit lane (no policy) accepts the soft near-dup.
-      const allowedWrite = await writeProjectEntry({
-        title: candTitle,
-        kind: "fact",
-        confidence: 5,
-        compiledTruth: "Use slugify directly when the input is a free-text title; normalizeBareSlug is for path/wikilink/id inputs.",
-      }, { projectRoot: ndRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-      assert(
-        allowedWrite.status === "created",
-        `explicit lane (no policy) must allow near-dup write: ${allowedWrite.reason}`,
-      );
-
-      // (2) With policy.disallowNearDuplicate: writer rejects.
-      const blockRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-neardup-block-"));
-      fs.mkdirSync(path.join(blockRoot, ".pensieve"), { recursive: true });
-      await writeProjectEntry({
-        title: "normalizeBareSlug Breaks on Titles Containing Forward Slash",
-        kind: "fact",
-        confidence: 5,
-        compiledTruth: "normalizeBareSlug treats / as a path separator and silently truncates titles. This is a real bug.",
-      }, { projectRoot: blockRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-      const blocked = await writeProjectEntry({
-        title: candTitle,
-        kind: "fact",
-        confidence: 5,
-        compiledTruth: "Use slugify directly when the input is a free-text title; normalizeBareSlug is for path/wikilink/id inputs.",
-      }, {
-        projectRoot: blockRoot,
-        settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
-        dryRun: false,
-        policy: { disallowNearDuplicate: true },
-      });
-      assert(
-        blocked.status === "rejected" && blocked.reason === "near_duplicate",
-        `auto-write lane policy must reject near-dup: ${JSON.stringify(blocked)}`,
-      );
-      assert(blocked.duplicate?.nearDuplicate === true, `rejected result must surface nearDuplicate: ${JSON.stringify(blocked.duplicate)}`);
-
-      // (3) Different kind: soft signal must NOT fire even though the
-      //     rare token + char trigram are present. The pair is then
-      //     allowed to coexist.
-      const diffKindRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-neardup-kind-"));
-      fs.mkdirSync(path.join(diffKindRoot, ".pensieve"), { recursive: true });
-      await writeProjectEntry({
-        title: "normalizeBareSlug Breaks on Titles Containing Forward Slash",
-        kind: "fact",
-        confidence: 5,
-        compiledTruth: "normalizeBareSlug treats / as a path separator and silently truncates titles. This is a real bug.",
-      }, { projectRoot: diffKindRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-      const diffKind = await detectProjectDuplicate(diffKindRoot, candTitle, { kind: "smell" });
-      assert(
-        !diffKind.nearDuplicate,
-        `different kind must not trigger near-dup: ${JSON.stringify(diffKind)}`,
-      );
-
-      // (4) High char trigram from common tokens only (no rare shared
-      //     token) must NOT fire. Calibration case from the live
-      //     pensieve sweep: "memory-architecture.md" review rounds
-      //     share generic words like 'memory'/'architecture' but those
-      //     are not rare. We simulate by seeding 3 entries that all
-      //     share 'common' so its df grows beyond rareTokenMaxDf.
-      const commonRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-neardup-common-"));
-      fs.mkdirSync(path.join(commonRoot, ".pensieve"), { recursive: true });
-      // Use long common-prefix titles so char-trigram clears 0.20 even
-      // though the shared tokens are too widespread to be "rare".
-      const seedTitles = [
-        "common-prefix architecture review round one with details",
-        "common-prefix architecture review round two with details",
-        "common-prefix architecture review round three with details",
-      ];
-      for (const t of seedTitles) {
-        await writeProjectEntry({
-          title: t,
-          kind: "fact",
-          confidence: 5,
-          compiledTruth: `Body for ${t} that meets the minimum compiled truth length requirement.`,
-        }, { projectRoot: commonRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-      }
-      const commonCand = await detectProjectDuplicate(
-        commonRoot,
-        "common-prefix architecture review round four with details",
-        { kind: "fact" },
-      );
-      assert(
-        !commonCand.nearDuplicate,
-        `entries with only common shared tokens (df>2) must not trigger near-dup: ${JSON.stringify(commonCand)}`,
-      );
-    }
-
-    writeFile(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), JSON.stringify({
-      timestamp: "2026-05-08T00:00:00Z",
-      operation: "llm_dry_run",
-      llm: { ok: true, model: "x/y", quality: { passed: true, reason: "skip", candidateCount: 0, validationErrorCount: 0, invalidCandidateCount: 0 } },
-    }) + "\n");
-    const report = await readLlmDryRunReport(root, 10);
-    assert(report.total === 1 && report.passCount === 1, "llm report failed");
-    const readiness = evaluateLlmAutoWriteReadiness(report, { autoLlmWriteEnabled: true, minDryRunSamples: 1, requiredDryRunPassRate: 1 });
-    assert(readiness.ready, "readiness should be true");
-
-    // === A2 / G9 / G10 / G12: LLM auto-write lane end-to-end ============
-    // Exercises decideAutoWriteEligibility's gate matrix without a real
-    // model. We don't go through agent_end here — that requires the
-    // pi runtime — but tryAutoWriteLane is exported and we hit it via
-    // the same code path the hook uses.
-    {
-      const { decideAutoWriteEligibility, _resetAutoWriteStateForTests } = req("./sediment/index.js");
-      const { evaluateRollingGate } = req("./sediment/report.js");
-
-      _resetAutoWriteStateForTests();
-      const baseSettings = {
-        ...DEFAULT_SEDIMENT_SETTINGS,
-        autoLlmWriteEnabled: true,
-        autoWriteSampleEveryNRuns: 1,
-        autoWriteMaxPerHour: 6,
-        autoWriteRollingWindowSamples: 5,
-        autoWriteRollingPassRate: 0.5,
-      };
-      // Synthesize a healthy rolling state so eligibility passes.
-      const healthyRolling = evaluateRollingGate(
-        { auditPath: "", total: 5, passCount: 5, failCount: 0, candidateTotal: 0, validationErrorTotal: 0, invalidCandidateTotal: 0, reasons: {}, recent: [] },
-        baseSettings.autoWriteRollingWindowSamples,
-        baseSettings.autoWriteRollingPassRate,
-      );
-      // Sad rolling state — enough samples + below threshold.
-      const sadRolling = evaluateRollingGate(
-        { auditPath: "", total: 5, passCount: 1, failCount: 4, candidateTotal: 0, validationErrorTotal: 0, invalidCandidateTotal: 0, reasons: { unparseable_output: 4 }, recent: [] },
-        baseSettings.autoWriteRollingWindowSamples,
-        baseSettings.autoWriteRollingPassRate,
-      );
-
-      // Gate 1: autoLlmWriteEnabled=false short-circuits immediately.
-      assert(decideAutoWriteEligibility({ sessionId: "sA", settings: { ...baseSettings, autoLlmWriteEnabled: false }, readinessReady: true, readinessBlockers: [], rolling: healthyRolling }).reason === "auto_write_disabled_setting", "gate1 setting off");
-      _resetAutoWriteStateForTests();
-
-      // Gate 2: autoWriteMaxPerHour=0 disables completely.
-      assert(decideAutoWriteEligibility({ sessionId: "sA", settings: { ...baseSettings, autoWriteMaxPerHour: 0 }, readinessReady: true, readinessBlockers: [], rolling: healthyRolling }).reason === "auto_write_rate_zero", "gate2 rate zero");
-      _resetAutoWriteStateForTests();
-
-      // Gate 3: readiness blocked.
-      const blockedReadiness = decideAutoWriteEligibility({ sessionId: "sA", settings: baseSettings, readinessReady: false, readinessBlockers: ["insufficient_samples"], rolling: healthyRolling });
-      assert(blockedReadiness.reason === "readiness_gate_blocked" && blockedReadiness.detail.blockers.includes("insufficient_samples"), "gate3 readiness");
-      _resetAutoWriteStateForTests();
-
-      // Gate 4: rolling tripped immediately disables (and persists in-process).
-      const tripped = decideAutoWriteEligibility({ sessionId: "sA", settings: baseSettings, readinessReady: true, readinessBlockers: [], rolling: sadRolling });
-      assert(tripped.reason === "rolling_pass_rate_tripped", `gate4 rolling: ${JSON.stringify(tripped)}`);
-      // Subsequent call should now report circuit_broken_in_process even
-      // if rolling state is provided as healthy again.
-      const circuit = decideAutoWriteEligibility({ sessionId: "sA", settings: baseSettings, readinessReady: true, readinessBlockers: [], rolling: healthyRolling });
-      assert(circuit.reason === "circuit_broken_in_process", `circuit persistence: ${JSON.stringify(circuit)}`);
-      _resetAutoWriteStateForTests();
-
-      // Gate 5: sampling stride. Stride=3 means runs 1,2 sampled out;
-      // run 3 eligible.
-      const strideSettings = { ...baseSettings, autoWriteSampleEveryNRuns: 3 };
-      const r1 = decideAutoWriteEligibility({ sessionId: "sB", settings: strideSettings, readinessReady: true, readinessBlockers: [], rolling: healthyRolling });
-      const r2 = decideAutoWriteEligibility({ sessionId: "sB", settings: strideSettings, readinessReady: true, readinessBlockers: [], rolling: healthyRolling });
-      const r3 = decideAutoWriteEligibility({ sessionId: "sB", settings: strideSettings, readinessReady: true, readinessBlockers: [], rolling: healthyRolling });
-      assert(r1.reason === "sampled_out" && r1.detail.run_count === 1, `stride r1: ${JSON.stringify(r1)}`);
-      assert(r2.reason === "sampled_out" && r2.detail.run_count === 2, `stride r2: ${JSON.stringify(r2)}`);
-      assert(r3.eligible === true, `stride r3 should pass: ${JSON.stringify(r3)}`);
-      _resetAutoWriteStateForTests();
-
-      // Gate 6: rate limit. Stuff `autoWriteRecentFires` for sessionId
-      // sC up to the cap and verify the next call rate-limits.
-      // We can only do this through the public API by simulating fires.
-      // Instead, lower the cap to 1 and call decide twice (with manual
-      // recordAutoWriteFire from index.ts — but it's not exported).
-      // The integration test below covers actual fire path; here we
-      // just trust the logic by faking via a custom `now` and cap=1.
-      const rateSettings = { ...baseSettings, autoWriteMaxPerHour: 1 };
-      // First call eligible.
-      const rate1 = decideAutoWriteEligibility({ sessionId: "sC", settings: rateSettings, readinessReady: true, readinessBlockers: [], rolling: healthyRolling });
-      assert(rate1.eligible, `rate1 should pass: ${JSON.stringify(rate1)}`);
-      // We need to actually fire to register a timestamp. recordAutoWriteFire is internal.
-      // Re-invoke: still eligible because no fire was recorded.
-      const rate2 = decideAutoWriteEligibility({ sessionId: "sC", settings: rateSettings, readinessReady: true, readinessBlockers: [], rolling: healthyRolling });
-      assert(rate2.eligible, `rate2 still passes (no fire recorded yet): ${JSON.stringify(rate2)}`);
-      _resetAutoWriteStateForTests();
-
-      // Gate 7: per-session isolation. Trip sA, sB still works.
-      decideAutoWriteEligibility({ sessionId: "sA", settings: baseSettings, readinessReady: true, readinessBlockers: [], rolling: sadRolling });
-      const sB = decideAutoWriteEligibility({ sessionId: "sB", settings: baseSettings, readinessReady: true, readinessBlockers: [], rolling: healthyRolling });
-      assert(sB.eligible, `session isolation broken: sB blocked because sA was: ${JSON.stringify(sB)}`);
-      _resetAutoWriteStateForTests();
-    }
-
     // === Sediment status footer state machine ============================
     // The user-spec'd FSM:
     //   session_start -> idle
@@ -1061,12 +772,10 @@ END_MEMORY`;
       }
     }
 
-    // === A2 integration: end-to-end auto-write lane via mock modelRegistry ===
-    // This goes through the FULL hook path: settings -> readiness -> rolling
-    // -> decideAutoWriteEligibility -> runLlmExtractor -> previewExtraction
-    // -> writeProjectEntry. We verify (a) the entry lands on disk with G2/G3/G4
-    // gates applied, (b) audit row has operation: auto_write + raw_text,
-    // (c) re-running the same lane respects rate limits.
+    // === A2 integration: direct auto-write substrate via mock modelRegistry ===
+    // After ADR 0016, there is no readiness/rate/sampling/rolling gate in
+    // this path. Extractor output goes through schema validation + curator/
+    // write substrate; git/audit are rollback.
     {
       const { _resetAutoWriteStateForTests } = req("./sediment/index.js");
       _resetAutoWriteStateForTests();
@@ -1077,15 +786,6 @@ END_MEMORY`;
       execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: aRoot });
       execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: aRoot });
 
-      // Seed audit with passing dry-run rows so readiness gate passes.
-      const auditFile = path.join(aRoot, ".pi-astack", "sediment", "audit.jsonl");
-      fs.mkdirSync(path.dirname(auditFile), { recursive: true });
-      const dryRunRow = JSON.stringify({
-        timestamp: "2026-05-08T00:00:00Z",
-        operation: "llm_dry_run",
-        llm: { ok: true, model: "mock/extractor", quality: { passed: true, reason: "valid_candidates", candidateCount: 1, validationErrorCount: 0, invalidCandidateCount: 0 } },
-      });
-      fs.writeFileSync(auditFile, Array(5).fill(dryRunRow).join("\n") + "\n");
 
       // Stub the @earendil-works/pi-ai module so streamSimple returns a
       // canned MEMORY block. We use a fresh require cache slot.
@@ -1101,9 +801,8 @@ END_MEMORY`;
         "MEMORY:\ntitle: A2 Mock Extracted Insight\nkind: fact\nconfidence: 4\n---\n# A2 Mock Extracted Insight\n\nThe LLM auto-write lane successfully extracted this insight from the transcript window.\nEND_MEMORY",
         // Run 2: SKIP.
         "SKIP",
-        // Run 3: maxim/high-confidence attempt. Default ADR 0016 LLM policy trusts it;
-        // mechanical legacy mode would still reject.
-        "MEMORY:\ntitle: Trusted Maxim Attempt\nkind: maxim\nstatus: active\nconfidence: 9\n---\n# Trusted Maxim Attempt\n\nThis attempts to mint a maxim with confidence 9. Default LLM semantic policy should trust the model; mechanical legacy mode would reject both kind=maxim and confidence>6.\nEND_MEMORY",
+        // Run 3: maxim/high-confidence attempt. ADR 0016 trusts it.
+        "MEMORY:\ntitle: Trusted Maxim Attempt\nkind: maxim\nstatus: active\nconfidence: 9\n---\n# Trusted Maxim Attempt\n\nThis attempts to mint a maxim with confidence 9. ADR 0016 trusts the model to write maxim/high confidence when warranted.\nEND_MEMORY",
       ];
       // Reset global so we control invocation count.
       globalThis.__A2_INVOCATIONS__ = 0;
@@ -1128,21 +827,15 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "sk-test-not-a-real-key-just-shape", headers: {} }),
       };
 
-      // Recreate the auto-write lane invocation directly. The hook's
-      // tryAutoWriteLane is not exported, but we can test the gate +
-      // writer composition via the public APIs. For full coverage we
-      // simulate the hook's flow:
+      // Recreate the auto-write substrate directly. The hook's live path
+      // additionally calls the curator loop; here we lock in extractor,
+      // schema validation, writer create, and writer update behavior.
       const { runLlmExtractorDryRun } = req("./sediment/llm-extractor.js");
       const { previewExtraction, parseExplicitMemoryBlocks: parseBlocks } = req("./sediment/extractor.js");
-      const { buildAutoWritePolicy } = req("./sediment/index.js");
 
       const a2Settings = {
         ...DEFAULT_SEDIMENT_SETTINGS,
         autoLlmWriteEnabled: true,
-        autoWriteSampleEveryNRuns: 1,
-        autoWriteMaxPerHour: 6,
-        autoWriteRollingWindowSamples: 3,
-        autoWriteRollingPassRate: 0.5,
         extractorModel: "mock/extractor",
         gitCommit: false,
       };
@@ -1156,20 +849,16 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       assert(r1.ok && r1.rawText && r1.rawText.includes("A2 Mock Extracted Insight"), `r1 mock should return valid block: ${JSON.stringify(r1)}`);
       // Verify the prompt contained the Trust Boundary directive.
       assert(globalThis.__A2_LAST_PROMPT__.includes("Trust boundary"), "prompt to mock LLM missing Trust boundary directive");
-      // Parse + apply auto-write policy.
+      // Parse + schema-only validation. Semantic hard gates are gone.
       const drafts1 = parseBlocks(r1.rawText);
-      const policy = buildAutoWritePolicy(a2Settings);
-      const mechanicalPolicy = buildAutoWritePolicy({ ...a2Settings, autoWriteSemanticPolicy: "mechanical" });
-      assert(Object.keys(policy).length === 0, `default ADR 0016 llm policy should have no semantic hard gates: ${JSON.stringify(policy)}`);
-      assert(mechanicalPolicy.disallowMaxim === true && mechanicalPolicy.maxConfidence === 6, `mechanical policy should preserve legacy gates: ${JSON.stringify(mechanicalPolicy)}`);
-      const preview1 = previewExtraction(drafts1, policy);
-      assert(preview1.drafts[0].validationErrors.length === 0, `r1 should pass policy: ${JSON.stringify(preview1)}`);
+      const preview1 = previewExtraction(drafts1);
+      assert(preview1.drafts[0].validationErrors.length === 0, `r1 should pass schema validation: ${JSON.stringify(preview1)}`);
       // Write through the production path.
       const w1 = await writeProjectEntry({
         ...drafts1[0],
         sessionId: "smoke-a2",
         timelineNote: "smoke A2 e2e",
-      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false, policy, forceProvisional: false });
+      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false });
       assert(w1.status === "created", `r1 write failed: ${w1.reason}`);
       const r1Written = fs.readFileSync(w1.path, "utf-8");
       assert(/^status: provisional$/m.test(r1Written), `r1 omitted status should default to provisional, got:\n${r1Written}`);
@@ -1185,25 +874,20 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       });
       assert(r2.ok && r2.rawText === "SKIP", `r2 SKIP path: ${JSON.stringify(r2)}`);
 
-      // Response[2]: maxim+confidence=9. Default llm policy allows it;
-      // mechanical legacy policy would still flag it.
+      // Response[2]: maxim+confidence=9. Schema-only validation allows it.
       const r3 = await runLlmExtractorDryRun("--- ENTRY 3 t3 message/assistant ---\nWe should ALWAYS do X.", {
         settings: a2Settings,
         modelRegistry: mockModelRegistry,
       });
       assert(r3.ok && r3.rawText.includes("Trusted Maxim Attempt"), "r3 should return maxim attempt");
       const drafts3 = parseBlocks(r3.rawText);
-      const preview3 = previewExtraction(drafts3, policy);
-      assert(preview3.drafts[0].validationErrors.length === 0, `r3 must pass default llm policy: ${JSON.stringify(preview3)}`);
-      const legacyPreview3 = previewExtraction(drafts3, mechanicalPolicy);
-      const legacyErrs3 = legacyPreview3.drafts[0].validationErrors;
-      assert(legacyErrs3.some(e => /maxim/.test(e.message)), `mechanical mode must report maxim violation: ${JSON.stringify(legacyErrs3)}`);
-      assert(legacyErrs3.some(e => /<= 6/.test(e.message)), `mechanical mode must report confidence>6 violation: ${JSON.stringify(legacyErrs3)}`);
+      const preview3 = previewExtraction(drafts3);
+      assert(preview3.drafts[0].validationErrors.length === 0, `r3 must pass schema-only validation: ${JSON.stringify(preview3)}`);
       const w3 = await writeProjectEntry({
         ...drafts3[0],
         sessionId: "smoke-a2",
         timelineNote: "trusted maxim smoke",
-      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false, policy, forceProvisional: false });
+      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false });
       assert(w3.status === "created", `r3 default llm mode must create: ${JSON.stringify(w3)}`);
       const r3Written = fs.readFileSync(w3.path, "utf-8");
       assert(/^kind: maxim$/m.test(r3Written) && /^status: active$/m.test(r3Written) && /^confidence: 9$/m.test(r3Written), `r3 maxim/status/confidence not preserved:\n${r3Written}`);
@@ -1224,6 +908,9 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       assert(/^confidence: 8$/m.test(updatedWritten), `update should preserve patched confidence 8:\n${updatedWritten}`);
       assert(updatedWritten.includes("curator updated this existing memory") || updatedWritten.includes("The curator updated this existing memory"), `update compiled truth missing:\n${updatedWritten}`);
       assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| updated \| curator update smoke$/m.test(updatedWritten), `update timeline must append ISO updated row:\n${updatedWritten}`);
+
+      const deleted = await deleteProjectEntry(w3.slug, { projectRoot: aRoot, settings: a2Settings, dryRun: false, reason: "delete substrate smoke" });
+      assert(deleted.status === "deleted" && !fs.existsSync(deleted.path), `deleteProjectEntry should delete existing entry: ${JSON.stringify(deleted)}`);
 
       _resetAutoWriteStateForTests();
     }

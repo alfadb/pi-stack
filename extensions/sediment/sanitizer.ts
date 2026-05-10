@@ -17,7 +17,7 @@ export interface SanitizeResult {
 // resembling a credential we want a hard reject, not a partial scrub
 // that hides the problem.
 //
-// Phase 1.4 LLM auto-write expansion (G5):
+// ADR 0016 retained sensitive-info hard gate:
 //   - jwt_token       defends against `eyJ...` access/id tokens leaking
 //                     from headers / debug dumps.
 //   - pem_private_key catches the `-----BEGIN ... PRIVATE KEY-----`

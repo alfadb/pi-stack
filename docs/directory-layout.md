@@ -73,19 +73,18 @@ alfadb/pi-astack/
 │   │   ├── migrate.ts                 # legacy migration dry-run planner
 │   │   ├── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
 │   │   └── index-file.ts              # generated enhanced _index.md rebuild writer
-│   ├── sediment/                      # ✅ 实现：project-only writer + LLM auto-write lane + ADR 0016 LLM semantic policy/update substrate
+│   ├── sediment/                      # ✅ 实现：project-only writer + direct LLM auto-write + ADR 0016 curator/update substrate
 │   │   ├── index.ts                   # /sediment 子命令 + agent_end hook + footer status FSM (idle/running/completed/failed) + bg promise tracking
 │   │   ├── settings.ts                # sediment 配置读取
 │   │   ├── checkpoint.ts              # per-session checkpoint + run window builder + RMW lock
 │   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor (fence-aware)
 │   │   ├── llm-extractor.ts           # LLM extractor prompt (Trust Boundary + durability test) + model call + parser
-│   │   ├── curator.ts                 # ADR 0016 memory_search-powered curator loop (create/update/skip subset)
-│   │   ├── report.ts                  # llm_dry_run + auto_write audit reports + rolling gate evaluator
+│   │   ├── curator.ts                 # ADR 0016 memory_search-powered curator loop (create/update/delete/skip subset)
 │   │   ├── migration.ts               # /sediment migrate-one/migration-backups legacy migration plan/apply/restore/list
-│   │   ├── validation.ts              # draft runtime validation + DraftPolicy overlay (G3/G3.5/G4/G13)
-│   │   ├── dedupe.ts                  # HARD (slug/word-trigram≥0.7) + SOFT G13 (char-trigram + rare token + same kind) duplicate detection
-│   │   ├── sanitizer.ts               # G5 写前脱敏/fail-closed (jwt/pem/aws/url/email/ip/$HOME)
-│   │   └── writer.ts                  # create/update substrate + validate/sensitive-info sanitize/dedupe/lint/lock/atomic write/audit/git
+│   │   ├── validation.ts              # schema-only draft runtime validation
+│   │   ├── dedupe.ts                  # storage-only slug collision detection（semantic dedupe 由 curator 处理）
+│   │   ├── sanitizer.ts               # sensitive-info fail-closed (jwt/pem/aws/url/email/ip/$HOME)
+│   │   └── writer.ts                  # create/update/delete substrate + validate/sensitive-info sanitize/dedupe/lint/lock/atomic write/audit/git
 │   ├── compaction-tuner/              # ✅ 实现：计划外落地（2026-05-08）
 │   │   ├── index.ts                   # agent_end hook 读 ctx.getContextUsage() 超阈 → ctx.compact()；/compaction-tuner [status|trigger]
 │   │   └── settings.ts                # thresholdPercent / rearmMarginPercent
@@ -118,7 +117,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
-| `extensions/sediment/` | ✅ 实现（explicit extractor + LLM dry-run + LLM auto-write lane LIVE + migrate-one + status FSM + ADR 0016 默认 LLM semantic policy + memory_search-powered create/update/skip curator；legacy mechanical gates 可选） | Phase 1.4 A1+A2+A3 + ADR 0016 |
+| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + migrate-one + status FSM + memory_search-powered create/update/delete/skip curator；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
 | `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + /vault + /secret 命令） | ADR 0014 §D4 (2026-05-09) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
@@ -259,7 +258,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | modelCurator | `providers`, `hints`, `imageGen` |
 | modelFallback | `fallbackModels` |
 | memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays` |
-| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries`, `extractorModel`, `extractorTimeoutMs`, `extractorMaxRetries`, `extractorMaxCandidates`, `extractorAuditRawChars`, `autoLlmWriteEnabled`, `minDryRunSamples`, `requiredDryRunPassRate` |
+| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries`, `extractorModel`, `extractorTimeoutMs`, `extractorMaxRetries`, `extractorMaxCandidates`, `extractorAuditRawChars`, `autoLlmWriteEnabled`, `autoWriteRawAuditChars` |
 | vision | `modelPreferences` |
 
 ## 所有权矩阵

@@ -15,13 +15,10 @@
  *      posture: the LLM decides whether a durable candidate is worth
  *      writing; hard gates are reserved for sensitive information and
  *      storage integrity.
- *      Operational bounds still apply:
- *        - readiness gate (sample count + dry-run pass rate)
- *        - rolling-quality circuit breaker (in-process trip)
- *        - per-session rate limit (autoWriteMaxPerHour, sliding 60min)
- *        - per-session sampling stride (autoWriteSampleEveryNRuns)
- *        - standard write-side defenses (schema, sanitizer, lint, lock,
- *          atomic write, audit)
+ *      No dry-run/readiness/rate/sampling/rolling semantic gates remain.
+ *      Git history + audit are the rollback surface; hard gates are only
+ *      standard write-side defenses (sensitive-info sanitizer, schema,
+ *      lint, lock, atomic write, audit).
  *   6. Lane A advances checkpoint after terminal write outcomes. Lane C
  *      optimistically advances before bg work because auto-write is
  *      best-effort, not an authoritative replay queue.
@@ -38,35 +35,17 @@ import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun, type LlmExtractorDryRunResult } from "./llm-extractor";
 import { listMigrationBackups, migrateOne, restoreMigrationBackup } from "./migration";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
-import { evaluateLlmAutoWriteReadiness, evaluateRollingGate, formatLlmAutoWriteReadiness, formatLlmDryRunReport, readLlmDryRunReport, type RollingGateState } from "./report";
-import type { DraftPolicy } from "./validation";
-import { appendAudit, updateProjectEntry, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult } from "./writer";
+
+import { appendAudit, deleteProjectEntry, updateProjectEntry, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult } from "./writer";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 
 // ---------------------------------------------------------------
-// Phase 1.4 A2: in-process state for the auto-write lane.
+// Phase 1.4 A2 / ADR 0016: in-process bg work tracking.
 //
-// All these Maps are deliberately NOT persisted. Pi restart resets
-// them, which is the desired behavior for circuit-breaks and rate
-// limits — a fresh process gets a fresh evaluation window.
-//
-// Keying by sessionId means multiple concurrent pi instances against
-// the same project root each maintain independent state, matching the
-// per-session checkpoint isolation in checkpoint.ts.
+// We intentionally keep only an in-flight guard. Older readiness/rate/
+// sampling/rolling Maps were removed when sediment became an LLM curator:
+// git + audit are the rollback surface; semantic hard gates are gone.
 // ---------------------------------------------------------------
-
-/** sessionId -> count of agent_end runs since last LLM lane fire. */
-const autoWriteRunCount = new Map<string, number>();
-
-/** sessionId -> array of unix-ms timestamps of recent auto-write fires. */
-const autoWriteRecentFires = new Map<string, number[]>();
-
-/**
- * sessionId -> reason the lane was disabled in this process.
- * Once present, all future agent_end calls in this session skip the
- * lane until pi restart.
- */
-const autoWriteDisabledBySession = new Map<string, string>();
 
 /**
  * sessionId -> in-flight Promise of the background LLM-extraction work.
@@ -100,13 +79,11 @@ const SEDIMENT_STATUS_KEY = FOOTER_STATUS_KEYS.sediment;
  *
  *   completed The most recent extraction finished successfully
  *             (writes succeeded, lint clean, audit row written) or
- *             produced no entries in a healthy way (lane was
- *             ineligible due to rate-limit / sampling / readiness,
- *             OR the LLM returned SKIP).
+ *             produced no entries in a healthy way (the LLM returned
+ *             SKIP, or the curator chose skip).
  *
  *   failed    The most recent extraction hit an error path: lint /
- *             validation reject, LLM call errored, or the rolling-
- *             quality circuit tripped.
+ *             validation reject, LLM call errored, or bg work threw.
  *
  * Transitions, per user spec (2026-05-08):
  *   - session_start                          -> idle (always)
@@ -152,14 +129,12 @@ function applySedimentStatus(
   } catch { /* stale ctx late fire is best-effort */ }
 }
 
-const HOUR_MS = 60 * 60 * 1000;
-
 function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
   const terminalReasons = new Set([
-    "duplicate_slug", "duplicate_title", "validation_error", "lint_error",
+    "duplicate_slug", "validation_error", "lint_error",
   ]);
   return results.every((result) => {
-    if (result.status === "created" || result.status === "updated" || result.status === "skipped" || result.status === "dry_run") return true;
+    if (result.status === "created" || result.status === "updated" || result.status === "deleted" || result.status === "skipped" || result.status === "dry_run") return true;
     if (!result.reason) return false;
     return terminalReasons.has(result.reason) || result.reason.startsWith("credential pattern detected");
   });
@@ -176,9 +151,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window/extract/dedupe/report/readiness/migration-backups/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment llm --dry-run, /sediment llm-report, /sediment readiness, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
+    description: "Sediment writer status/window/extract/dedupe/migration-backups/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "extract --dry-run", "llm --dry-run", "llm-report", "readiness", "dedupe --title ", "migration-backups", "migration-backups --limit ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "extract --dry-run", "dedupe --title ", "migration-backups", "migration-backups --limit ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -197,9 +172,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
             `Window: min=${settings.minWindowChars} chars, max=${settings.maxWindowChars} chars, entries=${settings.maxWindowEntries}`,
             `LLM extractor model: ${settings.extractorModel}`,
             `Auto LLM write enabled: ${settings.autoLlmWriteEnabled}`,
-            `Auto LLM write gate: samples>=${settings.minDryRunSamples}, passRate>=${settings.requiredDryRunPassRate}`,
-            `Auto LLM semantic policy: ${settings.autoWriteSemanticPolicy}`,
-            "Auto LLM extractor: LIVE on agent_end after explicit MEMORY miss; default posture trusts the LLM curator and keeps only safety/storage gates",
+            "Auto LLM extractor: LIVE on agent_end after explicit MEMORY miss; no dry-run/readiness/rate/sampling/rolling semantic gates",
           ].join("\n"),
           "info",
         );
@@ -234,61 +207,6 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
         const drafts = window.skipReason ? [] : parseExplicitMemoryBlocks(window.text);
         ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), extraction: previewExtraction(drafts) }, null, 2), drafts.length > 0 ? "warning" : "info");
-        return;
-      }
-
-      if (subcommand === "llm") {
-        if (!rest.includes("--dry-run")) {
-          ctx.ui.notify("Usage: /sediment llm --dry-run", "warning");
-          return;
-        }
-        if (!ctx.sessionManager?.getBranch) {
-          ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
-          return;
-        }
-        if (!ctx.modelRegistry) {
-          ctx.ui.notify("Model registry unavailable; cannot run LLM extractor", "error");
-          return;
-        }
-        const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
-        const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
-        if (window.skipReason) {
-          ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), extraction: previewExtraction([]) }, null, 2), "warning");
-          return;
-        }
-        const result = await runLlmExtractorDryRun(window.text, {
-          settings,
-          modelRegistry: ctx.modelRegistry as Parameters<typeof runLlmExtractorDryRun>[1]["modelRegistry"],
-          signal: ctx.signal,
-        });
-        const llm = summarizeLlmExtractorDryRun(result, {
-          maxCandidates: settings.extractorMaxCandidates,
-          rawPreviewChars: settings.extractorAuditRawChars,
-        });
-        if (hasPensieve(cwd)) {
-          await appendAudit(cwd, {
-            operation: "llm_dry_run",
-            ...checkpointSummary(window),
-            llm,
-            checkpoint_advanced: false,
-          });
-        }
-        ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), llm }, null, 2), llm.ok ? (llm.quality.passed ? "info" : "warning") : "error");
-        return;
-      }
-
-      if (subcommand === "llm-report") {
-        const limitFlagIndex = rest.indexOf("--limit");
-        const limit = limitFlagIndex >= 0 ? Number(rest[limitFlagIndex + 1]) : undefined;
-        const report = await readLlmDryRunReport(cwd, limit);
-        ctx.ui.notify(formatLlmDryRunReport(report), report.failCount > 0 ? "warning" : "info");
-        return;
-      }
-
-      if (subcommand === "readiness") {
-        const report = await readLlmDryRunReport(cwd, settings.minDryRunSamples);
-        const readiness = evaluateLlmAutoWriteReadiness(report, settings);
-        ctx.ui.notify(formatLlmAutoWriteReadiness(readiness), readiness.ready ? "info" : "warning");
         return;
       }
 
@@ -363,7 +281,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment llm --dry-run OR /sediment llm-report [--limit N] OR /sediment readiness OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
     },
   });
 }
@@ -629,7 +547,6 @@ export default function (pi: ExtensionAPI) {
               results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, gitCommit: r.gitCommit })),
               curator: auto.curatorAudits,
               llm: auto.llmAuditSummary,
-              rolling: auto.rollingState,
               raw_text: auto.rawTextStored,
               raw_text_truncated: auto.rawTextTruncated,
               stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, llm_total: auto.llmDurationMs, write_total: tAutoEnd - auto.writeStart, total: Date.now() - tStart, background: true },
@@ -647,11 +564,12 @@ export default function (pi: ExtensionAPI) {
             const createdCount = auto.results.filter(r => r.status === "created").length;
             const updatedCount = auto.results.filter(r => r.status === "updated").length;
             const skippedCount = auto.results.filter(r => r.status === "skipped").length;
+            const deletedCount = auto.results.filter(r => r.status === "deleted").length;
             const rejectedCount = auto.results.filter(r => r.status === "rejected").length;
             if (rejectedCount > 0) {
-              applySedimentStatus(setStatus, sessionId, "failed", `auto-write: ${createdCount} created, ${updatedCount} updated, ${skippedCount} skipped, ${rejectedCount} rejected`);
+              applySedimentStatus(setStatus, sessionId, "failed", `auto-write: ${createdCount} created, ${updatedCount} updated, ${deletedCount} deleted, ${skippedCount} skipped, ${rejectedCount} rejected`);
             } else {
-              applySedimentStatus(setStatus, sessionId, "completed", `auto-write: ${createdCount} created, ${updatedCount} updated, ${skippedCount} skipped`);
+              applySedimentStatus(setStatus, sessionId, "completed", `auto-write: ${createdCount} created, ${updatedCount} updated, ${deletedCount} deleted, ${skippedCount} skipped`);
             }
             return;
           }
@@ -670,7 +588,6 @@ export default function (pi: ExtensionAPI) {
             entry_breakdown: entryBreakdown,
             eligibility: auto.kind === "ineligible" ? auto.eligibility : undefined,
             llm: auto.kind === "ineligible" ? undefined : auto.llmAuditSummary,
-            rolling: auto.kind === "ineligible" ? undefined : auto.rollingState,
             raw_text: auto.kind === "llm_error" || auto.kind === "llm_skip" ? auto.rawTextStored : undefined,
             raw_text_truncated: auto.kind === "llm_error" || auto.kind === "llm_skip" ? auto.rawTextTruncated : undefined,
             stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, llm_total: auto.kind === "ineligible" ? 0 : auto.llmDurationMs, write_total: 0, total: Date.now() - tStart, background: true },
@@ -783,10 +700,10 @@ interface ModelRegistryLike {
 }
 
 type AutoWriteLaneOutcome =
-  | { kind: "ineligible"; eligibility: AutoWriteEligibility }
-  | { kind: "llm_skip"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
-  | { kind: "llm_error"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
-  | { kind: "wrote"; drafts: ProjectEntryDraft[]; results: WriteProjectEntryResult[]; curatorAudits?: CuratorAudit[]; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; writeStart: number; rawTextStored?: string; rawTextTruncated?: boolean };
+  | { kind: "ineligible"; eligibility: { eligible: false; reason: string; detail?: Record<string, unknown> } }
+  | { kind: "llm_skip"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
+  | { kind: "llm_error"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
+  | { kind: "wrote"; drafts: ProjectEntryDraft[]; results: WriteProjectEntryResult[]; curatorAudits?: CuratorAudit[]; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; llmDurationMs: number; writeStart: number; rawTextStored?: string; rawTextTruncated?: boolean };
 
 function truncateRawForAudit(raw: string | undefined, cap: number): { text?: string; truncated?: boolean } {
   if (!raw || cap <= 0) return {};
@@ -796,12 +713,10 @@ function truncateRawForAudit(raw: string | undefined, cap: number): { text?: str
 
 /**
  * Run the LLM auto-write lane end-to-end. The function performs all
- * gate checks, runs the LLM extractor when eligible, and applies
- * `previewExtraction` + the auto-write `DraftPolicy` so that only
- * compliant candidates flow into `writeProjectEntry`. Side effects
- * (in-process state mutation, fire timestamp recording, rolling-gate
- * trip detection) all live here so the agent_end handler stays
- * declarative.
+ * gate checks, runs the LLM extractor when enabled, and applies
+ * `previewExtraction` plus the curator loop so compliant candidates
+ * become create/update/skip operations. Semantic hard gates were
+ * removed in ADR 0016; git + audit provide rollback.
  */
 async function tryAutoWriteLane(args: {
   cwd: string;
@@ -814,6 +729,10 @@ async function tryAutoWriteLane(args: {
   const { cwd, sessionId, settings, window } = args;
   const modelRegistry = args.modelRegistry as ModelRegistryLike | undefined;
 
+  if (!settings.autoLlmWriteEnabled) {
+    return { kind: "ineligible", eligibility: { eligible: false, reason: "auto_write_disabled_setting" } };
+  }
+
   if (!modelRegistry || typeof modelRegistry.find !== "function" || typeof modelRegistry.getApiKeyAndHeaders !== "function") {
     return {
       kind: "ineligible",
@@ -821,39 +740,9 @@ async function tryAutoWriteLane(args: {
     };
   }
 
-  // 1. Readiness gate (user-curated dry-run pass rate).
-  //    Reads the FULL audit file (capped at parseLimit=200 internally).
-  const readinessReport = await readLlmDryRunReport(cwd, settings.minDryRunSamples);
-  const readiness = evaluateLlmAutoWriteReadiness(readinessReport, {
-    autoLlmWriteEnabled: settings.autoLlmWriteEnabled,
-    minDryRunSamples: settings.minDryRunSamples,
-    requiredDryRunPassRate: settings.requiredDryRunPassRate,
-  });
-
-  // 2. Rolling gate (auto-disable on quality drift).
-  //    This window includes BOTH llm_dry_run and auto_write rows.
-  const rollingReport = await readLlmDryRunReport(cwd, settings.autoWriteRollingWindowSamples, {
-    includeAutoWrite: true,
-    scanLimit: settings.autoWriteRollingWindowSamples,
-  });
-  const rolling = evaluateRollingGate(rollingReport, settings.autoWriteRollingWindowSamples, settings.autoWriteRollingPassRate);
-
-  // 3. Composite eligibility (rate, sampling, circuit, readiness).
-  const eligibility = decideAutoWriteEligibility({
-    sessionId,
-    settings,
-    readinessReady: readiness.ready,
-    readinessBlockers: readiness.blockers,
-    rolling,
-  });
-  if (!eligibility.eligible) {
-    return { kind: "ineligible", eligibility };
-  }
-
-  // 4. Run extractor.
-  //    runLlmExtractorDryRun is misnamed historically — it does not
-  //    write or commit; it just runs the model + parses. We use it for
-  //    both lanes.
+  // 1. Run extractor. runLlmExtractorDryRun is misnamed historically —
+  //    it does not write or commit; it just runs the model + parses.
+  //    We use it directly as the live auto-write extractor.
   const llmStart = Date.now();
   let llmResult: LlmExtractorDryRunResult;
   try {
@@ -866,9 +755,7 @@ async function tryAutoWriteLane(args: {
     llmResult = { ok: false, model: settings.extractorModel, error: e?.message ?? "extractor threw" };
   }
   const llmDurationMs = Date.now() - llmStart;
-  recordAutoWriteFire(sessionId);
 
-  const policy = buildAutoWritePolicy(settings);
   const llmAuditSummary = summarizeLlmExtractorDryRun(llmResult, {
     maxCandidates: settings.extractorMaxCandidates,
     rawPreviewChars: settings.extractorAuditRawChars,
@@ -880,76 +767,63 @@ async function tryAutoWriteLane(args: {
   );
 
   if (!llmResult.ok) {
-    // Re-evaluate rolling gate with this failure included so the
-    // NEXT agent_end short-circuits if quality has truly cratered.
-    const postReport = await readLlmDryRunReport(cwd, settings.autoWriteRollingWindowSamples, {
-      includeAutoWrite: true,
-      scanLimit: settings.autoWriteRollingWindowSamples,
-    });
-    const postRolling = evaluateRollingGate(postReport, settings.autoWriteRollingWindowSamples, settings.autoWriteRollingPassRate);
-    maybeTripRollingCircuit(sessionId, postRolling);
-    return { kind: "llm_error", llmAuditSummary, rollingState: postRolling, llmDurationMs, rawTextStored, rawTextTruncated };
+    return { kind: "llm_error", llmAuditSummary, llmDurationMs, rawTextStored, rawTextTruncated };
   }
 
-  // 5. Filter candidates against the configured policy. In default ADR 0016
-  //    `llm` mode this is schema-only; in legacy `mechanical` mode it also
-  //    applies the old G2-G13 semantic hard gates.
+  // 2. Keep only schema-valid candidates. Semantic gates are gone; the
+  //    curator decides create/update/skip after looking up existing memory.
   const fullDrafts = (llmResult.rawText && llmResult.rawText !== "SKIP")
     ? (await import("./extractor")).parseExplicitMemoryBlocks(llmResult.rawText)
     : [];
-  const policyPreview = previewExtraction(fullDrafts, policy);
-  const compliantDrafts: ProjectEntryDraft[] = fullDrafts.filter((_, i) => policyPreview.drafts[i]?.validationErrors.length === 0);
+  const schemaPreview = previewExtraction(fullDrafts);
+  const compliantDrafts: ProjectEntryDraft[] = fullDrafts.filter((_, i) => schemaPreview.drafts[i]?.validationErrors.length === 0);
 
   if (compliantDrafts.length === 0) {
-    // SKIP / unparseable / validation-rejected. Treat as a
-    // quality data point and possibly trip rolling.
-    const postReport = await readLlmDryRunReport(cwd, settings.autoWriteRollingWindowSamples, {
-      includeAutoWrite: true,
-      scanLimit: settings.autoWriteRollingWindowSamples,
-    });
-    const postRolling = evaluateRollingGate(postReport, settings.autoWriteRollingWindowSamples, settings.autoWriteRollingPassRate);
-    maybeTripRollingCircuit(sessionId, postRolling);
-    return { kind: "llm_skip", llmAuditSummary, rollingState: postRolling, llmDurationMs, rawTextStored, rawTextTruncated };
+    return { kind: "llm_skip", llmAuditSummary, llmDurationMs, rawTextStored, rawTextTruncated };
   }
 
-  // 6. Apply each compliant draft. In ADR 0016 default mode, a curator
-  //    lookup loop asks memory_search + a curator LLM whether to create,
-  //    update, or skip. Legacy mechanical mode keeps the old create-only
-  //    behavior.
+  // 3. Apply each compliant draft through the curator lookup loop.
   const writeStart = Date.now();
   const results: WriteProjectEntryResult[] = [];
   const curatorAudits: CuratorAudit[] = [];
   for (const draft of compliantDrafts) {
-    if (settings.autoWriteSemanticPolicy === "llm") {
-      const curated = await curateProjectDraft(draft, {
-        projectRoot: cwd,
-        sedimentSettings: settings,
-        memorySettings: resolveMemorySettings(),
-        modelRegistry,
-        signal: args.signal,
+    const curated = await curateProjectDraft(draft, {
+      projectRoot: cwd,
+      sedimentSettings: settings,
+      memorySettings: resolveMemorySettings(),
+      modelRegistry,
+      signal: args.signal,
+    });
+    curatorAudits.push(curated.audit);
+    if (curated.decision.op === "skip") {
+      results.push({
+        slug: draft.title,
+        path: "",
+        status: "skipped",
+        reason: curated.decision.reason,
       });
-      curatorAudits.push(curated.audit);
-      if (curated.decision.op === "skip") {
-        results.push({
-          slug: draft.title,
-          path: "",
-          status: "skipped",
-          reason: curated.decision.reason,
-        });
-        continue;
-      }
-      if (curated.decision.op === "update") {
-        results.push(await updateProjectEntry(curated.decision.slug, {
-          ...curated.decision.patch,
-          sessionId,
-          timelineNote: curated.decision.patch.timelineNote || curated.decision.rationale || "updated by sediment curator",
-        }, {
-          projectRoot: cwd,
-          settings,
-          dryRun: false,
-        }));
-        continue;
-      }
+      continue;
+    }
+    if (curated.decision.op === "update") {
+      results.push(await updateProjectEntry(curated.decision.slug, {
+        ...curated.decision.patch,
+        sessionId,
+        timelineNote: curated.decision.patch.timelineNote || curated.decision.rationale || "updated by sediment curator",
+      }, {
+        projectRoot: cwd,
+        settings,
+        dryRun: false,
+      }));
+      continue;
+    }
+    if (curated.decision.op === "delete") {
+      results.push(await deleteProjectEntry(curated.decision.slug, {
+        projectRoot: cwd,
+        settings,
+        dryRun: false,
+        reason: curated.decision.reason || curated.decision.rationale || "deleted by sediment curator",
+      }));
+      continue;
     }
 
     results.push(await writeProjectEntry({
@@ -960,18 +834,8 @@ async function tryAutoWriteLane(args: {
       projectRoot: cwd,
       settings,
       dryRun: false,
-      policy,
-      forceProvisional: shouldForceAutoWriteProvisional(settings),
     }));
   }
-
-  // 7. Re-evaluate rolling for the next session run.
-  const postReport = await readLlmDryRunReport(cwd, settings.autoWriteRollingWindowSamples, {
-    includeAutoWrite: true,
-    scanLimit: settings.autoWriteRollingWindowSamples,
-  });
-  const postRolling = evaluateRollingGate(postReport, settings.autoWriteRollingWindowSamples, settings.autoWriteRollingPassRate);
-  maybeTripRollingCircuit(sessionId, postRolling);
 
   return {
     kind: "wrote",
@@ -979,7 +843,6 @@ async function tryAutoWriteLane(args: {
     results,
     curatorAudits,
     llmAuditSummary,
-    rollingState: postRolling,
     llmDurationMs,
     writeStart,
     rawTextStored,
@@ -996,148 +859,7 @@ function snapshotSedimentSettings(settings: ReturnType<typeof resolveSedimentSet
     defaultConfidence: settings.defaultConfidence,
     maxWindowChars: settings.maxWindowChars,
     maxWindowEntries: settings.maxWindowEntries,
-    autoWriteSemanticPolicy: settings.autoWriteSemanticPolicy,
-    autoWriteForceProvisional: settings.autoWriteForceProvisional,
-    autoWriteDisallowMaxim: settings.autoWriteDisallowMaxim,
-    autoWriteDisallowArchived: settings.autoWriteDisallowArchived,
-    autoWriteMaxConfidence: settings.autoWriteMaxConfidence,
-    autoWriteSampleEveryNRuns: settings.autoWriteSampleEveryNRuns,
-    autoWriteMaxPerHour: settings.autoWriteMaxPerHour,
-    autoWriteRollingWindowSamples: settings.autoWriteRollingWindowSamples,
-    autoWriteRollingPassRate: settings.autoWriteRollingPassRate,
   };
-}
-
-/** Build the DraftPolicy passed into validation/writer for the LLM lane. */
-export function buildAutoWritePolicy(settings: SedimentSettings): DraftPolicy {
-  if (settings.autoWriteSemanticPolicy !== "mechanical") return {};
-  return {
-    disallowMaxim: settings.autoWriteDisallowMaxim,
-    disallowArchived: settings.autoWriteDisallowArchived,
-    maxConfidence: settings.autoWriteMaxConfidence,
-    disallowNearDuplicate: settings.autoWriteDisallowNearDuplicate,
-  };
-}
-
-function shouldForceAutoWriteProvisional(settings: SedimentSettings): boolean {
-  return settings.autoWriteSemanticPolicy === "mechanical" && settings.autoWriteForceProvisional;
-}
-
-/**
- * Decision record emitted by `decideAutoWriteEligibility`. The shape
- * is also what `operation: "skip"` audit rows record so a tail of
- * `audit.jsonl` answers "why didn't the LLM lane fire?".
- */
-export interface AutoWriteEligibility {
-  eligible: boolean;
-  reason?: string;
-  detail?: Record<string, unknown>;
-}
-
-/**
- * Pure-ish gate evaluator. The only side effect is incrementing the
- * sampling counter on the sessionId; everything else is read-only over
- * settings + in-process Maps + a pre-fetched rolling-gate report.
- */
-export function decideAutoWriteEligibility(args: {
-  sessionId: string;
-  settings: SedimentSettings;
-  readinessReady: boolean;
-  readinessBlockers: string[];
-  rolling: RollingGateState;
-  /**
-   * Optional override for `Date.now()` so smoke tests can replay sliding-
-   * window logic deterministically.
-   */
-  now?: number;
-}): AutoWriteEligibility {
-  const { sessionId, settings, readinessReady, readinessBlockers, rolling } = args;
-  const now = args.now ?? Date.now();
-
-  if (!settings.autoLlmWriteEnabled) {
-    return { eligible: false, reason: "auto_write_disabled_setting" };
-  }
-  if (settings.autoWriteMaxPerHour <= 0) {
-    return { eligible: false, reason: "auto_write_rate_zero" };
-  }
-  if (!readinessReady) {
-    return { eligible: false, reason: "readiness_gate_blocked", detail: { blockers: readinessBlockers } };
-  }
-  if (autoWriteDisabledBySession.has(sessionId)) {
-    return {
-      eligible: false,
-      reason: "circuit_broken_in_process",
-      detail: { trip_reason: autoWriteDisabledBySession.get(sessionId) },
-    };
-  }
-  if (rolling.tripped) {
-    autoWriteDisabledBySession.set(sessionId, "rolling_pass_rate_below_threshold");
-    return {
-      eligible: false,
-      reason: "rolling_pass_rate_tripped",
-      detail: {
-        windowSize: rolling.windowSize,
-        passRate: rolling.passRate,
-        threshold: settings.autoWriteRollingPassRate,
-        reasons: rolling.reasons,
-      },
-    };
-  }
-
-  // Sliding-window rate limit: prune entries older than 60 min,
-  // compare against cap, then (if firing) push current timestamp.
-  // We don't push here — the caller pushes only on actual LLM call.
-  const fires = autoWriteRecentFires.get(sessionId) ?? [];
-  const recentFires = fires.filter((t) => now - t < HOUR_MS);
-  if (fires.length !== recentFires.length) autoWriteRecentFires.set(sessionId, recentFires);
-  if (recentFires.length >= settings.autoWriteMaxPerHour) {
-    return {
-      eligible: false,
-      reason: "rate_limited",
-      detail: { recent_fires: recentFires.length, max_per_hour: settings.autoWriteMaxPerHour },
-    };
-  }
-
-  // Deterministic sampling stride. Increment every call regardless
-  // of eligibility so the stride accounts for *all* opportunities,
-  // not just the ones that pass earlier gates.
-  const prevCount = autoWriteRunCount.get(sessionId) ?? 0;
-  const nextCount = prevCount + 1;
-  autoWriteRunCount.set(sessionId, nextCount);
-  const stride = Math.max(1, settings.autoWriteSampleEveryNRuns);
-  if (nextCount % stride !== 0) {
-    return {
-      eligible: false,
-      reason: "sampled_out",
-      detail: { run_count: nextCount, stride },
-    };
-  }
-
-  return { eligible: true };
-}
-
-/** Mark this sessionId as having actually fired the LLM lane (push timestamp). */
-function recordAutoWriteFire(sessionId: string, now = Date.now()): void {
-  const fires = autoWriteRecentFires.get(sessionId) ?? [];
-  const filtered = fires.filter((t) => now - t < HOUR_MS);
-  filtered.push(now);
-  autoWriteRecentFires.set(sessionId, filtered);
-}
-
-/**
- * After each auto-write fire we re-evaluate the rolling gate. If it
- * trips we don't tear down the in-flight run — it's already done — but
- * we mark the session disabled so the NEXT agent_end skips fast.
- */
-export function maybeTripRollingCircuit(
-  sessionId: string,
-  rolling: RollingGateState,
-): boolean {
-  if (rolling.tripped && !autoWriteDisabledBySession.has(sessionId)) {
-    autoWriteDisabledBySession.set(sessionId, "rolling_pass_rate_below_threshold");
-    return true;
-  }
-  return false;
 }
 
 /**
@@ -1146,9 +868,6 @@ export function maybeTripRollingCircuit(
  * Do not call from production code paths.
  */
 export function _resetAutoWriteStateForTests(): void {
-  autoWriteRunCount.clear();
-  autoWriteRecentFires.clear();
-  autoWriteDisabledBySession.clear();
   autoWriteInFlight.clear();
   sedimentStatusBySession.clear();
 }

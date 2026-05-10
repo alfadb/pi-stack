@@ -4,7 +4,7 @@
 - **日期**: 2026-05-10
 - **决策者**: alfadb
 - **依赖**: [ADR 0015](0015-memory-search-llm-driven-retrieval.md) / [ADR 0013](0013-asymmetric-trust-three-lanes.md) / [memory-architecture.md](../memory-architecture.md) §8
-- **取代/修正**: 修正 ADR 0013 Lane C 的长期方向：G2-G13 是 burn-in scaffolding，不是最终语义裁判。
+- **取代/修正**: 修正 ADR 0013 Lane C：G2-G13 / readiness / rolling / rate / sampling 是 burn-in scaffolding，已从 live path 删除；git + audit 是回滚面。
 
 ## 背景
 
@@ -20,7 +20,7 @@ Phase 1.4 Lane C 初始实现假设：LLM auto-write 是低信任来源，且旧
 
 ## 决策
 
-Sediment 的长期角色从 **extractor + mechanical gates** 调整为 **LLM curator + minimal hard safety substrate**。
+Sediment 的角色从 **extractor + mechanical gates** 调整为 **LLM curator + minimal hard safety/storage substrate**。
 
 默认原则：
 
@@ -63,35 +63,35 @@ UPDATE / MERGE existing memory
 | secret / credential sanitizer | 保留 hard gate |
 | path sandbox / lock / atomic write / audit / git | 保留 storage gate |
 | schema parse / lint error | 保留 storage gate |
-| forceProvisional | 默认关闭；仅 legacy mechanical 模式保留 |
-| disallowMaxim | 默认关闭；LLM 可写 maxim，但必须有 durable evidence |
-| maxConfidence | 默认关闭；confidence 是知识状态的一部分 |
-| disallowArchived | 默认关闭；archive/supersede 是 curator operation |
-| G13 near-duplicate | 默认关闭；由 `memory_search` + curator 决定 update/merge |
-| readiness dry-run | 逐步降级为 monitoring；不作为长期语义门 |
-| rolling pass-rate | 逐步降级为 monitoring / circuit breaker；不替代 curator 判断 |
+| forceProvisional | 删除 |
+| disallowMaxim | 删除；LLM 可写 maxim，但必须有 durable evidence |
+| maxConfidence | 删除；confidence 是知识状态的一部分 |
+| disallowArchived | 删除；archive/supersede 是 curator operation |
+| G13 near-duplicate | 删除；由 `memory_search` + curator 决定 update/merge/skip |
+| readiness dry-run | 删除 |
+| rolling pass-rate | 删除 |
+| rate limit / sampling stride | 删除 |
 
 ## Phase plan
 
-### Phase 0 — Trust LLM semantic policy（本 ADR 首批落地）
+### Phase 0 — 直接信任 LLM curator（已落地）
 
-- 新增 `sediment.autoWriteSemanticPolicy`：`"llm" | "mechanical"`，默认 `"llm"`。
-- 默认 `"llm"` 模式下，Lane C 不再应用 `forceProvisional` / `disallowMaxim` / `disallowArchived` / `maxConfidence` / `disallowNearDuplicate`。
-- 旧 G2-G13 语义 gate 保留为 `"mechanical"` emergency mode。
+- 删除 `sediment.autoWriteSemanticPolicy` 以及旧 G2-G13/readiness/rolling/rate/sampling 设置。
+- Lane C 不再应用 `forceProvisional` / `disallowMaxim` / `disallowArchived` / `maxConfidence` / `disallowNearDuplicate`。
 - LLM extractor prompt 改为允许 `kind=maxim`、status、confidence `[0,10]`，让模型表达真实知识状态。
 - 新增 writer update substrate：`updateProjectEntry(slug, patch, ...)`，支持修改 compiled truth/frontmatter 并追加 timeline。
 
-### Phase 1 — Curator lookup loop（首批同批落地 create/update/skip）
+### Phase 1 — Curator lookup loop（已落地 create/update/delete/skip）
 
 - Auto-write lane 对每个 candidate 调用 ADR 0015 `memory_search` 找语义近邻。
 - 读取 top candidates full entry。
-- Curator LLM 输出 `create/update/skip` operation。
-- 默认优先 update/skip，不平行新增重复 entry。
-- 实现文件：`extensions/sediment/curator.ts` + `tryAutoWriteLane()`；当前 operation subset 为 create/update/skip。
+- Curator LLM 输出 `create/update/delete/skip` operation。
+- 默认优先 update/skip，不平行新增重复 entry；delete 只用于明确垃圾/噪声或应被移除的旧条目，git history 是回滚面。
+- 实现文件：`extensions/sediment/curator.ts` + `tryAutoWriteLane()`；当前 operation subset 为 create/update/delete/skip。
 
 ### Phase 2 — Full memory ops
 
-- 实现 `merge/supersede/archive/delete`。
+- 实现 `merge/supersede/archive`（delete 已有 hard-delete substrate）。
 - `/sediment curate --dry-run` 展示 operations plan。
 - 自动 apply 仍只在 safety/storage gates 通过后执行。
 
@@ -120,6 +120,5 @@ UPDATE / MERGE existing memory
 
 ## Implementation notes
 
-- 首批实现 commit 应把 `autoWriteSemanticPolicy` 默认设为 `llm`，保留 `mechanical` 兼容模式。
 - `writeProjectEntry` 继续负责 create；新增 `updateProjectEntry` 作为 curator update substrate。
 - 主会话 `memory_*` 工具仍保持只读；不要新增 LLM-facing `memory_update/delete` 工具。

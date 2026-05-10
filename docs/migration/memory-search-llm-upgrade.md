@@ -221,12 +221,7 @@ promptGuidelines:
 
 ### 现状
 
-`extensions/sediment/dedupe.ts` 当前实现：
-
-- HARD signal：slug 精确相等 OR title word-trigram Jaccard ≥ 0.7
-- SOFT signal G13：char-trigram ≥ 0.20 AND 共享 rare token AND 同 kind
-
-对**语义改述**完全失明。质量复审揭示 D6 自重复（dotfiles 双条 / round-3 三联 / dogfood ~40% 重叠）正源于此。
+`extensions/sediment/dedupe.ts` 已按 ADR 0016 收敛为 storage-only slug collision guard。旧 word-trigram / G13 rare-token 机械语义 dedupe 已删除。语义改述、旧决策实现、supersession 等全部交给 `extensions/sediment/curator.ts` 通过 `memory_search` + curator LLM 判断。
 
 ### 目标
 
@@ -255,15 +250,7 @@ LLM 在 stage 2 精排时已经做过语义相似和 timeline 判断；sediment 
 
 ### settings 字段
 
-```jsonc
-{
-  "sediment": {
-    "autoWriteSemanticPolicy": "llm"
-  }
-}
-```
-
-`mechanical` legacy mode 可临时恢复旧 G2-G13 行为，但不是长期默认。
+不再新增 semantic-dedupe 阈值或 legacy mechanical mode。Live path 直接运行：extractor → memory_search → curator decision → create/update/delete/skip。Git + audit 作为回滚面。
 
 ### audit 扩展
 
@@ -275,7 +262,7 @@ LLM 在 stage 2 精排时已经做过语义相似和 timeline 判断；sediment 
 
 ### Phase 2 验收
 
-- 同义改述不再平行新增：手工构造一条与已有 entry 同义但表达不同的 draft，sediment curator 输出 update/skip/merge，audit 记录 LLM neighbor 证据
+- 同义改述不再平行新增：手工构造一条与已有 entry 同义但表达不同的 draft，sediment curator 输出 update/skip/merge/delete，audit 记录 LLM neighbor 证据
 - 真新洞察通过：另一条全新内容正常 create
 - LLM 不可用时 hard error / audit failed；不要静默回退到 G13 机械语义判断
 - D6 自重复在 burn-in 期不再出现；旧知识能被 update/supersede 而不是无限累加

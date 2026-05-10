@@ -8,7 +8,7 @@
 > - **§7 工具接口**：`memory_search` 等 facade 接口形状保留，但 `scope` 参数语义重新定义（详见 brain-redesign-spec.md §4）。
 > - **§5.3 `memory_search` 算法规格 / §3.8 Graceful degradation**：被 ADR 0015 supersede。`memory_search` runtime 只走双阶段 LLM retrieval；grep+tf-idf 代码仅作为历史 baseline/diagnostics，不作为降级路径。LLM 失败 hard error。
 >
-> **仍然有效的部分**：7 节 LLM-facing facade 契约 / Compiled Truth + Timeline 双段格式 / Lint 规则 / Brain Health 评分 / 8 节 sediment pipeline 的 extractor/triage/writer/reviewer 内核。**修正**：sediment Lane C 的 mechanical semantic gates / dedupe gates 被 ADR 0016 降级为 legacy/emergency mode；默认转向 LLM curator + sensitive-info/storage hard gates。
+> **仍然有效的部分**：7 节 LLM-facing facade 契约 / Compiled Truth + Timeline 双段格式 / Lint 规则 / Brain Health 评分 / 8 节 sediment pipeline 的 extractor/triage/writer/reviewer 内核。**修正**：sediment Lane C 的 mechanical semantic gates / dedupe gates 已被 ADR 0016 删除；默认转向 LLM curator + sensitive-info/storage hard gates，git/audit 作为回滚面。
 >
 > **需要随 ADR 0014 同步修订的部分**（v1.1 incorporate Round 3 P0）：
 > - **audit row schema (§8.4)**：`lane` 字段 enum 扩展为 `"explicit" | "auto_write" | "about_me" | "vault_write"`（原ADR 0013 的 `promote` / `auto_promote` 不再使用）。Lane V 另写入独立 log `~/.abrain/.state/vault-events.jsonl`。详 [ADR 0014 §审计扩展](adr/0014-abrain-as-personal-brain.md#审计扩展)。

@@ -144,21 +144,21 @@
         "extractorModel": {
           "type": "string",
           "default": "deepseek/deepseek-v4-pro",
-          "description": "Model used by /sediment llm --dry-run. Expected format: provider/modelId. This dry-run command does not write memory or advance checkpoint."
+          "description": "Model used by the live sediment LLM extractor and curator. Expected format: provider/modelId."
         },
 
         "extractorTimeoutMs": {
           "type": "number",
           "default": 180000,
           "minimum": 1000,
-          "description": "Timeout for /sediment llm --dry-run model call."
+          "description": "Timeout for live sediment extractor/curator model calls."
         },
 
         "extractorMaxRetries": {
           "type": "number",
           "default": 0,
           "minimum": 0,
-          "description": "Max retries for /sediment llm --dry-run model call. Default 0 to avoid hidden repeated extraction costs."
+          "description": "Max retries for live sediment extractor/curator model calls. Default 0 to avoid hidden repeated extraction costs."
         },
 
         "extractorMaxCandidates": {
@@ -172,96 +172,13 @@
           "type": "number",
           "default": 1000,
           "minimum": 0,
-          "description": "Number of raw LLM output characters stored in the llm_dry_run audit preview. SHA-256 is stored for full raw output when present."
+          "description": "Number of raw LLM output characters stored in manual extractor previews. The live auto-write audit uses autoWriteRawAuditChars."
         },
 
         "autoLlmWriteEnabled": {
           "type": "boolean",
           "default": false,
-          "description": "Master switch for the LLM auto-write lane in the agent_end hook. When false (default), sediment runs only the deterministic explicit-marker extractor. When true AND `/sediment readiness` reports ready (sufficient dry-run samples + pass rate), the hook will additionally invoke the LLM extractor on transcript windows where no MEMORY: block was found. All auto-written entries are subject to the autoWrite* gates below in addition to the standard dedupe/sanitize/lint pipeline."
-        },
-
-        "minDryRunSamples": {
-          "type": "number",
-          "default": 20,
-          "minimum": 1,
-          "description": "Minimum llm_dry_run audit samples required before automatic LLM writing may be enabled."
-        },
-
-        "requiredDryRunPassRate": {
-          "type": "number",
-          "default": 0.9,
-          "minimum": 0,
-          "maximum": 1,
-          "description": "Required pass rate over llm_dry_run samples before automatic LLM writing may be enabled."
-        },
-
-        "autoWriteSemanticPolicy": {
-          "type": "string",
-          "enum": ["llm", "mechanical"],
-          "default": "llm",
-          "description": "ADR 0016 semantic policy mode for the LLM auto-write lane. `llm` trusts the extractor/curator to decide kind/status/confidence and whether a candidate is worth writing; mechanical G2-G13-style policy gates are disabled except for sensitive-info and storage-integrity checks. `mechanical` restores the legacy policy overlay using autoWriteForceProvisional/DisallowMaxim/DisallowArchived/MaxConfidence/DisallowNearDuplicate."
-        },
-
-        "autoWriteForceProvisional": {
-          "type": "boolean",
-          "default": true,
-          "description": "Legacy mechanical-mode setting. When autoWriteSemanticPolicy=mechanical, coerce the entry's `status` to `provisional` regardless of what the LLM proposed. Ignored in the default `llm` mode."
-        },
-
-        "autoWriteDisallowMaxim": {
-          "type": "boolean",
-          "default": true,
-          "description": "Legacy mechanical-mode setting. Reject any LLM auto-write candidate with `kind: maxim` when autoWriteSemanticPolicy=mechanical. Ignored in the default `llm` mode."
-        },
-
-        "autoWriteDisallowArchived": {
-          "type": "boolean",
-          "default": true,
-          "description": "Legacy mechanical-mode setting. Reject any LLM auto-write candidate whose `status` is `archived`, `deprecated`, or `superseded` when autoWriteSemanticPolicy=mechanical. Ignored in the default `llm` mode."
-        },
-
-        "autoWriteMaxConfidence": {
-          "type": "number",
-          "default": 6,
-          "minimum": 0,
-          "maximum": 10,
-          "description": "Legacy mechanical-mode setting. Cap `confidence` for LLM auto-written entries when autoWriteSemanticPolicy=mechanical. Ignored in the default `llm` mode."
-        },
-
-        "autoWriteDisallowNearDuplicate": {
-          "type": "boolean",
-          "default": true,
-          "description": "Legacy mechanical-mode setting. Reject LLM auto-write candidates flagged by the soft near-duplicate signal when autoWriteSemanticPolicy=mechanical. Ignored in the default `llm` mode; semantic duplicate/update decisions should be handled by the LLM curator with memory_search rather than char-trigram hard gates. Hard duplicates (slug_exact, word-trigram >= 0.7) remain storage-level rejects."
-        },
-
-        "autoWriteSampleEveryNRuns": {
-          "type": "number",
-          "default": 1,
-          "minimum": 1,
-          "description": "Deterministic sampling stride. The auto-write LLM lane fires only on every Nth eligible agent_end (per session, in-process counter). N=1 means every run; N=5 means one in five. Non-firing runs still advance the checkpoint and emit a skip audit row. Use to control LLM cost on long sessions."
-        },
-
-        "autoWriteMaxPerHour": {
-          "type": "number",
-          "default": 6,
-          "minimum": 0,
-          "description": "Hard ceiling on auto-write LLM calls per session per rolling 60 minutes. 0 disables the lane entirely (equivalent to autoLlmWriteEnabled=false but kept separate for emergency throttling). Counter is in-process and resets on pi restart."
-        },
-
-        "autoWriteRollingWindowSamples": {
-          "type": "number",
-          "default": 30,
-          "minimum": 1,
-          "description": "Size of the rolling-quality window. The most recent N llm_dry_run + auto_write audit rows are evaluated against `autoWriteRollingPassRate`; if pass rate falls below the threshold the lane is circuit-broken in-process for the rest of this pi run. Default 30 (raised from 20 after live observation): a single failed row in a 20-window moves the rate by 5%, which over-weights individual fires; 30 halves that impact and smooths across roughly one day of activity."
-        },
-
-        "autoWriteRollingPassRate": {
-          "type": "number",
-          "default": 0.85,
-          "minimum": 0,
-          "maximum": 1,
-          "description": "Pass-rate threshold for the rolling-quality circuit breaker. Slightly lower than `requiredDryRunPassRate` (default 0.9) to allow some drift before disabling. On pi restart the circuit is reset and the gate is re-evaluated."
+          "description": "Master switch for the LLM auto-write lane in the agent_end hook. When false (default), sediment runs only the deterministic explicit-marker extractor. When true, the hook directly invokes the LLM extractor + memory_search-powered curator on transcript windows where no MEMORY: block was found. There is no dry-run/readiness/rate/sampling/rolling gate; git history + audit are the rollback surface, while sensitive-info and storage-integrity checks remain hard gates."
         },
 
         "autoWriteRawAuditChars": {

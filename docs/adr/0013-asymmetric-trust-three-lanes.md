@@ -1,6 +1,6 @@
 # ADR 0013 — Asymmetric Trust 三段式（LLM / explicit / promotion）
 
-- **状态**: Accepted（2026-05-08）。**Lane B / Lane D 被 [ADR 0014](0014-abrain-as-personal-brain.md) §D3 失效**（2026-05-09）——abrain 七区拓扑下不再有「project → world promotion」概念（所有写入直接定位到对应区域）。原 Lane A（explicit MEMORY）/ Lane C（LLM auto-write）**仍然生效**；但 Lane C 的 G2-G13 机械语义 gate 被 [ADR 0016](0016-sediment-as-llm-curator.md) 修正为 legacy/emergency mode，默认转向 LLM curator + minimal safety/storage gates。ADR 0014 §D3 在之上新增 Lane G（about-me declare）+ Lane V（vault declare，不走 sediment IPC）。Trust tier 概念本身仍然是下面设计的基本盘。
+- **状态**: Accepted（2026-05-08）。**Lane B / Lane D 被 [ADR 0014](0014-abrain-as-personal-brain.md) §D3 失效**（2026-05-09）——abrain 七区拓扑下不再有「project → world promotion」概念（所有写入直接定位到对应区域）。原 Lane A（explicit MEMORY）/ Lane C（LLM auto-write）**仍然生效**；但 Lane C 的 G2-G13 / readiness / rolling / rate / sampling 机械 gate 被 [ADR 0016](0016-sediment-as-llm-curator.md) 删除，转向 direct LLM curator + sensitive-info/storage gates。ADR 0014 §D3 在之上新增 Lane G（about-me declare）+ Lane V（vault declare，不走 sediment IPC）。Trust tier 概念本身仍然是下面设计的基本盘。
 - **日期**: 2026-05-08
 - **决策者**: alfadb
 - **依赖**: [memory-architecture.md](../memory-architecture.md) §8（sediment pipeline）/ §9（promotion）

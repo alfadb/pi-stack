@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
-import { type DraftPolicy, type EntryKind, type EntryStatus, validateProjectEntryDraft } from "./validation";
+import { type EntryKind, type EntryStatus, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
 import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
 import type { Jsonish } from "../memory/types";
@@ -43,26 +43,7 @@ export interface WriteProjectEntryOptions {
   projectRoot: string;
   settings: SedimentSettings;
   dryRun?: boolean;
-  /**
-   * Optional policy overlay applied on top of the standard schema check.
-   * Used by the Phase 1.4 LLM auto-write lane to enforce stricter
-   * gates (no maxim, status capped to initial states, confidence
-   * capped). Caller is responsible for assembling this from
-   * `SedimentSettings` (see `buildAutoWritePolicy` in `index.ts`); the
-   * writer does not look at settings directly so explicit MEMORY:
-   * blocks remain unaffected.
-   */
-  policy?: DraftPolicy;
-  /**
-   * If true, the draft's `status` is forcibly rewritten to "provisional"
-   * regardless of whatever the LLM/extractor produced. This is the
-   * sediment-state half of `policy.disallowArchived`: validation alone
-   * would reject `archived/deprecated/superseded`, but for `active`
-   * vs `provisional` distinctions we prefer to coerce silently rather
-   * than fail the whole write — a too-confident `active` from the LLM
-   * is still better captured at `provisional`.
-   */
-  forceProvisional?: boolean;
+
 }
 
 export interface ProjectEntryUpdateDraft {
@@ -79,7 +60,7 @@ export interface ProjectEntryUpdateDraft {
 export interface WriteProjectEntryResult {
   slug: string;
   path: string;
-  status: "created" | "updated" | "skipped" | "dry_run" | "rejected";
+  status: "created" | "updated" | "deleted" | "skipped" | "dry_run" | "rejected";
   reason?: string;
   lintErrors?: number;
   lintWarnings?: number;
@@ -138,7 +119,7 @@ function kindDirectory(kind: EntryKind, status?: EntryStatus): string {
 function normalizeCompiledTruth(title: string, body: string): string {
   let text = body.trim();
   text = text.replace(/^##\s+Timeline\s*[\s\S]*$/m, "").trim();
-  // Defense against frontmatter break-out (G6): a body line that is
+  // Defense against frontmatter break-out: a body line that is
   // exactly `---` would terminate frontmatter on the next read pass
   // (see `splitFrontmatter` in extensions/memory/parser.ts). Markdown
   // hr is a real authoring need though, so we don't reject — we escape
@@ -402,6 +383,61 @@ export async function appendAudit(projectRoot: string, event: Record<string, unk
   return auditPath;
 }
 
+export async function deleteProjectEntry(
+  slugRaw: string,
+  opts: WriteProjectEntryOptions & { reason?: string },
+): Promise<WriteProjectEntryResult> {
+  const started = Date.now();
+  const projectRoot = path.resolve(opts.projectRoot);
+  const pensieveRoot = path.join(projectRoot, ".pensieve");
+  const slug = slugify(slugRaw);
+  if (!fsSync.existsSync(pensieveRoot)) {
+    return { slug, path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
+  }
+
+  const target = await findProjectEntryFile(projectRoot, slug);
+  if (!target) {
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "reject",
+      reason: "entry_not_found",
+      target: `project:${slug}`,
+      duration_ms: Date.now() - started,
+    });
+    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath };
+  }
+
+  if (opts.dryRun) {
+    return { slug, path: target, status: "dry_run" };
+  }
+
+  let lock: LockHandle | undefined;
+  try {
+    lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
+    await fs.unlink(target);
+    const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `delete ${slug}`) : null;
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "delete",
+      target: `project:${slug}`,
+      path: path.relative(projectRoot, target),
+      reason: opts.reason || "deleted by sediment curator",
+      git_commit: git,
+      duration_ms: Date.now() - started,
+    });
+    return { slug, path: target, status: "deleted", gitCommit: git, auditPath };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "error",
+      target: `project:${slug}`,
+      reason: message,
+      duration_ms: Date.now() - started,
+    });
+    return { slug, path: target, status: "rejected", reason: message, auditPath };
+  } finally {
+    await lock?.release();
+  }
+}
+
 export async function updateProjectEntry(
   slugRaw: string,
   patch: ProjectEntryUpdateDraft,
@@ -527,7 +563,7 @@ export async function writeProjectEntry(
     return { slug: slugify(draft.title), path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
   }
 
-  const validationErrors = validateProjectEntryDraft(draft, opts.policy);
+  const validationErrors = validateProjectEntryDraft(draft);
   if (validationErrors.length > 0) {
     const auditPath = await appendAudit(projectRoot, {
       operation: "reject",
@@ -551,7 +587,7 @@ export async function writeProjectEntry(
   const noteSanitize = draft.timelineNote
     ? sanitizeForMemory(draft.timelineNote)
     : { ok: true, text: undefined, replacements: [] as string[] };
-  // G8: triggerPhrases are part of frontmatter and otherwise bypass
+  // triggerPhrases are part of frontmatter and otherwise bypass
   // sanitize. We run each phrase through the same gate; failure of any
   // phrase fails the whole draft (the dropped-credential alternative is
   // worse — silently losing trigger phrases would also remove the
@@ -583,12 +619,7 @@ export async function writeProjectEntry(
     triggerPhrases: draft.triggerPhrases
       ? triggerPhraseSanitizes.map((s, i) => s.text ?? draft.triggerPhrases![i])
       : draft.triggerPhrases,
-    // forceProvisional: applied AFTER sanitize so the audit row reflects
-    // the actual stored status. This intentionally happens unconditionally
-    // when set, overriding any LLM-supplied value (validation already
-    // banned archived/deprecated/superseded if disallowArchived is on,
-    // but `active` slipping through is still a downgrade-on-write here).
-    status: opts.forceProvisional ? "provisional" : draft.status,
+    status: draft.status,
   };
 
   const { slug, markdown } = buildMarkdown(safeDraft, projectRoot);
@@ -602,7 +633,7 @@ export async function writeProjectEntry(
   if (duplicate.duplicate) {
     const auditPath = await appendAudit(projectRoot, {
       operation: "reject",
-      reason: duplicate.reason === "slug_exact" ? "duplicate_slug" : "duplicate_title",
+      reason: "duplicate_slug",
       target: `project:${slug}`,
       duplicate,
       duration_ms: Date.now() - started,
@@ -611,34 +642,11 @@ export async function writeProjectEntry(
       slug,
       path: target,
       status: "rejected",
-      reason: duplicate.reason === "slug_exact" ? "duplicate_slug" : "duplicate_title",
+      reason: "duplicate_slug",
       duplicate,
       auditPath,
     };
   }
-  // Soft near-duplicate gate. Only enforced when the policy explicitly
-  // opts in (LLM auto-write lane). Explicit-marker writes are
-  // user-attested and intentionally bypass this gate — if the user
-  // wants to record a refined restatement of an existing entry they
-  // can.
-  if (duplicate.nearDuplicate && opts.policy?.disallowNearDuplicate) {
-    const auditPath = await appendAudit(projectRoot, {
-      operation: "reject",
-      reason: "near_duplicate",
-      target: `project:${slug}`,
-      duplicate,
-      duration_ms: Date.now() - started,
-    });
-    return {
-      slug,
-      path: target,
-      status: "rejected",
-      reason: "near_duplicate",
-      duplicate,
-      auditPath,
-    };
-  }
-
   const lint = lintMarkdown(markdown, target);
   const lintErrors = lint.filter((issue) => issue.severity === "error").length;
   const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
