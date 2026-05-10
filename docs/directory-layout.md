@@ -34,15 +34,20 @@ alfadb/pi-astack/
 │   │   ├── 0010-sediment-single-agent-with-lookup-tools.md # 内核保留，tools 过时
 │   │   ├── 0011-sediment-two-track-pipeline.md           # superseded by memory-architecture.md
 │   │   ├── 0012-sediment-pensieve-gbrain-dual-target.md  # superseded by memory-architecture.md
-│   │   └── 0013-asymmetric-trust-three-lanes.md          # ✅ Lane A/B/C/D trust tier formalization (2026-05-08)
+│   │   ├── 0013-asymmetric-trust-three-lanes.md          # Lane A/B/C/D trust tier (2026-05-08)；Lane B/D 被 ADR 0014 失效
+│   │   └── 0014-abrain-as-personal-brain.md              # ✅ ~/.abrain 重定位为数字孪生七区结构 (2026-05-09, v1.4)
+│   ├── brain-redesign-spec.md         # ✅ ADR 0014 详细规范 (v1.3) — abrain 七区拓扑/vault 双层/Lane G/V
 │   └── migration/
-│       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6
+│       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6（Phase 2 起部分被 ADR 0014 重新规划）
 │       ├── apply-checklist.md         # 单文件 migration apply/restore 操作手册
+│       ├── abrain-pensieve-migration.md  # ✅ .pensieve/ → ~/.abrain/projects/<id>/ 迁移计划 P1-P7 (ADR 0014 §D2)
+│       ├── vault-bootstrap.md         # ✅ vault unlock 平台支持矩阵 v1.4 (portable-identity 优先)
+│       ├── phase-2.3-promotion-gates.md  # promotion gates 1-5 详细设计稿（等 Phase 1.4 burn-in 后实施）
 │       └── open-questions.md          # 适配新架构的待澄清问题
 │
 ├── extensions/                        # ✅ pi 行为扩展（alfadb own）
 │   ├── dispatch/                      # ✅ 已实现：dispatch_agent + dispatch_agents（子进程隔离）
-│   │   ├── index.ts                   # 注册 dispatch_agent / dispatch_agents（ADR 0009）
+│   │   ├── index.ts                   # 注册 dispatch_agent / dispatch_agents（ADR 0009）；sub-pi env 强制注入 PI_ABRAIN_DISABLED=1
 │   │   └── input-compat.ts            # JSON 字符串 unwrap + 类型兑底（ADR 0009 §2.5）
 │   ├── vision/                        # ✅ 已实现：vision tool（自动选最佳 vision model）
 │   │   └── index.ts
@@ -79,7 +84,14 @@ alfadb/pi-astack/
 │   ├── compaction-tuner/              # ✅ 实现：计划外落地（2026-05-08）
 │   │   ├── index.ts                   # agent_end hook 读 ctx.getContextUsage() 超阈 → ctx.compact()；/compaction-tuner [status|trigger]
 │   │   └── settings.ts                # thresholdPercent / rearmMarginPercent
+│   ├── abrain/                        # ✅ vault P0a-c 子集落地（2026-05-09, ADR 0014 §D4）
+│   │   ├── index.ts                   # /vault status|init + /secret set|list|forget；PI_ABRAIN_DISABLED=1 时 register nothing
+│   │   ├── backend-detect.ts          # ssh-key/gpg-file/macos/secret-service/pass/passphrase-only/disabled 优先级探测（vault-bootstrap §1.4）
+│   │   ├── bootstrap.ts               # master key 生成 + install tmp + cleanup（inv1-inv6 事务安全）
+│   │   ├── keychain.ts                # macOS Keychain / secret-service / pass dispatch（Tier 2 optimization）
+│   │   └── vault-writer.ts            # writeSecret/listSecrets/forgetSecret/reconcile；transactional + age 公钥加密（不接触 master key 明文）
 │   ├── _shared/                       # ✅ 跨扩展 helpers
+│   │   ├── footer-status.ts           # 统一 footer status keys（ordered, dispatch state machine, model-curator total count）
 │   │   └── runtime.ts                 # local-tz timestamp / .pi-astack/<module>/ path / appendAudit
 │   └── browse/                        # [计划] from pi-gstack
 │
@@ -103,6 +115,7 @@ alfadb/pi-astack/
 | `extensions/memory/` | ✅ 已实现（只读 Facade + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b |
 | `extensions/sediment/` | ✅ 实现（explicit extractor + LLM dry-run + LLM auto-write lane LIVE + migrate-one + status FSM + G2-G13 闸门） | Phase 1.4 A1+A2+A3 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
+| `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + /vault + /secret 命令） | ADR 0014 §D4 (2026-05-09) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |

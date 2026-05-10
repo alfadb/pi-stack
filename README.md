@@ -8,8 +8,10 @@
 > 通过 `memory_write/update/deprecate/promote/relate` 单写。gbrain 被完全去除；其 timeline/图谱方法论
 > 被借鉴到 markdown 条目格式中（Compiled Truth + `## Timeline` + `graph.json`）。
 >
+> **v7.1 update (2026-05-09, [ADR 0014](./docs/adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](./docs/brain-redesign-spec.md)):** `~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑——七区结构（identity / skills / habits / workflows / projects / knowledge / vault）。`.pensieve/` 物理位置废止，项目知识 Phase 2 起将迁入 `~/.abrain/projects/<id>/`（迁移计划见 [migration/abrain-pensieve-migration.md](./docs/migration/abrain-pensieve-migration.md)）。新增 Lane G（about-me）+ Lane V（vault declare）；`extensions/abrain/` 已落地 vault P0a-c 子集（`/secret` + `/vault` 命令，age 加密 + portable identity backend）。
+>
 > 历史架构演进：v6.5（gbrain 唯一存储 + 三模型投票）→ v6.6（单 agent + lookup tools）→ v6.7（双轨 gbrain sources）
-> → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）**。详见 [docs/adr/](./docs/adr/) 12 条 ADR。
+> → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）→ v7.1（abrain 重定位为数字孪生）**。详见 [docs/adr/](./docs/adr/) 14 条 ADR。
 
 ## 是什么
 
@@ -36,9 +38,9 @@
 | 知识模型 | 7 种 kind（maxim/decision/anti-pattern/pattern/fact/preference/smell）+ confidence 0-10 + lifetime 正交 |
 | Facade 模式 | LLM 只看到统一的 `memory_*` 读接口，底层存储和索引拓扑变更不影响上层 |
 
-详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范）+ [docs/adr/](./docs/adr/) 12 条 ADR。
+详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 14 条 ADR。
 
-> ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded。ADR 0004 被 ADR 0010 superseded。
+> ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 supersede（详见各 ADR 顶部状态字段）。
 
 ## 安装方式
 
@@ -96,8 +98,11 @@ pi install git:github.com/alfadb/pi-astack
 ## 内容
 
 ### Extensions（pi 行为扩展）
-- `dispatch/` — subprocess-based `dispatch_agent` / `dispatch_agents`（主会话自由组合）；每个子 agent 是独立 pi 进程，OS 级隔离（ADR 0009）
+- `dispatch/` — subprocess-based `dispatch_agent` / `dispatch_agents`（主会话自由组合）；每个子 agent 是独立 pi 进程，OS 级隔离（ADR 0009）。子进程 env 强制注入 `PI_ABRAIN_DISABLED=1` 让 abrain extension 在 sub-pi 中 register nothing（brain-redesign-spec v1.3 P0-1）
 - `memory/` — ✅ 主会话记忆 read tool（`memory_search/get/list/neighbors`），Facade 模式封装；只读扫描 `.pensieve/` + 可选 `~/.abrain/`；另含 human slash commands `/memory doctor-lite`、`/memory lint`、`/memory migrate --dry-run [--report]`、`/memory check-backlinks`、`/memory rebuild --graph`、`/memory rebuild --index`
+- `abrain/` — ✅ vault P0a-c 子集（ADR 0014 §D4）：`/vault status` / `/vault init [--backend=X]` + `/secret set/list/forget --global <key>=<value>`。Backend detection 优先级 ssh-key → gpg-file → macos → secret-service → pass → passphrase-only → disabled（[vault-bootstrap.md](./docs/migration/vault-bootstrap.md) v1.4 portable-identity 矩阵；容器场景头号 first-class）。Master key（`~/.abrain/.vault-master.age`）用 age 加密给 portable identity；vault writer 不接触明文 master key，全部加密走 `~/.abrain/.vault-pubkey`。当前仅 global vault；项目级 vault + Lane V `vault_release` LLM tool 等 deferred。详 [brain-redesign-spec.md §6](./docs/brain-redesign-spec.md)
+- `imagine/` — ✅ `imagine(prompt, size?, quality?, style?)` tool，OpenAI Responses API 生图（`gpt-image-2`）；PNG 落 `.pi-astack/imagine/`，调用方支持图片输入则 inline 返回
+- `vision/` — ✅ `vision(imageBase64? | path?, prompt)` tool，自动从可用 provider 选最佳 vision-capable 模型；用于当前模型不支持图片输入时降级
 - `sediment/` — ✅ Phase 1.4 全部接通：checkpoint/run-window（per-session + RMW 锁）+ deterministic explicit `MEMORY:` extractor（fence-aware）+ `agent_end` 上的 LLM auto-write lane（readiness + rolling-quality 进程内闸门 + sliding-window rate limit + sampling stride + `policy/forceProvisional` 内容闸门）+ project-only writer substrate（validate/sanitize（含 JWT/PEM/AWS/connection URL pattern）/dedupe/lint/lock/atomic write/audit/git best-effort）+ `/sediment llm --dry-run`/`/sediment llm-report`/`/sediment readiness` + `/sediment migration-backups` + `/sediment migrate-one --plan/--apply --yes/--restore --yes` 单文件迁移与恢复。默认 opt-out（`autoLlmWriteEnabled: false`）；启用后仅在 dry-run 样本达门 + rolling 未跳闸时才调 LLM。操作手册见 [docs/migration/apply-checklist.md](./docs/migration/apply-checklist.md)
 - `model-curator/` — 模型能力快照与选择建议
 - `model-fallback/` — 非对称多模型 fallback：初始模型走 pi 内建指数退避重试，耗尽后按 `modelFallback.fallbackModels` 切下一个。alfadb 当前 pi 配置：claude-code parity，1+9=10 次尝试。（旧名 retry-stream-eof → retry-all-errors；**自有功能，不向上游 PR**）

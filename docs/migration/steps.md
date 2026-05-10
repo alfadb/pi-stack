@@ -70,14 +70,14 @@
 
 ### Phase 1.2 — 旧格式迁移
 
-**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pensieve/.state/migration-report.md`。实际条目迁移由 `extensions/sediment/migration.ts` 的 `/sediment migrate-one --plan <file>` / `/sediment migrate-one --apply --yes <file>` / `/sediment migrate-one --restore <backup> --yes` 承接；`/sediment migration-backups [--limit N]` 可列出最近 backup 与 restore 命令。一次只预览、迁移或恢复单文件，以保持 staged/reversible；batch apply 尚未实现。
+**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pi-astack/memory/migration-report.md`（与 [apply-checklist.md](./apply-checklist.md) §1 一致）。实际条目迁移由 `extensions/sediment/migration.ts` 的 `/sediment migrate-one --plan <file>` / `/sediment migrate-one --apply --yes <file>` / `/sediment migrate-one --restore <backup> --yes` 承接；`/sediment migration-backups [--limit N]` 可列出最近 backup 与 restore 命令。一次只预览、迁移或恢复单文件，以保持 staged/reversible；batch apply 尚未实现。
 
 - 识别旧格式条目：无 `schema_version` 或无 `---` 分隔符
 - 自动映射：旧 `short-term/` → 条目移入同级目录 + `lifetime.kind: ttl`
 - 缺失 timeline：迁移时生成初始 timeline 行
 - 迁移前备份 source；apply/restore 后 best-effort git commit（失败不回滚 markdown）
 - 支持 `--dry-run`
-- 支持 `--report` 写入 `.pensieve/.state/migration-report.md`（generated artifact）；report 每个 migration item 都包含推荐的 `/sediment migrate-one --plan ...` 与 `/sediment migrate-one --apply --yes ...` 命令
+- 支持 `--report` 写入 `.pi-astack/memory/migration-report.md`（generated artifact）；report 每个 migration item 都包含推荐的 `/sediment migrate-one --plan ...` 与 `/sediment migrate-one --apply --yes ...` 命令
 
 **当前验收**：
 ```text
@@ -85,7 +85,7 @@
 # → 显示迁移计划，不修改 markdown 条目
 
 /memory migrate --dry-run --report .pensieve
-# → 写入 .pensieve/.state/migration-report.md，便于人工审查；每项都带 plan/apply 单文件命令
+# → 写入 .pi-astack/memory/migration-report.md，便于人工审查；每项都带 plan/apply 单文件命令
 ```
 
 **plan/apply/restore 验收（单文件）**：
@@ -300,8 +300,10 @@ memory_search(query: "dispatch agent prompt")
 
 ## Phase 2：World 层接入
 
+> ⚠️ **拓扑被 [ADR 0014](../adr/0014-abrain-as-personal-brain.md)（2026-05-09）重新规划**。`~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑，采用七区结构（identity / skills / habits / workflows / projects / knowledge / vault）且吃掉 `.pensieve/`。下面 Phase 2.1 列出的 v7.0 旧 layout（`maxims/patterns/anti-patterns/...`）仅作历史参考。**新迁移计划走 [migration/abrain-pensieve-migration.md](./abrain-pensieve-migration.md) P1-P7**；七区拓扑详见 [brain-redesign-spec.md §1](../brain-redesign-spec.md)。Lane B/D 失效后 Phase 2.3 promotion gates 也被重新思考（详 [phase-2.3-promotion-gates.md](./phase-2.3-promotion-gates.md)）。读侧（resolve / search / get / list / neighbors）不受影响。
+
 **验收标准**：
-- [x] `~/.abrain/` 目录结构落地，独立 git repo【2026-05-08 完成；layout：`maxims/ decisions/ knowledge/ staging/ archive/ pipelines/ .state/ .index/`，独立 `.git/`，README.md + .gitignore，1 init commit；目前空，等 promotion gates 落地后通过 sediment 填充】
+- [x] `~/.abrain/` 目录结构落地，独立 git repo【2026-05-08 完成；layout：`maxims/ decisions/ knowledge/ staging/ archive/ pipelines/ .state/ .index/`，独立 `.git/`，README.md + .gitignore，1 init commit；目前空，等 promotion gates 落地后通过 sediment 填充。**ADR 0014 后七区拓扑未启用，走 abrain-pensieve-migration.md 重新规划】
 - [x] `ABRAIN_ROOT` 环境变量支持，默认 `~/.abrain`【`extensions/memory/parser.ts::resolveStores`】
 - [x] Memory Facade 跨 store dispatch + graceful degradation【`resolveStores` 在 world 不存在时仅返回 project store，不报错；scope 是 internal routing concern，对 LLM 不暴露（§5.4 Facade）】
 - [x] `memory_search` 同时检索 project + world【smoke 覆盖 `ABRAIN_ROOT` 路径】
@@ -315,8 +317,19 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 2.1 — ~/.abrain 初始化
 
+> **v7.0 旧命令仅作历史参考**。ADR 0014 下七区拓扑初始化走 [abrain-pensieve-migration.md](./abrain-pensieve-migration.md) P1（生成 layout + `.gitignore` whitelist vault 不上 git）。
+
 ```bash
+# v7.0 旧 layout (仅参考)
 mkdir -p ~/.abrain/{maxims,patterns,anti-patterns,facts,staging,archive,schemas,.state/locks}
+cd ~/.abrain && git init
+echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
+```
+
+```bash
+# v7.1 七区拓扑 (ADR 0014 §D1)——该走 abrain-pensieve-migration.md P1
+mkdir -p ~/.abrain/{identity,skills,habits,workflows,projects,knowledge,vault}
+mkdir -p ~/.abrain/{staging,archive,.state}
 cd ~/.abrain && git init
 echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
 ```
