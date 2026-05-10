@@ -11,7 +11,7 @@
 > **v7.1 update (2026-05-09, [ADR 0014](./docs/adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](./docs/brain-redesign-spec.md)):** `~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑——七区结构（identity / skills / habits / workflows / projects / knowledge / vault）。`.pensieve/` 物理位置废止，项目知识 Phase 2 起将迁入 `~/.abrain/projects/<id>/`（迁移计划见 [migration/abrain-pensieve-migration.md](./docs/migration/abrain-pensieve-migration.md)）。新增 Lane G（about-me）+ Lane V（vault declare）；`extensions/abrain/` 已落地 vault P0a-c 子集（`/secret` + `/vault` 命令，age 加密 + portable identity backend）。
 >
 > 历史架构演进：v6.5（gbrain 唯一存储 + 三模型投票）→ v6.6（单 agent + lookup tools）→ v6.7（双轨 gbrain sources）
-> → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）→ v7.1（abrain 重定位为数字孪生）**。详见 [docs/adr/](./docs/adr/) 14 条 ADR。
+> → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）→ v7.1（abrain 重定位为数字孪生）**。详见 [docs/adr/](./docs/adr/) 15 条 ADR（含刚提出的 [ADR 0015](./docs/adr/0015-memory-search-llm-driven-retrieval.md) memory_search LLM-driven retrieval，未实施）。
 
 ## 是什么
 
@@ -38,7 +38,7 @@
 | 知识模型 | 7 种 kind（maxim/decision/anti-pattern/pattern/fact/preference/smell）+ confidence 0-10 + lifetime 正交 |
 | Facade 模式 | LLM 只看到统一的 `memory_*` 读接口，底层存储和索引拓扑变更不影响上层 |
 
-详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 14 条 ADR。
+详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 15 条 ADR。
 
 > ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 supersede（详见各 ADR 顶部状态字段）。
 

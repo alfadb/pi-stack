@@ -35,7 +35,8 @@ alfadb/pi-astack/
 │   │   ├── 0011-sediment-two-track-pipeline.md           # superseded by memory-architecture.md
 │   │   ├── 0012-sediment-pensieve-gbrain-dual-target.md  # superseded by memory-architecture.md
 │   │   ├── 0013-asymmetric-trust-three-lanes.md          # Lane A/B/C/D trust tier (2026-05-08)；Lane B/D 被 ADR 0014 失效
-│   │   └── 0014-abrain-as-personal-brain.md              # ✅ ~/.abrain 重定位为数字孪生七区结构 (2026-05-09, v1.4)
+│   │   ├── 0014-abrain-as-personal-brain.md              # ✅ ~/.abrain 重定位为数字孪生七区结构 (2026-05-09, v1.4)
+│   │   └── 0015-memory-search-llm-driven-retrieval.md    # 🟡 memory_search 双阶段 LLM rerank (2026-05-10, Proposed; 未实施)
 │   ├── brain-redesign-spec.md         # ✅ ADR 0014 详细规范 (v1.3) — abrain 七区拓扑/vault 双层/Lane G/V
 │   └── migration/
 │       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6（Phase 2 起部分被 ADR 0014 重新规划）
@@ -43,6 +44,7 @@ alfadb/pi-astack/
 │       ├── abrain-pensieve-migration.md  # ✅ .pensieve/ → ~/.abrain/projects/<id>/ 迁移计划 P1-P7 (ADR 0014 §D2)
 │       ├── vault-bootstrap.md         # ✅ vault unlock 平台支持矩阵 v1.4 (portable-identity 优先)
 │       ├── phase-2.3-promotion-gates.md  # promotion gates 1-5 详细设计稿（等 Phase 1.4 burn-in 后实施）
+│       ├── memory-search-llm-upgrade.md  # 🟡 ADR 0015 实施路径 Phase 0/1/2/3（2026-05-10 Proposed）
 │       └── open-questions.md          # 适配新架构的待澄清问题
 │
 ├── extensions/                        # ✅ pi 行为扩展（alfadb own）
