@@ -151,6 +151,77 @@ rm -rf "$INSTALL_TMP"
 - 备份责任在用户：ssh-key / gpg-file backend 下 master key 已加密为 `~/.abrain/.vault-master.age`，可随 abrain 一起 git push 备份（重要：ss key 本身 不 备份到 git）。macOS / pass / secret-service 下 master key 在 keychain，需依赖平台自身同步机制
 - master key rotation：当前 spec 不支持。若 rotation 必要：人工 unlock 全部 vault 文件 → 用新 key 重新加密 → 注册新 key。复杂度高，列入 backlog
 
+### 3.1 P0b 实施 invariant（v1.4 补，为实现代码准备）
+
+实现 §3 流程时必须遵守：
+
+#### invariant 1 —— 事务顺序与 partial state
+
+```
+(0) mktemp -p ~/.abrain/.state/install/        # 隔离临时区
+(1) age-keygen → INSTALL_TMP/master.age        # 生成 secret + 拿到 publicKey
+(2) backend.encrypt(secret) → vault dst        # 密文落盘 (SOT)
+(3) write ~/.abrain/.vault-pubkey               # publicKey 明文
+    write ~/.abrain/.vault-backend             # backend + identity 记录
+(4) cleanup INSTALL_TMP (shred + rm)            # 销毁临时 secret
+```
+
+**failure point 处理**：
+- (1) fail → 走 cleanup、不产生任何产出。**Idempotent**。
+- (2) fail → 走 cleanup、不写 backend/pubkey 文件。**Idempotent**：只要 vault 目录里没出现 .vault-master.age 部分写入，下次重跑 init 干净。危险点：keychain backend（macOS/secret-service/pass）在 (2) 中成功写 keychain 后后续 (3) fail → keychain 里有孤儿 master key。补救：重跑 `pi vault init` 时先检查 keychain，有同 name 则 prompt 覆写。
+- (3a) write pubkey fail → 状态不一致（vault dst 存在但无 pubkey）。cleanup 仍跑，报错。重跑 init 要求用户 `rm ~/.abrain/.vault-master.age` 后重来。
+- (3b) write backend file fail → 同 (3a)
+- (4) cleanup fail → **不应该入 sleep**——secret 可能残留。cleanup 不应报错中断主流程，但要 log warn，指示用户手动 `shred -u ~/.abrain/.state/install/init-*/master.age`。
+
+**原则**：(2) 之前重跑 init 完全干净。(2) 后需手动清理 vault dst 才能重跑——这是为了避免隐式覆写已有 vault data。
+
+#### invariant 2 —— 禁用 argv 传 secret（process listing 防泄）
+
+secret 由 stdin pipe 或文件路径传递，**不作为命令行参数**。`/proc/<pid>/cmdline` 同 host 可读。
+
+**已知 trade-off**：**macOS `security` CLI 没有 stdin mode**——`security add-generic-password -w <value>` 是唯一接口。这是已知短暴露窗口。减轻：
+- 仅出现于 `/vault init` 执行期间 < 100ms
+- 该主机另外存在不受信任进程本身是其他问题
+- macOS Keychain 是 Tier 2 optimization 不是默认 backend；ssh-key 路径 stdin pipe 完美安全
+
+#### invariant 3 —— install_tmp 设备隔离
+
+**`mktemp -d -p ~/.abrain/.state/install/` 严格**，不退 `/tmp`。实现中检查父目录是 abrain home——避免代码重构意外跳到 `/tmp`。
+
+#### invariant 4 —— cleanup 在 fsync 之后、返回之前
+
+```typescript
+try {
+  // (0)..(3)
+} finally {
+  await cleanupInstallDir(installTmp);   // 总是跑，错误路径也走
+}
+```
+
+#### invariant 5 —— keychain backend 与 file backend 差异明确
+
+| Backend | master key 落在 |
+|---|---|
+| ssh-key | `~/.abrain/.vault-master.age` (age envelope) |
+| gpg-file | `~/.abrain/.vault-master.age` (GPG envelope) |
+| passphrase-only | `~/.abrain/.vault-master.age` (age scrypt envelope) |
+| macos | macOS Keychain 条目 `alfadb-abrain-master`（文件不存在） |
+| secret-service | Secret Service `service=abrain key=master`（文件不存在） |
+| pass | `~/.password-store/abrain/master.gpg`（`.vault-master.age` 文件不存在） |
+
+unlock helper 读 `.vault-backend` 决定去哪取 master key，不靠文件存在性判断。
+
+#### invariant 6 —— P0b 不同路径的可测证状态
+
+| 路径 | 容器能否 e2e 实测 |
+|---|---|
+| **ssh-key** | ✅ 完整 e2e（alfadb 容器有 ssh key + age + ssh-agent） |
+| gpg-file | ⚠️ 需手工 setup GPG keyring 后能 e2e |
+| passphrase-only | ⚠️ 需 tty 交互，smoke 不走这路径（仅 mock） |
+| macos / secret-service / pass | ❌ 容器不具备环境（smoke mock-only，等真机） |
+
+P0b 交付验收要求：ssh-key 的 e2e roundtrip smoke 走通（生成 → 加密 → 解密 → 比对）。其他 backend 代码需 mock subprocess 验证命令构造正确，真机 e2e 入 P0b acceptance backlog。
+
 ## 4. 首次启动 onboarding flow（v1.4 重写）
 
 pi 启动时首次未检测到初始化过的 vault（`~/.abrain/.vault-backend` 不存在）。**不是选 "init / 跳过"而是选哪个 backend init**——菜单动态生成，只列出该机器上 detection 发现的可用 backend。

@@ -30,6 +30,13 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { detectBackend, formatStatus, type BackendInfo, type DetectDeps } from "./backend-detect";
+import {
+  createInstallTmpDir, generateMasterKey, cleanupInstallDir, execCapture,
+} from "./bootstrap";
+import {
+  encryptMasterKey, writeBackendFile, writePubkeyFile, readBackendFile,
+  type EncryptableBackend, type ExecFn,
+} from "./keychain";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
 
@@ -149,24 +156,187 @@ export default function activate(pi: ExtensionAPI): void {
   if (typeof registry.registerCommand !== "function") return;
 
   registry.registerCommand("vault", {
-    description: "Vault status / control: /vault status",
+    description: "Vault status / control: /vault status | /vault init [--backend=<name>]",
     getArgumentCompletions(prefix: string) {
-      const items = ["status"];
+      const items = [
+        "status",
+        "init",
+        "init --backend=ssh-key",
+        "init --backend=gpg-file",
+        "init --backend=passphrase-only",
+      ];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
-    handler(args: string, ctx: { ui: { notify(message: string, type?: string): void } }): void {
-      const sub = args.trim().split(/\s+/)[0] || "status";
+    async handler(args: string, ctx: { ui: { notify(message: string, type?: string): void } }): Promise<void> {
+      const trimmed = args.trim();
+      const sub = trimmed.split(/\s+/)[0] || "status";
       switch (sub) {
         case "status":
           handleStatus(ctx.ui);
           return;
+        case "init":
+          await handleInit(trimmed.slice("init".length).trim(), ctx.ui);
+          return;
         default:
-          ctx.ui.notify(`/vault: unknown subcommand '${sub}'. Available: status`, "warning");
+          ctx.ui.notify(`/vault: unknown subcommand '${sub}'. Available: status, init`, "warning");
       }
     },
   });
 }
+
+// ── /vault init ─────────────────────────────────────────────────
+//
+// P0b non-interactive form: `/vault init --backend=<name>`. Picks the
+// first auto-detected backend if no --backend flag, but only if that
+// backend is in {ssh-key, gpg-file} (we don't auto-pick passphrase-only
+// or keychain backends — those need explicit user choice).
+// Full TUI onboarding wizard (vault-bootstrap §4) is P0d.
+
+interface InitOptions {
+  backend?: EncryptableBackend;
+  force?: boolean;
+}
+
+function parseInitArgs(args: string): InitOptions {
+  const opts: InitOptions = {};
+  for (const tok of args.split(/\s+/).filter(Boolean)) {
+    const m = tok.match(/^--backend=(.+)$/);
+    if (m) {
+      const v = m[1] as EncryptableBackend;
+      const valid: ReadonlySet<string> = new Set([
+        "ssh-key", "gpg-file", "passphrase-only",
+        "macos", "secret-service", "pass",
+      ]);
+      if (!valid.has(v)) throw new Error(`invalid backend: ${v}`);
+      opts.backend = v;
+      continue;
+    }
+    if (tok === "--force") { opts.force = true; continue; }
+    throw new Error(`unknown init flag: ${tok}`);
+  }
+  return opts;
+}
+
+async function handleInit(rawArgs: string, ui: { notify(message: string, type?: string): void }): Promise<void> {
+  // Idempotent guard: if vault already initialized, refuse without --force.
+  const existing = readBackendFile(ABRAIN_HOME);
+  if (existing) {
+    ui.notify(
+      `vault already initialized (backend=${existing.backend}). Use \`/vault init --force\` to re-init.`,
+      "warning",
+    );
+    // Note: --force not yet supported; intentional minimum scope for P0b.
+    return;
+  }
+
+  let opts: InitOptions;
+  try {
+    opts = parseInitArgs(rawArgs);
+  } catch (err: any) {
+    ui.notify(`/vault init: ${err.message}`, "warning");
+    return;
+  }
+
+  // Resolve backend + identity
+  let backend: EncryptableBackend;
+  let identity: string | undefined;
+  if (opts.backend) {
+    backend = opts.backend;
+    // For ssh-key / gpg-file, fill identity from detection if user didn't override
+    const detected = detectBackend(buildRealDeps());
+    if (backend === "ssh-key") {
+      if (detected.backend === "ssh-key") identity = detected.identity;
+      else if (detected.backend === "env-override" && detected.overrideTarget === "ssh-key") identity = detected.identity;
+      else identity = `${os.homedir()}/.ssh/id_ed25519`; // best guess
+    } else if (backend === "gpg-file") {
+      if (detected.backend === "gpg-file") identity = detected.gpgRecipient;
+      else throw new Error("gpg-file requested but no GPG secret key detected. install / import GPG identity first.");
+    }
+  } else {
+    // No --backend flag: auto-pick from detection, but only ssh-key or gpg-file
+    const detected = detectBackend(buildRealDeps());
+    if (detected.backend === "ssh-key") {
+      backend = "ssh-key";
+      identity = detected.identity;
+    } else if (detected.backend === "gpg-file") {
+      backend = "gpg-file";
+      identity = detected.gpgRecipient;
+    } else {
+      ui.notify(
+        `/vault init: cannot auto-pick backend (detected '${detected.backend}'). ` +
+        `Pass --backend=<name> explicitly. P0b non-interactive form supports ssh-key / gpg-file auto-pick.`,
+        "warning",
+      );
+      return;
+    }
+  }
+
+  await runInit(backend, identity, ui);
+}
+
+/**
+ * Execute the §3 transactional flow. Used by handleInit but exported as a
+ * pure function so smoke can drive it without TUI ceremony.
+ */
+export async function runInit(
+  backend: EncryptableBackend,
+  identity: string | undefined,
+  ui: { notify(message: string, type?: string): void },
+  exec: ExecFn = realExec,
+  abrainHome: string = ABRAIN_HOME,
+): Promise<{ publicKey: string; warnings: string[] }> {
+  // (0) install tmp
+  fs.mkdirSync(abrainHome, { recursive: true });
+  const installTmp = createInstallTmpDir(abrainHome);
+  let warnings: string[] = [];
+  let publicKey = "";
+
+  try {
+    // (1) age-keygen
+    ui.notify("generating age master keypair...", "info");
+    const { secretKeyPath, publicKey: pub } = await generateMasterKey(installTmp);
+    publicKey = pub;
+    ui.notify(`master public key: ${pub}`, "info");
+
+    // (2) backend.encrypt
+    const vaultMasterEncryptedPath = path.join(abrainHome, ".vault-master.age");
+    const isFileBackend = backend === "ssh-key" || backend === "gpg-file" || backend === "passphrase-only";
+
+    // Defense: file-backend output must not pre-exist (avoid silent overwrite)
+    if (isFileBackend && fs.existsSync(vaultMasterEncryptedPath)) {
+      throw new Error(
+        `${vaultMasterEncryptedPath} already exists. Refusing to overwrite. ` +
+        `Run \`rm ${vaultMasterEncryptedPath}\` first if you really want to re-init.`,
+      );
+    }
+
+    ui.notify(`encrypting master key via backend=${backend}...`, "info");
+    await encryptMasterKey(backend, {
+      masterSecretPath: secretKeyPath,
+      masterPublicKey: publicKey,
+      identity,
+      vaultMasterEncryptedPath,
+      user: process.env.USER,
+    }, exec);
+
+    // (3) write .vault-pubkey + .vault-backend (atomic, both files)
+    writePubkeyFile(abrainHome, publicKey);
+    writeBackendFile(abrainHome, { backend, identity });
+  } finally {
+    // (4) cleanup ALWAYS — secret must not survive an error
+    warnings = await cleanupInstallDir(installTmp);
+  }
+
+  for (const w of warnings) ui.notify(`vault init warning: ${w}`, "warning");
+  ui.notify(`vault initialized (backend=${backend}). Run /vault status to verify.`, "info");
+  return { publicKey, warnings };
+}
+
+// Real exec impl wrapping execCapture from bootstrap (re-exported for runInit default)
+const realExec: ExecFn = async (cmd, args, opts) => {
+  return execCapture(cmd, args, opts);
+};
 
 function handleStatus(ui: { notify(message: string, type?: string): void }): void {
   const status = getVaultStatus();

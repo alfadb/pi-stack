@@ -353,9 +353,20 @@ check("formatStatus(any, vaultDisabledFlag=true) shows user-disabled state", () 
 const detectFile = path.join(tmpDir, "backend-detect.cjs");
 fs.writeFileSync(detectFile, detectCompiled);
 
+// index.ts now imports ./bootstrap and ./keychain too (added in P0b).
+// All three relative imports must be rewritten to .cjs paths so the
+// transpiled CJS module can resolve them in the smoke tmp dir.
+const bootstrapSrc = path.join(repoRoot, "extensions/abrain/bootstrap.ts");
+const keychainSrc = path.join(repoRoot, "extensions/abrain/keychain.ts");
+fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), transpileTsToCjs(bootstrapSrc));
+fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc));
+
 const indexSrc = path.join(repoRoot, "extensions/abrain/index.ts");
 let indexCompiled = transpileTsToCjs(indexSrc);
-indexCompiled = indexCompiled.replace(/require\("\.\/backend-detect"\)/g, 'require("./backend-detect.cjs")');
+indexCompiled = indexCompiled
+  .replace(/require\("\.\/backend-detect"\)/g, 'require("./backend-detect.cjs")')
+  .replace(/require\("\.\/bootstrap"\)/g, 'require("./bootstrap.cjs")')
+  .replace(/require\("\.\/keychain"\)/g, 'require("./keychain.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);
 const indexModule = require(indexFile);
