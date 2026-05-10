@@ -421,7 +421,7 @@ vault-bootstrap 完成后必须验证。**按 backend 分类，只验证该 host
 - [ ] `vault forget test-key` rm 加密文件 + 后续 `$VAULT_test_key` 报 not-found
 - [ ] **sub-pi 隔离**：`scripts/smoke-vault-subpi-isolation.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 dispatch spawn 生效）
 - [ ] **sub-pi extension guard**：`scripts/smoke-abrain-backend-detect.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 abrain extension activate 顶部生效，registerCommand 零次调用）
-- [ ] vault 文件全部 .gitignored（`git status` 干净）——`.vault-master.age` 除外（v1.4）：ss-key/gpg-file 路径下此文件是加密的，**可以**随 abrain 一起 git push 备份（ssh/gpg key 本身不上 git）
+- [ ] vault 文件全部 .gitignored（`git status` 干净）——`.vault-master.age` 除外（v1.4）：ssh-key/gpg-file 路径下此文件是加密的，**可以**随 abrain 一起 git push 备份（ssh/gpg key 本身不上 git）
 
 ### Tier 2 optimization 验收（仅在该 backend 上 host 实际可用时走）
 

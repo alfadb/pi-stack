@@ -70,11 +70,11 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 - **全局 vault** `~/.abrain/vault/`：跨项目通用秘密（github-token、API keys、ssh-key、私人事项）
 - **项目级 vault** `~/.abrain/projects/<id>/vault/`：仅与某项目相关（prod-db-password 等）
 - **加密**：age 单文件，单一 master key（全局与所有项目共享，避免管理 N+1 把 key）
-- **解锁**（v1.4 重写）：依赖**用户已有的便携加密 identity** —— ssh-key (Tier 1 primary) / gpg-file (Tier 1) / passphrase (Tier 1 fallback) 三者覆盖几乎所有 dev 用户。OS keychain (macOS / secret-service / pass) 降为 Tier 2 optimization（有则用，没有也正常运行）。**容器场景**（alfadb 主开发环境）从 v1.3 的 "不支持 vault" 升 为 first-class（ssh-key 路径 OOTB 工作）。auto-unlock 等价物：ss-agent / gpg-agent cache TTL。详 [vault-bootstrap.md §1](../migration/vault-bootstrap.md#1-平台支持矩阵v14-重写)。
+- **解锁**（v1.4 重写）：依赖**用户已有的便携加密 identity** —— ssh-key (Tier 1 primary) / gpg-file (Tier 1) / passphrase (Tier 1 fallback) 三者覆盖几乎所有 dev 用户。OS keychain (macOS / secret-service / pass) 降为 Tier 2 optimization（有则用，没有也正常运行）。**容器场景**（alfadb 主开发环境）从 v1.3 的 "不支持 vault" 升 为 first-class（ssh-key 路径 OOTB 工作）。auto-unlock 等价物：ssh-agent / gpg-agent cache TTL。详 [vault-bootstrap.md §1](../migration/vault-bootstrap.md#1-平台支持矩阵v14-重写)。
 - **明文不进 LLM context**（默认）：需 `vault_release` 工具调用 + TUI 授权（once/session/no/deny+remember 四档）
 - **bash 注入**：`$VAULT_<key>` 解析顺序为 active project's vault → global vault；项目级覆盖全局
 - **stdout/stderr redaction**：主进程在 bash 结果回流前做 best-effort 字面 match 替换为 `<vault:<scope>:<key>>`
-- **不进 git**：`vault/*` 与 `projects/*/vault/*` 全部 .gitignore；`vault forget` 直接 rm 加密文件，无 history 残留。**例外**（v1.4）：ss-key/gpg-file backend 下 `~/.abrain/.vault-master.age` 本身是已加密文件，**可以**随 abrain 一起 git push 备份——作为跨设备同步手段。ssh/gpg secret key 本身不上 git（由用户本身管理）。
+- **不进 git**：`vault/*` 与 `projects/*/vault/*` 全部 .gitignore；`vault forget` 直接 rm 加密文件，无 history 残留。**例外**（v1.4）：ssh-key/gpg-file backend 下 `~/.abrain/.vault-master.age` 本身是已加密文件，**可以**随 abrain 一起 git push 备份——作为跨设备同步手段。ssh/gpg secret key 本身不上 git（由用户本身管理）。
 
 ### D5. 多 pi 进程共享 brain（无主体 / 无分身 / 无队列）
 
