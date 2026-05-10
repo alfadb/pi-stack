@@ -186,7 +186,7 @@ memory_search(query: "dispatch agent prompt")
 - lock：`.pi-astack/sediment/locks/sediment.lock`，超时可配置
 - write：tmp → rename 原子写入 markdown
 - git：best-effort `git add` + `git commit`，失败不回滚 markdown
-- audit：追加 `.pi-astack/sediment/audit.jsonl`（v2 schema：本地 TZ 时间戳 + audit_version + pid + project_root + settings_snapshot + entry_breakdown + parser_version + stage_ms；从 `.pensieve/.state/sediment-events.jsonl` 在首次 appendAudit 调用时自动迁移）
+- audit：追加 `.pi-astack/sediment/audit.jsonl`（v2 schema：本地 TZ 时间戳 + audit_version + pid + project_root；agent_end 汇总行额外带 lane + settings_snapshot + entry_breakdown + parser_version + stage_ms + candidates/results/curator/llm；从 `.pensieve/.state/sediment-events.jsonl` 在首次 appendAudit 调用时自动迁移）。auto-write / explicit write 不暴露 human dry-run 命令，故障诊断由 LLM 读取 audit + git history 完成。
 
 已完成 deterministic extractor stub：
 - 仅识别显式 block，不从普通对话中猜测
@@ -244,17 +244,11 @@ memory_search(query: "dispatch agent prompt")
 
 **当前验收**：
 ```text
-/sediment window --dry-run
-# → 返回 checkpoint/run-window stats，不推进 checkpoint
-
-/sediment extract --dry-run
-# → 对当前 checkpoint window 解析显式 MEMORY blocks，但不写 markdown/不推进 checkpoint
+# auto-write / explicit write 的诊断不再暴露 human dry-run 命令；
+# 出问题后由 LLM 读取 .pi-astack/sediment/audit.jsonl + git history 诊断。
 
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果
-
-/sediment smoke --dry-run
-# → 返回将写入的 slug/path/lint/dedupe 结果，但不写 markdown
 
 /sediment migrate-one --plan .pensieve/short-term/maxims/example.md
 # → 预览单个 legacy 文件将生成的 target/actions/lint/frontmatter/body preview，不写入

@@ -92,7 +92,7 @@ UPDATE / MERGE existing memory
 ### Phase 2 — Full memory ops
 
 - `merge` 已有 first-class substrate：更新 target compiled truth + `derives_from`，并 archive 非 target sources；supersede 当前支持 old_slug + optional existing new_slug，不负责自动创建 replacement。
-- 不暴露 `/sediment curate --dry-run`：slash command 是 human-facing，不会被主会话 LLM 自动调用；用户也不需要手动预览。curator 只作为 live sidecar，观测/回滚依赖 audit + git。
+- 不暴露 auto-write / curator / explicit-extract 的 human dry-run 命令：slash command 不是 LLM-facing tool，主会话 LLM 不会自动调用，用户也不需要手动预览。curator 只作为 live sidecar，诊断/回滚依赖 audit + git。
 - 自动 apply 仍只在 safety/storage gates 通过后执行。
 
 ## Consequences
@@ -114,9 +114,9 @@ UPDATE / MERGE existing memory
 缓解：
 
 - secret gate 和 storage gate 仍 fail-closed；
-- 所有 operation 写 audit + git commit，可回滚；
+- 所有 operation 写 audit + git commit，可回滚；audit 是给 LLM 诊断的主界面，记录 lane、window/checkpoint summary、settings snapshot、entry breakdown、candidate/result、curator neighbors/decision、LLM summary、stage timings；
 - delete 默认 soft；hard delete 默认不用，只在 secret/junk/用户明确要求时启用；
-- Phase 1/2 已支持 create/update/merge/archive/supersede/delete/skip；manual curator dry-run command deliberately not exposed.
+- Phase 1/2 已支持 create/update/merge/archive/supersede/delete/skip；manual sediment dry-run commands deliberately not exposed.
 
 ## Implementation notes
 

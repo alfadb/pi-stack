@@ -151,9 +151,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window/extract/dedupe/migration-backups/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
+    description: "Sediment status/dedupe/migration-backups/migrate-one: /sediment status, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "extract --dry-run", "dedupe --title ", "migration-backups", "migration-backups --limit ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
+      const items = ["status", "dedupe --title ", "migration-backups", "migration-backups --limit ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore "];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -176,37 +176,6 @@ function registerSedimentCommand(pi: ExtensionAPI) {
           ].join("\n"),
           "info",
         );
-        return;
-      }
-
-      if (subcommand === "window") {
-        if (!rest.includes("--dry-run")) {
-          ctx.ui.notify("Usage: /sediment window --dry-run", "warning");
-          return;
-        }
-        if (!ctx.sessionManager?.getBranch) {
-          ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
-          return;
-        }
-        const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
-        const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
-        ctx.ui.notify(JSON.stringify(checkpointSummary(window), null, 2), window.skipReason ? "warning" : "info");
-        return;
-      }
-
-      if (subcommand === "extract") {
-        if (!rest.includes("--dry-run")) {
-          ctx.ui.notify("Usage: /sediment extract --dry-run", "warning");
-          return;
-        }
-        if (!ctx.sessionManager?.getBranch) {
-          ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
-          return;
-        }
-        const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
-        const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
-        const drafts = window.skipReason ? [] : parseExplicitMemoryBlocks(window.text);
-        ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), extraction: previewExtraction(drafts) }, null, 2), drafts.length > 0 ? "warning" : "info");
         return;
       }
 
@@ -264,24 +233,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      if (subcommand === "smoke") {
-        if (!rest.includes("--dry-run")) {
-          ctx.ui.notify("Usage: /sediment smoke --dry-run (apply is intentionally not exposed)", "warning");
-          return;
-        }
-        const result = await writeProjectEntry({
-          title: "sediment writer smoke test",
-          kind: "fact",
-          status: "provisional",
-          confidence: settings.defaultConfidence,
-          compiledTruth: "# Sediment Writer Smoke Test\n\nThis dry-run validates project-only writer plumbing without writing markdown.",
-          timelineNote: "dry-run smoke test",
-        }, { projectRoot: cwd, settings, dryRun: true });
-        ctx.ui.notify(JSON.stringify(result, null, 2), result.status === "rejected" ? "error" : "info");
-        return;
-      }
-
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes", "warning");
     },
   });
 }
@@ -388,6 +340,7 @@ export default function (pi: ExtensionAPI) {
     if (!sessionId) {
       await appendAudit(cwd, {
         operation: "skip",
+        lane: "system",
         reason: "ephemeral_session",
         ephemeral_session: true,
         branch_size: branch.length,
@@ -421,6 +374,7 @@ export default function (pi: ExtensionAPI) {
     if (unhealthyStopReason) {
       await appendAudit(cwd, {
         operation: "skip",
+        lane: "system",
         reason: unhealthyStopReason,
         session_id: sessionId,
         branch_size: branch.length,
@@ -450,6 +404,7 @@ export default function (pi: ExtensionAPI) {
       if (window.lastEntryId) await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
       await appendAudit(cwd, {
         operation: "skip",
+        lane: "window",
         reason: window.skipReason ?? "no_last_entry",
         session_id: sessionId,
         ...summary,
@@ -496,6 +451,7 @@ export default function (pi: ExtensionAPI) {
         await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
         await appendAudit(cwd, {
           operation: "skip",
+          lane: "auto_write",
           reason: "auto_write_inflight_skip",
           session_id: sessionId,
           ...summary,
@@ -536,6 +492,7 @@ export default function (pi: ExtensionAPI) {
           if (auto.kind === "wrote") {
             await appendAudit(cwd, {
               operation: "auto_write",
+              lane: "auto_write",
               session_id: sessionId,
               ...summary,
               extractor: "llm_extractor",
@@ -544,7 +501,7 @@ export default function (pi: ExtensionAPI) {
               entry_breakdown: entryBreakdown,
               candidate_count: auto.drafts.length,
               candidates: auto.drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
-              results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, deleteMode: r.deleteMode, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, gitCommit: r.gitCommit })),
+              results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, deleteMode: r.deleteMode, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, validationErrors: r.validationErrors, duplicate: r.duplicate, sanitizedReplacements: r.sanitizedReplacements, gitCommit: r.gitCommit })),
               curator: auto.curatorAudits,
               llm: auto.llmAuditSummary,
               raw_text: auto.rawTextStored,
@@ -580,6 +537,7 @@ export default function (pi: ExtensionAPI) {
 
           await appendAudit(cwd, {
             operation: "skip",
+            lane: "auto_write",
             reason: auto.kind === "ineligible" ? auto.eligibility.reason ?? "auto_write_ineligible"
                   : auto.kind === "llm_skip"   ? "llm_returned_skip"
                   : auto.kind === "llm_error"  ? "llm_extraction_error"
@@ -614,8 +572,14 @@ export default function (pi: ExtensionAPI) {
           try {
             await appendAudit(cwd, {
               operation: "skip",
+              lane: "auto_write",
               reason: "auto_write_bg_threw",
               session_id: sessionId,
+              ...summary,
+              extractor: "llm_extractor",
+              parser_version: PARSER_VERSION,
+              settings_snapshot: settingsSnapshot,
+              entry_breakdown: entryBreakdown,
               error: err?.message ?? String(err),
               checkpoint_advanced: true,
               background_async: true,
@@ -658,6 +622,7 @@ export default function (pi: ExtensionAPI) {
     if (shouldAdvance) await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
     await appendAudit(cwd, {
       operation: "explicit_extract",
+      lane: "explicit",
       session_id: sessionId,
       ...summary,
       extractor: "explicit_marker",
@@ -666,7 +631,7 @@ export default function (pi: ExtensionAPI) {
       entry_breakdown: entryBreakdown,
       candidate_count: drafts.length,
       candidates: drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
-      results: results.map((result) => ({ status: result.status, slug: result.slug, reason: result.reason, path: result.path, lintErrors: result.lintErrors, lintWarnings: result.lintWarnings, gitCommit: result.gitCommit })),
+      results: results.map((result) => ({ status: result.status, slug: result.slug, reason: result.reason, path: result.path, lintErrors: result.lintErrors, lintWarnings: result.lintWarnings, validationErrors: result.validationErrors, duplicate: result.duplicate, sanitizedReplacements: result.sanitizedReplacements, gitCommit: result.gitCommit })),
       stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: tWriteEnd - tWriteStart, total: Date.now() - tStart },
       checkpoint_advanced: shouldAdvance,
     });
