@@ -111,11 +111,12 @@
 
 **状态**：迁移完成（2026-05-08）。~/.pi 父仓 173 → 0 pending，14 batch，所有 commit 逆向可追。batch apply CLI 按原计划**不再追加**（详见 [apply-checklist.md](./apply-checklist.md) Status 段）。
 
-### Phase 1.3 — memory_search（grep-based）
+### Phase 1.3 — memory_search（ADR 0015 LLM-driven；grep 为 fallback）
 
-**实现状态（2026-05-08）**：`extensions/memory/search.ts` + `parser.ts` 已实现检索/读取逻辑，`extensions/memory/index.ts` 注册 `memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 四个只读工具。
+**实现状态（2026-05-08 grep baseline；2026-05-10 ADR 0015 Phase 0/1）**：`extensions/memory/search.ts` + `parser.ts` 保留 legacy grep+tf-idf fallback；`extensions/memory/llm-search.ts` 实现双阶段 LLM retrieval；`extensions/memory/index.ts` 注册 `memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 四个只读工具，且 `memory_search` 默认走 LLM 路径（`MEMORY_SEARCH_GREP_ONLY=1` 强制回退）。详见 [ADR 0015](../adr/0015-memory-search-llm-driven-retrieval.md) + [memory-search-llm-upgrade.md](./memory-search-llm-upgrade.md)。
 
-- rg 文件发现 + per-file tf-idf 评分 + title/slug boost
+- 默认：stage1 从内存生成的 enhanced index 选 top-K 候选；stage2 读取候选完整 compiled_truth + timeline 精排
+- fallback：rg 文件发现 + per-file tf-idf 评分 + title/slug boost
 - project 层为主；`ABRAIN_ROOT` / `~/.abrain` 存在时可选只读扫描 world 层
 - 默认排除 status=archived
 - `memory_search` 返回 LLM-facing schema（bare slug, 不含 scope/backend/source_path）
@@ -131,7 +132,7 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 1.3a — `_index.md` generated markdown index
 
-**实现状态（2026-05-08）**：`extensions/memory/index-file.ts` 已实现 generated `_index.md` builder，`extensions/memory/index.ts` 注册 human-facing slash command `/memory rebuild --index [path]`。
+**实现状态（2026-05-08 baseline；2026-05-10 enhanced for ADR 0015）**：`extensions/memory/index-file.ts` 已实现 generated `_index.md` builder，`extensions/memory/index.ts` 注册 human-facing slash command `/memory rebuild --index [path]`。ADR 0015 Phase 0 增强每条 entry 输出 kind/status/confidence/updated/trigger/summary，供 LLM 浏览；runtime search 为避免物理 `_index.md` 过期，直接从 parsed entries 内存生成同形态 index。
 
 - 按 kind 分组，组内按 confidence 降序、updated 降序
 - Recently Updated top 10

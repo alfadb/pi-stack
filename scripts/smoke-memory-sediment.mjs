@@ -82,6 +82,32 @@ exports.Type = {
 };
 `);
 
+  // Minimal pi-ai subset for ADR 0015 memory_search LLM-path smoke. Dynamic
+  // import('@earendil-works/pi-ai') from transpiled CommonJS sees these named
+  // exports; no real model call is made.
+  writeFile(path.join(outRoot, "node_modules", "@earendil-works", "pi-ai", "index.js"), `
+exports.__calls = [];
+exports.streamSimple = (_model, opts) => {
+  const prompt = opts && opts.messages && opts.messages[0] && opts.messages[0].content && opts.messages[0].content[0] && opts.messages[0].content[0].text || '';
+  let text;
+  if (prompt.includes('MEMORY_SEARCH_CANDIDATES')) {
+    exports.__calls.push('memory-search-stage2');
+    text = '[{"slug":"alpha","score":10,"why":"direct match"}]';
+  } else if (prompt.includes('MEMORY_SEARCH_INDEX')) {
+    exports.__calls.push('memory-search-stage1');
+    text = '[{"slug":"alpha","reason":"title and summary match"}]';
+  } else if (globalThis.__A2_RESPONSES__) {
+    // Later A2 tests overwrite the stub file, but dynamic import may have
+    // cached this module already. Honor the A2 globals here too.
+    text = (globalThis.__A2_RESPONSES__ || [])[globalThis.__A2_INVOCATIONS__++] || 'SKIP';
+    globalThis.__A2_LAST_PROMPT__ = prompt;
+  } else {
+    text = 'SKIP';
+  }
+  return { result: async () => ({ stopReason: 'stop', content: [{ type: 'text', text }] }) };
+};
+`);
+
   return count;
 }
 
@@ -227,6 +253,8 @@ async function main() {
     writeFile(path.join(root, ".pensieve", "staging", "beta.md"), makeEntry({ title: "Beta Smell", kind: "smell", status: "provisional", confidence: 2 }));
 
     const search = tools.get("memory_search");
+    const prevGrepOnly = process.env.MEMORY_SEARCH_GREP_ONLY;
+    process.env.MEMORY_SEARCH_GREP_ONLY = "1";
     const searchRaw = await search.execute("smoke", search.prepareArguments({ query: "dispatch facade", limit: 2 }), new AbortController().signal, null, { cwd: root });
     // memory tools wrap results in ToolResult envelope { content: [{ type, text }], isError? }
     // since commit 7f2b5d8 (fix(memory): wrap tool results in ToolResult shape).
@@ -235,6 +263,20 @@ async function main() {
     assert(Array.isArray(searchRaw?.content) && searchRaw.content[0]?.type === "text", "memory_search envelope shape regressed (expected { content: [{type:'text', text}] })");
     const searchRes = JSON.parse(searchRaw.content[0].text);
     assert(Array.isArray(searchRes) && searchRes.length >= 1 && searchRes[0].slug === "alpha", `memory_search failed: ${JSON.stringify(searchRes)}`);
+    if (prevGrepOnly === undefined) delete process.env.MEMORY_SEARCH_GREP_ONLY;
+    else process.env.MEMORY_SEARCH_GREP_ONLY = prevGrepOnly;
+
+    // ADR 0015 smoke: default memory_search path should call the two-stage LLM
+    // reranker when a modelRegistry is available, and return the same normalized
+    // ToolResult envelope shape.
+    const mockModelRegistry = {
+      find(provider, id) { return { provider, id }; },
+      async getApiKeyAndHeaders() { return { ok: true, apiKey: "smoke-key" }; },
+    };
+    const llmSearchRaw = await search.execute("smoke-llm", search.prepareArguments({ query: "知识沉淀 prompt", limit: 2 }), new AbortController().signal, null, { cwd: root, modelRegistry: mockModelRegistry });
+    assert(!llmSearchRaw.isError, `memory_search LLM path returned isError envelope: ${JSON.stringify(llmSearchRaw)}`);
+    const llmSearchRes = JSON.parse(llmSearchRaw.content[0].text);
+    assert(Array.isArray(llmSearchRes) && llmSearchRes.length === 1 && llmSearchRes[0].slug === "alpha" && llmSearchRes[0].score === 1, `memory_search LLM path failed: ${JSON.stringify(llmSearchRes)}`);
 
     const graph = await rebuildGraphIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "graph.json not written");

@@ -354,6 +354,8 @@ P3 实施阶段必须交付一组路由 fixture（正反例各 5-10 条）覆盖
 
 这些系数是 baseline，可通过 `~/.abrain/.state/facade-config.yaml` 调。insertion point：在 RRF 融合**之前**对每个 backend 的原始得分乘 boost，不是融合后 rescore——这保持与 [memory-architecture.md §7](memory-architecture.md) 的 RRF 抽象一致。
 
+> **ADR 0015 update（2026-05-10）**：当前 Phase 1 实现尚未启用七区物理拓扑，因此 `memory_search` 默认先在 parsed entries 上构造 enhanced index，再用双阶段 LLM retrieval 做候选选择与精排。上表 boost 系数仍是 facade ranking policy 的目标形态；当 active/other/about-me surface 物理路由启用后，系数作为 stage1/stage2 prompt 的 ranking hint 或 pre-score 特征输入，而不是暴露给 LLM 作为 scope selector。
+
 ### 4.2 Vault redaction 规则
 
 | 命中内容 | facade 返回 |
@@ -369,7 +371,7 @@ P3 实施阶段必须交付一组路由 fixture（正反例各 5-10 条）覆盖
 memory_search(query)
 ```
 
-**签名无 `scope` 形参**。三个 surface 的混合排序完全在 facade 内决定（§4.1 boost 系数）。
+**签名无 `scope` 形参**。三个 surface 的混合排序完全在 facade 内决定（§4.1 boost 系数）。ADR 0015 之后，`query` 语义扩展为自然语言 prompt 或关键词，内部由 LLM 跨中英文/同义改述做语义匹配；schema 仍不暴露 scope/backend/source_path。
 
 > **为什么不暴露 scope**：Round 3 复核 Opus P0-3 指出——只要 `scope` 出现在 schema 里，LLM 在召回压力下必会传（“为了准确你只看当前项目吧”），facade 的 ranking 控制权悸然外迁。不变量 #3 为此出在每个 ranking surface 升级为硬约束。
 

@@ -11,7 +11,7 @@
 > **v7.1 update (2026-05-09, [ADR 0014](./docs/adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](./docs/brain-redesign-spec.md)):** `~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑——七区结构（identity / skills / habits / workflows / projects / knowledge / vault）。`.pensieve/` 物理位置废止，项目知识 Phase 2 起将迁入 `~/.abrain/projects/<id>/`（迁移计划见 [migration/abrain-pensieve-migration.md](./docs/migration/abrain-pensieve-migration.md)）。新增 Lane G（about-me）+ Lane V（vault declare）；`extensions/abrain/` 已落地 vault P0a-c 子集（`/secret` + `/vault` 命令，age 加密 + portable identity backend）。
 >
 > 历史架构演进：v6.5（gbrain 唯一存储 + 三模型投票）→ v6.6（单 agent + lookup tools）→ v6.7（双轨 gbrain sources）
-> → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）→ v7.1（abrain 重定位为数字孪生）**。详见 [docs/adr/](./docs/adr/) 15 条 ADR（含刚提出的 [ADR 0015](./docs/adr/0015-memory-search-llm-driven-retrieval.md) memory_search LLM-driven retrieval，未实施）。
+> → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）→ v7.1（abrain 重定位为数字孪生）**。详见 [docs/adr/](./docs/adr/) 15 条 ADR（含 [ADR 0015](./docs/adr/0015-memory-search-llm-driven-retrieval.md) memory_search LLM-driven retrieval；Phase 0/1 已实现，sediment semantic dedupe Phase 2 待 burn-in）。
 
 ## 是什么
 
@@ -99,7 +99,7 @@ pi install git:github.com/alfadb/pi-astack
 
 ### Extensions（pi 行为扩展）
 - `dispatch/` — subprocess-based `dispatch_agent` / `dispatch_agents`（主会话自由组合）；每个子 agent 是独立 pi 进程，OS 级隔离（ADR 0009）。子进程 env 强制注入 `PI_ABRAIN_DISABLED=1` 让 abrain extension 在 sub-pi 中 register nothing（brain-redesign-spec v1.3 P0-1）
-- `memory/` — ✅ 主会话记忆 read tool（`memory_search/get/list/neighbors`），Facade 模式封装；只读扫描 `.pensieve/` + 可选 `~/.abrain/`；另含 human slash commands `/memory doctor-lite`、`/memory lint`、`/memory migrate --dry-run [--report]`、`/memory check-backlinks`、`/memory rebuild --graph`、`/memory rebuild --index`
+- `memory/` — ✅ 主会话记忆 read tool（`memory_search/get/list/neighbors`），Facade 模式封装；`memory_search` 默认走 ADR 0015 双阶段 LLM retrieval（stage1候选 + stage2精排，可用 `MEMORY_SEARCH_GREP_ONLY=1` 回退 grep）；只读扫描 `.pensieve/` + 可选 `~/.abrain/`；另含 human slash commands `/memory doctor-lite`、`/memory lint`、`/memory migrate --dry-run [--report]`、`/memory check-backlinks`、`/memory rebuild --graph`、`/memory rebuild --index`
 - `abrain/` — ✅ vault P0a-c 子集（ADR 0014 §D4）：`/vault status` / `/vault init [--backend=X]` + `/secret set/list/forget --global <key>=<value>`。Backend detection 优先级 ssh-key → gpg-file → macos → secret-service → pass → passphrase-only → disabled（[vault-bootstrap.md](./docs/migration/vault-bootstrap.md) v1.4 portable-identity 矩阵；容器场景头号 first-class）。Master key（`~/.abrain/.vault-master.age`）用 age 加密给 portable identity；vault writer 不接触明文 master key，全部加密走 `~/.abrain/.vault-pubkey`。当前仅 global vault；项目级 vault + Lane V `vault_release` LLM tool 等 deferred。详 [brain-redesign-spec.md §6](./docs/brain-redesign-spec.md)
 - `imagine/` — ✅ `imagine(prompt, size?, quality?, style?)` tool，OpenAI Responses API 生图（`gpt-image-2`）；PNG 落 `.pi-astack/imagine/`，调用方支持图片输入则 inline 返回
 - `vision/` — ✅ `vision(imageBase64? | path?, prompt)` tool，自动从可用 provider 选最佳 vision-capable 模型；用于当前模型不支持图片输入时降级

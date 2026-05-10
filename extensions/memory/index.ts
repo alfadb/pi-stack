@@ -13,6 +13,7 @@ import { asBoolean, asNumber, resolveSettings } from "./settings";
 import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./types";
 import { loadEntries } from "./parser";
 import { findEntry, listEntries, neighbors, searchEntries, serializeEntry } from "./search";
+import { llmSearchEntries, shouldUseGrepSearch } from "./llm-search";
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "./migrate";
 import { formatDoctorLiteReport, runDoctorLite } from "./doctor";
@@ -182,15 +183,20 @@ export default function (pi: ExtensionAPI) {
     name: "memory_search",
     label: "Search Memory",
     description:
-      "Search markdown memory using the unified read-only Facade. " +
+      "Search markdown memory using natural-language prompts or keywords via the unified read-only Facade. " +
+      "Internally uses ADR 0015 two-stage LLM rerank by default (stage 1 candidate selection from memory index, stage 2 full-content rerank) " +
+      "so Chinese-English mixed queries, semantic paraphrases, trigger phrases, and timeline-aware relevance work. " +
       "Searches current project .pensieve/ and, when configured/present, ~/.abrain/. " +
       "Returns normalized cards without scope/backend/source_path so the LLM does not choose a backend.",
     promptSnippet: "memory_search(query, filters?: { kinds?, status?, limit? })",
     promptGuidelines: [
       "Use memory_search before planning, designing, reviewing code, or making project-specific decisions.",
+      "Query can be a natural-language prompt or keywords; both are understood semantically.",
+      "Mixed-language queries work: e.g. '知识沉淀 prompt' can match both Chinese and English entries such as sediment/extractor/prompt.",
       "Do not ask for a project/world/backend selector; the Facade merges and ranks results internally.",
       "Search results are summaries. Call memory_get(slug) when you need the full compiled truth or timeline.",
       "Default results exclude archived entries; pass filters.status if the user explicitly asks for archived/deprecated history.",
+      "LLM search hard-errors if its configured model is unavailable; set MEMORY_SEARCH_GREP_ONLY=1 to force legacy grep+tf-idf for debug/temporary fallback.",
     ],
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
@@ -204,10 +210,24 @@ export default function (pi: ExtensionAPI) {
         filters: normalizeSearchFilters(args.filters ?? args),
       };
     },
-    async execute(_id: string, params: SearchParams, signal: AbortSignal, _onUpdate: unknown, ctx: { cwd?: string }) {
+    async execute(_id: string, params: SearchParams, signal: AbortSignal, _onUpdate: unknown, ctx: { cwd?: string; modelRegistry?: unknown }) {
       const settings = resolveSettings();
       const entries = await loadEntries(ctx.cwd, settings, signal);
-      return wrapToolResult(searchEntries(entries, params, settings));
+      if (shouldUseGrepSearch(settings)) {
+        return wrapToolResult(searchEntries(entries, params, settings));
+      }
+      try {
+        return wrapToolResult(await llmSearchEntries(entries, params, settings, ctx.modelRegistry, signal));
+      } catch (err: unknown) {
+        if (settings.search.fallbackToGrep) {
+          return wrapToolResult(searchEntries(entries, params, settings));
+        }
+        return wrapToolResult({
+          ok: false,
+          error: err instanceof Error ? err.message : String(err),
+          hint: "memory_search uses ADR 0015 LLM retrieval by default. Set MEMORY_SEARCH_GREP_ONLY=1 to force legacy grep+tf-idf, or configure memory.search.fallbackToGrep=true for best-effort fallback.",
+        });
+      }
     },
   });
 

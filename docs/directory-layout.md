@@ -59,18 +59,19 @@ alfadb/pi-astack/
 │   │   └── index.ts
 │   ├── model-fallback/                # ✅ 已实现：多模型 fallback 链（旧名 retry-stream-eof）
 │   │   └── index.ts
-│   ├── memory/                        # ✅ 已实现：v7 主会话只读工具 Facade（Phase 1.1-1.3b）
-│   │   ├── index.ts                   # tool/command 注册入口
-│   │   ├── settings.ts                # pi-astack memory 配置读取
+│   ├── memory/                        # ✅ 已实现：v7 主会话只读工具 Facade（Phase 1.1-1.3b + ADR 0015 Phase 0/1 LLM search）
+│   │   ├── index.ts                   # tool/command 注册入口；memory_search 默认路由到 LLM rerank
+│   │   ├── settings.ts                # pi-astack memory 配置读取（含 memory.search.*）
 │   │   ├── types.ts                   # 共享类型
 │   │   ├── utils.ts                   # slug/filter/path helpers
 │   │   ├── parser.ts                  # markdown/frontmatter/parser + store scan
-│   │   ├── search.ts                  # search/list/get/neighbors 逻辑
+│   │   ├── search.ts                  # legacy grep+tf-idf fallback + list/get/neighbors 逻辑
+│   │   ├── llm-search.ts              # ADR 0015 双阶段 LLM retrieval（stage1 candidate + stage2 rerank）
 │   │   ├── lint.ts                    # T1-T10 lint engine
 │   │   ├── doctor.ts                  # doctor-lite aggregate health report
 │   │   ├── migrate.ts                 # legacy migration dry-run planner
 │   │   ├── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
-│   │   └── index-file.ts              # generated _index.md rebuild writer
+│   │   └── index-file.ts              # generated enhanced _index.md rebuild writer
 │   ├── sediment/                      # ✅ 实现：project-only writer + LLM auto-write lane（Phase 1.4 A1+A2+A3）
 │   │   ├── index.ts                   # /sediment 子命令 + agent_end hook + footer status FSM (idle/running/completed/failed) + bg promise tracking
 │   │   ├── settings.ts                # sediment 配置读取
@@ -114,7 +115,7 @@ alfadb/pi-astack/
 | `extensions/imagine/` | ✅ 已实现 | — |
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
-| `extensions/memory/` | ✅ 已实现（只读 Facade + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b |
+| `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
 | `extensions/sediment/` | ✅ 实现（explicit extractor + LLM dry-run + LLM auto-write lane LIVE + migrate-one + status FSM + G2-G13 闸门） | Phase 1.4 A1+A2+A3 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
 | `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + /vault + /secret 命令） | ADR 0014 §D4 (2026-05-09) |

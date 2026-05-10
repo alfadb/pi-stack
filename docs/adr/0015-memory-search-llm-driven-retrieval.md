@@ -1,6 +1,6 @@
 # ADR 0015 — memory_search 升级为双阶段 LLM-driven retrieval
 
-- **状态**：Proposed（2026-05-10）
+- **状态**：Accepted（2026-05-10；Phase 0/1 已实现，Phase 2 sediment semantic dedupe 待 burn-in 后接入）
 - **日期**：2026-05-10
 - **决策者**：alfadb
 - **依赖**：[ADR 0010](0010-sediment-single-agent-with-lookup-tools.md)（lookup-tools loop 设计，本 ADR 落地其内核）/ [memory-architecture.md](../memory-architecture.md) §6（read facade 契约）/ [brain-redesign-spec.md](../brain-redesign-spec.md) §4（cross-project 召回）
@@ -61,9 +61,9 @@ memory_search(query: string /* 自然语言 prompt 或关键词 */, filters?)
 
 ```
 Stage 0 (本地)：
-  read enhanced _index.md（每 entry: slug + title + kind + status +
+  build/read enhanced index（每 entry: slug + title + kind + status +
   confidence + updated + summary + trigger_phrases，~150 token/entry，
-  全库 ~37k tokens）
+  全库 ~37k tokens）。Phase 1 实现为从已解析 entries **内存生成**同形态 index，避免物理 `_index.md` 过期；`/memory rebuild --index` 仍生成同形态 `_index.md` 作为人类/LLM 可浏览 artifact。
 
 Stage 1 (粗排，可配模型，默认 deepseek-v4-flash)：
   输入: query + 全库 _index.md
@@ -149,10 +149,10 @@ ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment writer 在 de
 
 详见 [migration/memory-search-llm-upgrade.md](../migration/memory-search-llm-upgrade.md)：
 
-- **Phase 0**：增强 `_index.md` 格式（30 分钟，纯本地）
-- **Phase 1**：实现 `extensions/memory/llm-search.ts` + 改 `searchEntries` + settings schema（2-3 小时）
-- **Phase 2**：sediment writer 在 dedupe 阶段调新 search（1-2 小时，落地 ADR 0010）
-- **Phase 3**：文档对齐 + ADR 0010 状态从 deferred 升 implemented + 本 ADR 状态 Proposed → Accepted
+- **Phase 0**：增强 `_index.md` 格式（已实现）
+- **Phase 1**：实现 `extensions/memory/llm-search.ts` + tool 路由 + settings schema（已实现）
+- **Phase 2**：sediment writer 在 dedupe 阶段调新 search（待 Phase 1 burn-in 后落地 ADR 0010）
+- **Phase 3**：memory-architecture / brain-redesign-spec 全量文档对齐 + ADR 0010 状态从 deferred 升 implemented
 
 ## 与现有 ADR 的关系
 

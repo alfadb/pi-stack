@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { MemorySettings } from "./settings";
 import type { MemoryEntry, Scope } from "./types";
-import { scanStore } from "./parser";
+import { relationValues, scanStore } from "./parser";
 import { buildGraphSnapshot } from "./graph";
 import { prettyPath } from "./utils";
 import { formatLocalIsoTimestamp } from "../_shared/runtime";
@@ -151,8 +151,49 @@ export async function buildMarkdownIndex(
     }
   }
 
+  // ADR 0015 (memory_search LLM-driven retrieval, Phase 0): emit a per-entry
+  // detail block so stage-1 candidate selection has enough signal
+  // (kind/status/confidence/updated/trigger/summary) without re-reading every
+  // markdown file. Sections above remain the human-facing nav; the Entries
+  // section below is the LLM-facing index.
+  lines.push("", "## Entries", "");
+  for (const kind of sortedKinds) {
+    const group = (groups.get(kind) ?? []).slice().sort(sortByConfidenceThenDate);
+    lines.push(`### ${kindLabel(kind)}`, "");
+    for (const entry of group) {
+      pushEntryDetail(lines, entry);
+    }
+  }
+
   lines.push("");
   return { root, content: lines.join("\n"), entries, orphanSlugs: stagingOrphans.map((entry) => entry.slug) };
+}
+
+function pushEntryDetail(lines: string[], entry: MemoryEntry): void {
+  const safeTitle = entry.title.replace(/\n/g, " ").trim();
+  const meta: string[] = [
+    `kind: ${entry.kind}`,
+    `status: ${entry.status}`,
+    `confidence: ${entry.confidence}`,
+  ];
+  const updated = entry.updated || entry.created;
+  if (updated) meta.push(`updated: ${updated}`);
+
+  const triggers = relationValues(entry.frontmatter.trigger_phrases)
+    .map((t) => t.trim())
+    .filter(Boolean);
+
+  const summary = (entry.summary || "").replace(/\s+/g, " ").trim();
+
+  lines.push(`#### [[${entry.slug}]] — ${safeTitle}`);
+  lines.push(`- ${meta.join(" | ")}`);
+  if (triggers.length > 0) {
+    lines.push(`- trigger: ${JSON.stringify(triggers)}`);
+  }
+  if (summary) {
+    lines.push(`- summary: ${summary}`);
+  }
+  lines.push("");
 }
 
 async function atomicWrite(file: string, content: string) {
