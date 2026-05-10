@@ -51,6 +51,8 @@ export interface ListSecretsResult {
   description?: string;
   /** has the key been forgotten (encrypted file gone but _meta retained)? */
   forgotten: boolean;
+  /** ISO ts of the most recent `forgotten` row in _meta timeline (v1.4.4 dogfood) */
+  forgottenAt?: string;
 }
 
 // ── path resolution ─────────────────────────────────────────────
@@ -398,12 +400,24 @@ export function listSecrets(abrainHome: string, scope: VaultScope): ListSecretsR
 
     let created: string | undefined;
     let description: string | undefined;
+    let forgottenAt: string | undefined;
     try {
       const content = fs.readFileSync(metaPath, "utf8");
       const createdMatch = content.match(/^created:\s*(.+)$/m);
       if (createdMatch) created = createdMatch[1]!.trim();
       const descMatch = content.match(/^description:\s*(.+)$/m);
       if (descMatch) description = descMatch[1]!.trim();
+
+      // Parse the most recent forgotten timeline row (v1.4.4 dogfood):
+      // user expectation is `[forgotten] (since <forgotten ts>)`, not <created>.
+      // Timeline row format: `- <ISO ts> | forgotten | scope=... | by=...`
+      const forgottenLines = content.match(/^- (\S+)\s+\|\s+forgotten\b/gm);
+      if (forgottenLines && forgottenLines.length > 0) {
+        // last match = most recent forgotten ts (rows append-only chronologically)
+        const lastLine = forgottenLines[forgottenLines.length - 1]!;
+        const m = lastLine.match(/^- (\S+)/);
+        if (m) forgottenAt = m[1]!;
+      }
     } catch { /* read failure is non-fatal — return key with minimal metadata */ }
 
     results.push({
@@ -413,6 +427,7 @@ export function listSecrets(abrainHome: string, scope: VaultScope): ListSecretsR
       created,
       description,
       forgotten: !fs.existsSync(encryptedPath),
+      forgottenAt,
     });
   }
   return results;

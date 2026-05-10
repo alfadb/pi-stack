@@ -463,8 +463,16 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
     for (const item of items) {
       const status = item.forgotten ? "  [forgotten]" : "";
       const desc = item.description ? `  — ${item.description}` : "";
-      const created = item.created ? ` (since ${item.created})` : "";
-      lines.push(`  ${item.key}${status}${created}${desc}`);
+      // v1.4.4 dogfood: when forgotten, show `forgotten <ts>` not `since <created>`.
+      // The latter was confusing — user expects to see when the key was forgotten,
+      // not when it was originally created.
+      let timeAnnotation = "";
+      if (item.forgotten && item.forgottenAt) {
+        timeAnnotation = ` forgotten ${item.forgottenAt}`;
+      } else if (item.created) {
+        timeAnnotation = ` (since ${item.created})`;
+      }
+      lines.push(`  ${item.key}${status}${timeAnnotation}${desc}`);
     }
     ui.notify(lines.join("\n"), "info");
     return;

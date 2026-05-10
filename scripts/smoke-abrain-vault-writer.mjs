@@ -246,6 +246,58 @@ await check("listSecrets: marks forgotten=true after forget", async () => {
   if (!item.forgotten) throw new Error("expected forgotten=true");
 });
 
+await check("v1.4.4 dogfood: listSecrets parses forgottenAt from _meta timeline", async () => {
+  // Dogfood-flagged: list output showed `(since <created>)` even when forgotten,
+  // which was confusing. Now listSecrets parses the most recent `forgotten` row's
+  // ts and exposes it as forgottenAt so caller can show it instead.
+  const { home } = freshAbrainHome();
+  await vw.writeSecret({ abrainHome: home, scope: "global", key: "k", value: "v" });
+  // small sleep to ensure forgotten ts > created ts (visible in test)
+  await new Promise((r) => setTimeout(r, 10));
+  await vw.forgetSecret(home, "global", "k");
+  const items = vw.listSecrets(home, "global");
+  const item = items.find((i) => i.key === "k");
+  if (!item) throw new Error("k missing");
+  if (!item.forgottenAt) throw new Error("forgottenAt should be populated after forget");
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(item.forgottenAt)) throw new Error(`forgottenAt not ISO: ${item.forgottenAt}`);
+  if (item.forgottenAt <= item.created) throw new Error(`forgottenAt (${item.forgottenAt}) should be > created (${item.created})`);
+});
+
+await check("v1.4.4 dogfood: forgottenAt absent when not forgotten", async () => {
+  const { home } = freshAbrainHome();
+  await vw.writeSecret({ abrainHome: home, scope: "global", key: "k", value: "v" });
+  const items = vw.listSecrets(home, "global");
+  const item = items.find((i) => i.key === "k");
+  if (item.forgotten) throw new Error("should not be forgotten");
+  if (item.forgottenAt) throw new Error(`forgottenAt should be undefined when not forgotten; got: ${item.forgottenAt}`);
+});
+
+await check("v1.4.4 dogfood: rotate then forget — forgottenAt is the LATEST forget ts (not first)", async () => {
+  // Edge case: a key forgotten, re-created, forgotten again. forgottenAt should
+  // be the most recent forget. (Although in practice forget removes the file so
+  // re-create is allowed — _meta retains the full history.)
+  const { home } = freshAbrainHome();
+  await vw.writeSecret({ abrainHome: home, scope: "global", key: "k", value: "v1" });
+  await new Promise((r) => setTimeout(r, 10));
+  await vw.forgetSecret(home, "global", "k");
+  await new Promise((r) => setTimeout(r, 10));
+  await vw.writeSecret({ abrainHome: home, scope: "global", key: "k", value: "v2" });
+  await new Promise((r) => setTimeout(r, 10));
+  await vw.forgetSecret(home, "global", "k");
+
+  const items = vw.listSecrets(home, "global");
+  const item = items.find((i) => i.key === "k");
+  if (!item.forgottenAt) throw new Error("forgottenAt missing");
+
+  // Read _meta to find both forgotten timestamps
+  const meta = fs.readFileSync(path.join(home, "vault", "_meta", "k.md"), "utf8");
+  const forgetTs = [...meta.matchAll(/^- (\S+)\s+\|\s+forgotten/gm)].map((m) => m[1]);
+  if (forgetTs.length !== 2) throw new Error(`expected 2 forgotten rows, got ${forgetTs.length}`);
+  if (item.forgottenAt !== forgetTs[forgetTs.length - 1]) {
+    throw new Error(`forgottenAt (${item.forgottenAt}) should be most recent (${forgetTs[forgetTs.length - 1]})`);
+  }
+});
+
 await check("forgetSecret: idempotent on already-forgotten key (no encrypted file)", async () => {
   const { home } = freshAbrainHome();
   await vw.writeSecret({ abrainHome: home, scope: "global", key: "k", value: "v" });
