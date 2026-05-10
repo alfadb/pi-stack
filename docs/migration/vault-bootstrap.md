@@ -200,14 +200,16 @@ try {
 
 #### invariant 5 —— keychain backend 与 file backend 差异明确
 
-| Backend | master key 落在 |
-|---|---|
-| ssh-key | `~/.abrain/.vault-master.age` (age envelope) |
-| gpg-file | `~/.abrain/.vault-master.age` (GPG envelope) |
-| passphrase-only | `~/.abrain/.vault-master.age` (age scrypt envelope) |
-| macos | macOS Keychain 条目 `alfadb-abrain-master`（文件不存在） |
-| secret-service | Secret Service `service=abrain key=master`（文件不存在） |
-| pass | `~/.password-store/abrain/master.gpg`（`.vault-master.age` 文件不存在） |
+| Backend | master key 落在 | 预期 mode |
+|---|---|---|
+| ssh-key | `~/.abrain/.vault-master.age` (age envelope) | **0600** |
+| gpg-file | `~/.abrain/.vault-master.age` (GPG envelope) | **0600** |
+| passphrase-only | `~/.abrain/.vault-master.age` (age scrypt envelope) | **0600** |
+| macos | macOS Keychain 条目 `alfadb-abrain-master`（文件不存在） | n/a |
+| secret-service | Secret Service `service=abrain key=master`（文件不存在） | n/a |
+| pass | `~/.password-store/abrain/master.gpg`（`.vault-master.age` 文件不存在） | n/a |
+
+**`.vault-master.age` 严格 0600**（v1.4.1 dogfood 修订）：加密文件本身不是 secret（攻破需 ssh/gpg secret）但 0600 仍是 hygiene——缩小 attack surface。`age -o` / `gpg --output` 默认 mode 跟 umask 相关（例如 container umask=0002 生为 0664 group-readable），**实现必须在 encrypt 后显式 `chmod 0600`**。P0b 初版遗漏（`/vault init --backend=ssh-key` 生成 0664 文件），dogfood 发现后补。
 
 unlock helper 读 `.vault-backend` 决定去哪取 master key，不靠文件存在性判断。
 

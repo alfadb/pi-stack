@@ -93,6 +93,9 @@ export async function encryptMasterKey(
         opts.masterSecretPath,
       ]);
       if (code !== 0) throw new Error(`age -R failed: ${stderr.toString("utf8")}`);
+      // v1.4.1 dogfood fix: age -o respects umask (container umask=0002 → 0664
+      // group-readable). Force 0600 — vault-bootstrap §3.1 inv5 requires it.
+      fs.chmodSync(opts.vaultMasterEncryptedPath, 0o600);
       return;
     }
 
@@ -105,6 +108,8 @@ export async function encryptMasterKey(
         opts.masterSecretPath,
       ]);
       if (code !== 0) throw new Error(`gpg --encrypt failed: ${stderr.toString("utf8")}`);
+      // v1.4.1: same umask issue as ssh-key path
+      fs.chmodSync(opts.vaultMasterEncryptedPath, 0o600);
       return;
     }
 
@@ -118,6 +123,8 @@ export async function encryptMasterKey(
         opts.masterSecretPath,
       ]);
       if (code !== 0) throw new Error(`age -p failed: ${stderr.toString("utf8")}`);
+      // v1.4.1: same umask issue as ssh-key path
+      fs.chmodSync(opts.vaultMasterEncryptedPath, 0o600);
       return;
     }
 

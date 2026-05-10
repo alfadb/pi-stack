@@ -223,6 +223,14 @@ function mockExec() {
       stdinInput: opts.input != null ? Buffer.from(opts.input).toString("utf8") : null,
       cwd: opts.cwd,
     });
+    // Simulate file creation when the mocked command has -o / --output <path>.
+    // Required so post-encrypt chmod (v1.4.1 dogfood fix) finds a real file.
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-o" || args[i] === "--output") {
+        try { fs.writeFileSync(args[i + 1], "mock encrypted content"); } catch {}
+        break;
+      }
+    }
     return { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0), code: 0 };
   };
   return { fn, calls };
@@ -429,6 +437,41 @@ await check("writePubkeyFile + readPubkeyFile roundtrip with mode 0644", () => {
 // This is the test that proves the whole P0b chain works for the
 // alfadb container scenario: real age-keygen, real `age -R` encrypt
 // with a real ssh public key, real `age -d -i` decrypt, byte-compare.
+
+await check("file backends chmod .vault-master.age to 0600 after encrypt (v1.4.1 dogfood fix)", async () => {
+  // The dogfood discovery: age -o respects umask, so on container with umask=0002
+  // the encrypted file lands as 0664 (group/world readable). Force 0600 in keychain.ts.
+  // This smoke covers the ssh-key path; gpg-file and passphrase-only have identical
+  // implementation (verified by visual inspection / future real-host smoke).
+  const sshDir = fs.mkdtempSync(path.join(tmpDir, "ssh-mode-"));
+  const sshKey = path.join(sshDir, "id_ed25519");
+  execFileSync("ssh-keygen", ["-t", "ed25519", "-N", "", "-f", sshKey, "-q"], { stdio: "ignore" });
+  const installDir = bootstrap.createInstallTmpDir(fakeAbrainHome);
+  const realExec = async (cmd, args, opts = {}) => {
+    const r = spawnSync(cmd, args, { input: opts.input, encoding: "buffer" });
+    return { stdout: r.stdout || Buffer.alloc(0), stderr: r.stderr || Buffer.alloc(0), code: r.status };
+  };
+  try {
+    const result = await bootstrap.generateMasterKey(installDir);
+    const encryptedPath = path.join(installDir, "vault-master.age");
+    // Set permissive umask for this test to prove the chmod actually fires
+    const prevUmask = process.umask(0o002);
+    try {
+      await keychain.encryptMasterKey("ssh-key", {
+        masterSecretPath: result.secretKeyPath,
+        masterPublicKey: result.publicKey,
+        identity: sshKey,
+        vaultMasterEncryptedPath: encryptedPath,
+      }, realExec);
+    } finally {
+      process.umask(prevUmask);
+    }
+    const mode = fs.statSync(encryptedPath).mode & 0o777;
+    if (mode !== 0o600) throw new Error(`expected mode 0600, got 0${mode.toString(8)} (umask leak — chmod missing in encryptMasterKey)`);
+  } finally {
+    await bootstrap.cleanupInstallDir(installDir);
+  }
+});
 
 await check("★ ssh-key e2e: real age-keygen → age -R encrypt → age -d -i decrypt → byte-match", async () => {
   // (a) generate a temporary ssh ed25519 keypair (no passphrase for the test)
