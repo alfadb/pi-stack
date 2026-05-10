@@ -575,6 +575,89 @@ for each *.md.age in vault/:
 
 **独立 audit log**：Lane V 走 `~/.abrain/.state/vault-events.jsonl`（不与 sediment-events.jsonl 混）。详见 ADR 0014 §审计扩展。
 
+### 6.4.0.1 P0c.write 实施 invariant（v1.4.3 补，为实现代码准备）
+
+v1.4.3 把 P0c 拆为 **write path** 与 **read path** 两段——理由：vault 写入仅需 `~/.abrain/.vault-pubkey`（明文 age 公钥），**完全不接触 master key plaintext**；只有读（解密 secret）才需 unlock master。这让 write-first 实施 ship 时安全 surface 远小于 read，非常适合作为 dogfood 起点。
+
+#### inv1 —— write 路径不接触 master key plaintext
+
+vaultWriter 仅 import `~/.abrain/.vault-pubkey`（一行 age1xxx public key）；不调任何 unlock helper、不解密 `~/.abrain/.vault-master.age`、不接触 ssh-agent / gpg-agent。所有写入 = `age -r <pubkey> -o <out>` + stdin pipe value。这是 P0c.write 与 P0c.read 的最大安全差异。
+
+#### inv2 —— 用户 typed plaintext 仅在 main pi 内存 + GC 可回收
+
+`/secret set <key>=<value>` 中 value 字符串在 main pi node.js heap 中存在直到 vaultWriter return（同 §6.4.0 paused-reject 同类已知 trade-off）。MVP one-line form 把 value 短暂暴露于 handler args string；TUI 的 prompt form（mask input）留 P0d。
+
+**plaintext 不应该出现在**：vault-events.jsonl audit row、_meta/<key>.md timeline、stdout/stderr 任何打 log、子进程 argv（age 通过 stdin pipe 接收 value）。
+
+#### inv3 —— 事务顺序（同 §6.4.0 顺序 A）
+
+```
+(0) flock(<vault_dir>/.lock)                    # 全 vault dir 一锁
+(1) age -r <pubkey> < value > tmp + fsync       # plaintext via stdin
+(2) atomic rename → vault/<key>.md.age (0600)   # ★ SOT 落盘 ★
+(3) append _meta/<key>.md + fsync               # timeline
+(4) append vault-events.jsonl + fsync           # audit
+(5) unflock
+```
+
+Crash recovery (§6.4.0)：(2) 后 (4) 前 crash → secret 已落盘但 audit 缺。reconcile 在 vaultWriter 初始化时跑一次，scan vault/*.md.age vs vault-events.jsonl，缺则补 `op=recovered_missing_audit`。
+
+#### inv4 —— flock acquire/release in finally
+
+```typescript
+let lockFd = -1;
+try {
+  lockFd = await acquireFlock(vaultDir);
+  // ... (1)..(4)
+} finally {
+  if (lockFd >= 0) await releaseFlock(lockFd);
+}
+```
+
+异常路径必须释放，否则 vault dir 永久锁死。
+
+**Lock 实施（v1.4.3 dogfood 考虑）**：
+
+- 初设计译过用 `flock(1)` 子进程 + sentinel sleep loop 持锁，SIGTERM 释放。**该设计有致命缺陷**：SIGTERM 不会传递给孙子 `sh -c '...sleep 86400...'` 进程，每次 acquire 都泄漏一组 zombie。实际跑 P0c.write smoke 时泄了 50+ zombie 进程，被用户在 ~1138s 后发现。
+- 采用设计：**纯-Node atomic file creation lock**。`open(lockPath, 'wx')` 原子创建，内容为 `pid\nts\n`。调用者 EEXIST 时读取 holder pid + ts，检测 stale （`process.kill(pid, 0)` ESRCH 表示进程已死 / age > MAX_LOCK_AGE_MS 表示超老），stale 则 unlink 后重试。零依赖、不 spawn 子进程、不需信号链。
+- **并发语义与 flock(2) 一致**：同进程/跨进程同一 vault dir 上互斥；crash 后下一 acquirer 自动接管。差于 flock(2) 之处：polling 不是 event-driven（vault 写低频可接受）；NFS 上不严格 atomic（abrain home 在本地，不走 NFS）。
+- 详见 `extensions/abrain/vault-writer.ts` 中 `acquireLock` / `tryReclaimStaleLock` 的完整实现。
+
+#### inv5 —— `<key>.md.age` mode 0600（同 .vault-master.age v1.4.1 dogfood）
+
+age `-o` 受 umask 影响（容器 umask=0002 → 0664）。**rename 前的 tmp 与 rename 后的 final 都必须 chmod 0600**。理由：单个 secret 文件的最小化 attack surface。tmp 模式 0600 防止
+atomic rename 之前的极短时间窗口被同 host 其他进程读到。
+
+#### inv6 —— `_meta/<key>.md` 是 append-only timeline（不是 replace）
+
+格式（与 ADR 0013 maxim/decision/knowledge timeline 一致）：
+```markdown
+# Vault key: github-token
+
+scope: global
+created: 2026-05-10T15:30:00Z
+description: GitHub PAT for read:user + repo
+
+## Timeline
+
+- 2026-05-10T15:30:00Z | created | scope=global | size=68B
+- 2026-05-11T09:00:00Z | rotated | size=68B
+- 2026-05-12T10:00:00Z | forgotten | by=user
+```
+
+rotate / forget 不删 _meta，append timeline row。`_meta/<key>.md` 永不删除——**用户能 audit 历史**。`<key>.md.age` 文件 forget 时 rm（真删）。
+
+#### inv7 —— P0c.write MVP 仅 --global
+
+项目级 vault (`~/.abrain/projects/<id>/vault/`) 需要 `resolveActiveProject(cwd)`——那是 ADR 0014 P1。P0c.write **强制要求 `--global` 显式 flag**，未来 P1 后默认改为项目级。今天没有 `--global` flag 的 `/secret set <key>=<value>` 直接拒绝并提示。
+
+#### inv8 —— P0c.write 不实施 read 路径
+
+P0c.write 实施：set / list / forget。**不实施**：release（解密 + 给 LLM）、bash `$VAULT_*` 注入、`vault_release` LLM tool。这些需要 unlock helper（P0c.read）。`/secret list` 仅返回 _meta（key + scope + description + timeline），不解密 value。
+
+
+```bash
+# 写入
 ### 6.4 命令语义（双层关键）
 
 ```bash

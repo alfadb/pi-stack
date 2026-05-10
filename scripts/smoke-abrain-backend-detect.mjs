@@ -435,20 +435,23 @@ check("formatStatus A says 'P0c (vaultWriter + /secret) not yet implemented'", (
 const detectFile = path.join(tmpDir, "backend-detect.cjs");
 fs.writeFileSync(detectFile, detectCompiled);
 
-// index.ts now imports ./bootstrap and ./keychain too (added in P0b).
-// All three relative imports must be rewritten to .cjs paths so the
+// index.ts imports ./bootstrap, ./keychain, ./vault-writer (P0b + P0c.write).
+// All four relative imports must be rewritten to .cjs paths so the
 // transpiled CJS module can resolve them in the smoke tmp dir.
 const bootstrapSrc = path.join(repoRoot, "extensions/abrain/bootstrap.ts");
 const keychainSrc = path.join(repoRoot, "extensions/abrain/keychain.ts");
+const vaultWriterSrc = path.join(repoRoot, "extensions/abrain/vault-writer.ts");
 fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), transpileTsToCjs(bootstrapSrc));
 fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc));
+fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
 
 const indexSrc = path.join(repoRoot, "extensions/abrain/index.ts");
 let indexCompiled = transpileTsToCjs(indexSrc);
 indexCompiled = indexCompiled
   .replace(/require\("\.\/backend-detect"\)/g, 'require("./backend-detect.cjs")')
   .replace(/require\("\.\/bootstrap"\)/g, 'require("./bootstrap.cjs")')
-  .replace(/require\("\.\/keychain"\)/g, 'require("./keychain.cjs")');
+  .replace(/require\("\.\/keychain"\)/g, 'require("./keychain.cjs")')
+  .replace(/require\("\.\/vault-writer"\)/g, 'require("./vault-writer.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);
 const indexModule = require(indexFile);

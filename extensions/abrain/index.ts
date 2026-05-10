@@ -37,6 +37,10 @@ import {
   encryptMasterKey, writeBackendFile, writePubkeyFile, readBackendFile,
   type EncryptableBackend, type ExecFn,
 } from "./keychain";
+import {
+  writeSecret, listSecrets, forgetSecret, validateKey,
+  type VaultScope,
+} from "./vault-writer";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
 
@@ -154,6 +158,28 @@ export default function activate(pi: ExtensionAPI): void {
 
   const registry = pi as unknown as CommandRegistry;
   if (typeof registry.registerCommand !== "function") return;
+
+  // /secret command — vault write/list/forget (P0c.write).
+  // Read paths (release / bash injection) are P0c.read.
+  registry.registerCommand("secret", {
+    description: "Vault secrets (write only): /secret set --global <key>=<value> | /secret list --global | /secret forget --global <key>",
+    getArgumentCompletions(prefix: string) {
+      const items = [
+        "set --global ",
+        "list --global",
+        "forget --global ",
+      ];
+      const filtered = items.filter((item) => item.startsWith(prefix));
+      return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
+    },
+    async handler(args: string, ctx: { ui: { notify(message: string, type?: string): void } }): Promise<void> {
+      try {
+        await handleSecret(args.trim(), ctx.ui);
+      } catch (err: any) {
+        ctx.ui.notify(`/secret: ${err.message}`, "warning");
+      }
+    },
+  });
 
   registry.registerCommand("vault", {
     description: "Vault status / control: /vault status | /vault init [--backend=<name>]",
@@ -337,6 +363,158 @@ export async function runInit(
 const realExec: ExecFn = async (cmd, args, opts) => {
   return execCapture(cmd, args, opts);
 };
+
+// ── /secret command handler ─────────────────────────────────────
+//
+// MVP P0c.write supports ONLY --global. Project-level vault depends on
+// resolveActiveProject(cwd) (ADR 0014 P1) which is not yet implemented.
+// Without --global the command refuses with an actionable message.
+
+async function handleSecret(args: string, ui: { notify(message: string, type?: string): void }): Promise<void> {
+  // Pre-flight: vault must be initialized
+  const backend = readBackendFile(ABRAIN_HOME);
+  if (!backend) {
+    ui.notify("vault not initialized. run `/vault init` first.", "warning");
+    return;
+  }
+
+  // First token determines the subcommand
+  const tokens = args.split(/\s+/).filter(Boolean);
+  const sub = tokens[0] || "";
+
+  // ── set ───────────────────────────────────────────────────────
+  if (sub === "set") {
+    // Parse remaining tokens — must include --global and a `key=value` pair
+    const rest = tokens.slice(1);
+    let globalFlag = false;
+    const positional: string[] = [];
+    for (const t of rest) {
+      if (t === "--global") globalFlag = true;
+      else positional.push(t);
+    }
+    if (!globalFlag) {
+      ui.notify(
+        "/secret set: P0c.write MVP requires explicit --global flag. " +
+        "Project-level scope needs resolveActiveProject (ADR 0014 P1, not implemented yet).",
+        "warning",
+      );
+      return;
+    }
+    // join positional back into the value spec — value may contain spaces
+    // e.g. `/secret set --global token=abc def ghi` → key=token, value="abc def ghi"
+    const valueSpec = positional.join(" ");
+    const eqIdx = valueSpec.indexOf("=");
+    if (eqIdx <= 0) {
+      ui.notify("/secret set: expected `<key>=<value>` after --global", "warning");
+      return;
+    }
+    const key = valueSpec.slice(0, eqIdx).trim();
+    let value: string | null = valueSpec.slice(eqIdx + 1);
+    try {
+      validateKey(key);
+    } catch (err: any) {
+      ui.notify(`/secret set: invalid key: ${err.message}`, "warning");
+      value = null;
+      return;
+    }
+    if (!value) {
+      ui.notify("/secret set: value cannot be empty", "warning");
+      return;
+    }
+
+    try {
+      const result = await writeSecret({
+        abrainHome: ABRAIN_HOME,
+        scope: "global",
+        key,
+        value,
+      });
+      // best-effort: clear the local reference (V8 may still have copies)
+      value = null;
+      ui.notify(`/secret set: wrote global:${key} → ${path.relative(ABRAIN_HOME, result.encryptedPath)}`, "info");
+    } catch (err: any) {
+      value = null; // clear before reporting error
+      ui.notify(`/secret set failed: ${err.message}`, "warning");
+    }
+    return;
+  }
+
+  // ── list ──────────────────────────────────────────────────────
+  if (sub === "list") {
+    const rest = tokens.slice(1);
+    let globalFlag = false;
+    for (const t of rest) {
+      if (t === "--global") globalFlag = true;
+    }
+    if (!globalFlag) {
+      ui.notify(
+        "/secret list: P0c.write MVP requires explicit --global flag. " +
+        "Project-level listing needs resolveActiveProject (ADR 0014 P1).",
+        "warning",
+      );
+      return;
+    }
+    const items = listSecrets(ABRAIN_HOME, "global");
+    if (items.length === 0) {
+      ui.notify("/secret list (global): no secrets yet", "info");
+      return;
+    }
+    const lines: string[] = [`global vault — ${items.length} key(s):`];
+    for (const item of items) {
+      const status = item.forgotten ? "  [forgotten]" : "";
+      const desc = item.description ? `  — ${item.description}` : "";
+      const created = item.created ? ` (since ${item.created})` : "";
+      lines.push(`  ${item.key}${status}${created}${desc}`);
+    }
+    ui.notify(lines.join("\n"), "info");
+    return;
+  }
+
+  // ── forget ────────────────────────────────────────────────────
+  if (sub === "forget") {
+    const rest = tokens.slice(1);
+    let globalFlag = false;
+    let key: string | null = null;
+    for (const t of rest) {
+      if (t === "--global") globalFlag = true;
+      else if (!key) key = t;
+    }
+    if (!globalFlag) {
+      ui.notify(
+        "/secret forget: P0c.write MVP requires explicit --global flag.",
+        "warning",
+      );
+      return;
+    }
+    if (!key) {
+      ui.notify("/secret forget --global <key>: missing key", "warning");
+      return;
+    }
+    try {
+      validateKey(key);
+    } catch (err: any) {
+      ui.notify(`/secret forget: invalid key: ${err.message}`, "warning");
+      return;
+    }
+    try {
+      const result = await forgetSecret(ABRAIN_HOME, "global", key);
+      if (result.removed) {
+        ui.notify(`/secret forget: removed global:${key}`, "info");
+      } else {
+        ui.notify(`/secret forget: global:${key} was not present (no-op, audit row recorded)`, "info");
+      }
+    } catch (err: any) {
+      ui.notify(`/secret forget failed: ${err.message}`, "warning");
+    }
+    return;
+  }
+
+  ui.notify(
+    `/secret: unknown subcommand '${sub}'. ` +
+    `available: set / list / forget (all require --global in P0c.write MVP)`,
+    "warning",
+  );
+}
 
 function handleStatus(ui: { notify(message: string, type?: string): void }): void {
   const status = getVaultStatus();
