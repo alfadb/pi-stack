@@ -151,9 +151,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window/extract/curate/dedupe/migration-backups/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment curate --dry-run, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
+    description: "Sediment writer status/window/extract/dedupe/migration-backups/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "extract --dry-run", "curate --dry-run", "dedupe --title ", "migration-backups", "migration-backups --limit ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "extract --dry-run", "dedupe --title ", "migration-backups", "migration-backups --limit ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -207,70 +207,6 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
         const drafts = window.skipReason ? [] : parseExplicitMemoryBlocks(window.text);
         ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), extraction: previewExtraction(drafts) }, null, 2), drafts.length > 0 ? "warning" : "info");
-        return;
-      }
-
-      if (subcommand === "curate") {
-        if (!rest.includes("--dry-run")) {
-          ctx.ui.notify("Usage: /sediment curate --dry-run", "warning");
-          return;
-        }
-        if (!ctx.sessionManager?.getBranch) {
-          ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
-          return;
-        }
-        const modelRegistry = ctx.modelRegistry as ModelRegistryLike | undefined;
-        if (!modelRegistry || typeof modelRegistry.find !== "function" || typeof modelRegistry.getApiKeyAndHeaders !== "function") {
-          ctx.ui.notify("Model registry unavailable; cannot run sediment curator dry-run", "error");
-          return;
-        }
-        const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
-        const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
-        if (window.skipReason) {
-          ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), plans: [] }, null, 2), "warning");
-          return;
-        }
-
-        const llmStart = Date.now();
-        const llmResult = await runLlmExtractorDryRun(window.text, {
-          settings,
-          modelRegistry,
-          signal: ctx.signal,
-        });
-        const llmDurationMs = Date.now() - llmStart;
-        const llmAuditSummary = summarizeLlmExtractorDryRun(llmResult, {
-          maxCandidates: settings.extractorMaxCandidates,
-          rawPreviewChars: settings.extractorAuditRawChars,
-        });
-        const drafts = (llmResult.rawText && llmResult.rawText !== "SKIP") ? parseExplicitMemoryBlocks(llmResult.rawText) : [];
-        const extraction = previewExtraction(drafts);
-        const compliantDrafts = drafts.filter((_, i) => extraction.drafts[i]?.validationErrors.length === 0);
-        const plans = [] as Array<Record<string, unknown>>;
-        for (const draft of compliantDrafts) {
-          const curated = await curateProjectDraft(draft, {
-            projectRoot: cwd,
-            sedimentSettings: settings,
-            memorySettings: resolveMemorySettings(),
-            modelRegistry,
-            signal: ctx.signal,
-          });
-          plans.push({
-            candidate: { title: draft.title, kind: draft.kind, status: draft.status, confidence: draft.confidence },
-            decision: curated.decision,
-            neighbors: curated.audit.neighbors,
-            stage_ms: curated.audit.stage_ms,
-            error: curated.audit.error,
-          });
-        }
-        ctx.ui.notify(JSON.stringify({
-          dry_run: true,
-          window: checkpointSummary(window),
-          llm: llmAuditSummary,
-          llmDurationMs,
-          extraction,
-          plans,
-          note: "No markdown written, no checkpoint advanced, no audit appended.",
-        }, null, 2), plans.length > 0 ? "info" : "warning");
         return;
       }
 
@@ -345,7 +281,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment curate --dry-run OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
     },
   });
 }

@@ -117,7 +117,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
-| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + migrate-one + status FSM + `/sediment curate --dry-run` plan + memory_search-powered create/update/merge/archive/supersede/delete/skip curator；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控） | Phase 1.4 A1+A2+A3 + ADR 0016 |
+| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + migrate-one + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
 | `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + /vault + /secret 命令） | ADR 0014 §D4 (2026-05-09) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |

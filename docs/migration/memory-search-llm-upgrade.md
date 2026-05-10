@@ -1,6 +1,6 @@
 # Migration — memory_search 升级为 LLM-driven retrieval
 
-> **状态**：In progress（2026-05-10；Phase 0/1 implemented；Phase 2 curator create/update/merge/archive/supersede/delete/skip + `/sediment curate --dry-run` implemented by ADR 0016）
+> **状态**：In progress（2026-05-10；Phase 0/1 implemented；Phase 2 curator create/update/merge/archive/supersede/delete/skip implemented by ADR 0016）
 > **依赖**：[ADR 0015](../adr/0015-memory-search-llm-driven-retrieval.md)（决策本身）
 > **关联**：[ADR 0010](../adr/0010-sediment-single-agent-with-lookup-tools.md)（lookup-tools loop 设计）/ [ADR 0016](../adr/0016-sediment-as-llm-curator.md)（curator + update/delete 方向）
 > **触发**：见 ADR 0015 背景
@@ -11,7 +11,7 @@
 |---|---|---|---|
 | **Phase 0** | 增强 `_index.md` 格式 | ✅ implemented | 无 |
 | **Phase 1** | LLM-driven search 核心实现 | ✅ implemented | Phase 0 |
-| **Phase 2** | sediment curator 接入新 search：优先 update/merge，create 次之（ADR 0010 lookup-tools loop + ADR 0016） | ✅ create/update/merge/archive/supersede/delete/skip + curate dry-run implemented | Phase 1 burn-in 1-2 天 |
+| **Phase 2** | sediment curator 接入新 search：优先 update/merge，create 次之（ADR 0010 lookup-tools loop + ADR 0016） | ✅ create/update/merge/archive/supersede/delete/skip implemented | Phase 1 burn-in 1-2 天 |
 | **Phase 3** | memory-architecture / brain-redesign-spec 全量文档对齐 + ADR 0010 状态升级 | 30 分钟 | Phase 1+2 落地 |
 
 总工作量约一个 4-6 小时会话窗口。Phase 0+1 可一次性做完；Phase 2 不再以“拒绝同义重复”为终点，而是进入“找旧条目 → update/merge/skip/create”的 curator loop。

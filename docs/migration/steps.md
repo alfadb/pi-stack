@@ -222,7 +222,6 @@ memory_search(query: "dispatch agent prompt")
   2. `runLlmExtractorDryRun()` → `parseExplicitMemoryBlocks(rawText)` → `previewExtraction(drafts)` schema-only 过滤
   3. `curateProjectDraft()` 调 `memory_search` 找近邻 → curator LLM 输出 create/update/merge/archive/supersede/delete/skip
   4. `writeProjectEntry()` / `updateProjectEntry()` / `mergeProjectEntries()` / `archiveProjectEntry()` / `supersedeProjectEntry()` / `deleteProjectEntry()` 写盘；git/audit 负责回滚与追踪。
-  5. `/sediment curate --dry-run` 可预览 extractor → memory_search → curator operation plan（不写 markdown、不推进 checkpoint、不写 audit）。
 - audit：`operation: "auto_write"` 含 candidate_count / candidates / results / curator decisions / **raw_text 全文** (cap `autoWriteRawAuditChars` 默认 8000) / stage_ms.llm_total。如果 LLM 打一鱼三天这些都够复现。
 - 独立模型：复用现有 `extractorModel` settings（默认 deepseek-v4-pro）；不强制隔离主会话模型，仅靠 settings 表达意图。
 
@@ -250,9 +249,6 @@ memory_search(query: "dispatch agent prompt")
 
 /sediment extract --dry-run
 # → 对当前 checkpoint window 解析显式 MEMORY blocks，但不写 markdown/不推进 checkpoint
-
-/sediment curate --dry-run
-# → 对当前 checkpoint window 调 LLM extractor + memory_search + curator，展示 operation plan；不写 markdown/不推进 checkpoint/不写 audit
 
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果
