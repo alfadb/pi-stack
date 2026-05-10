@@ -79,12 +79,12 @@ alfadb/pi-astack/
 │   │   ├── checkpoint.ts              # per-session checkpoint + run window builder + RMW lock
 │   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor (fence-aware)
 │   │   ├── llm-extractor.ts           # LLM extractor prompt (Trust Boundary + durability test) + model call + parser
-│   │   ├── curator.ts                 # ADR 0016 memory_search-powered curator loop (create/update/delete/skip subset)
+│   │   ├── curator.ts                 # ADR 0016 memory_search-powered curator loop (create/update/merge/archive/supersede/delete/skip)
 │   │   ├── migration.ts               # /sediment migrate-one/migration-backups legacy migration plan/apply/restore/list
 │   │   ├── validation.ts              # schema-only draft runtime validation
 │   │   ├── dedupe.ts                  # storage-only slug collision detection（semantic dedupe 由 curator 处理）
 │   │   ├── sanitizer.ts               # sensitive-info fail-closed (jwt/pem/aws/url/email/ip/$HOME)
-│   │   └── writer.ts                  # create/update/delete substrate + validate/sensitive-info sanitize/dedupe/lint/lock/atomic write/audit/git
+│   │   └── writer.ts                  # create/update/archive/supersede/delete substrate + validate/sensitive-info sanitize/dedupe/lint/lock/atomic write/audit/git
 │   ├── compaction-tuner/              # ✅ 实现：计划外落地（2026-05-08）
 │   │   ├── index.ts                   # agent_end hook 读 ctx.getContextUsage() 超阈 → ctx.compact()；/compaction-tuner [status|trigger]
 │   │   └── settings.ts                # thresholdPercent / rearmMarginPercent
@@ -117,7 +117,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
-| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + migrate-one + status FSM + memory_search-powered create/update/delete/skip curator；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控） | Phase 1.4 A1+A2+A3 + ADR 0016 |
+| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + migrate-one + status FSM + `/sediment curate --dry-run` plan + memory_search-powered create/update/merge/archive/supersede/delete/skip curator；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
 | `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + /vault + /secret 命令） | ADR 0014 §D4 (2026-05-09) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |

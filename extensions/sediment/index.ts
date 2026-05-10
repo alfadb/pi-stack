@@ -36,7 +36,7 @@ import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun, type LlmExtractorDr
 import { listMigrationBackups, migrateOne, restoreMigrationBackup } from "./migration";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 
-import { appendAudit, deleteProjectEntry, updateProjectEntry, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult } from "./writer";
+import { appendAudit, archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, updateProjectEntry, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult } from "./writer";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 
 // ---------------------------------------------------------------
@@ -134,7 +134,7 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
     "duplicate_slug", "validation_error", "lint_error",
   ]);
   return results.every((result) => {
-    if (result.status === "created" || result.status === "updated" || result.status === "deleted" || result.status === "skipped" || result.status === "dry_run") return true;
+    if (result.status === "created" || result.status === "updated" || result.status === "merged" || result.status === "archived" || result.status === "superseded" || result.status === "deleted" || result.status === "skipped" || result.status === "dry_run") return true;
     if (!result.reason) return false;
     return terminalReasons.has(result.reason) || result.reason.startsWith("credential pattern detected");
   });
@@ -151,9 +151,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("sediment", {
-    description: "Sediment writer status/window/extract/dedupe/migration-backups/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
+    description: "Sediment writer status/window/extract/curate/dedupe/migration-backups/migrate-one and smoke test: /sediment status, /sediment window --dry-run, /sediment extract --dry-run, /sediment curate --dry-run, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes, /sediment smoke --dry-run",
     getArgumentCompletions(prefix: string) {
-      const items = ["status", "window --dry-run", "extract --dry-run", "dedupe --title ", "migration-backups", "migration-backups --limit ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
+      const items = ["status", "window --dry-run", "extract --dry-run", "curate --dry-run", "dedupe --title ", "migration-backups", "migration-backups --limit ", "migrate-one --plan ", "migrate-one --apply --yes ", "migrate-one --restore ", "smoke --dry-run"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -207,6 +207,70 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
         const drafts = window.skipReason ? [] : parseExplicitMemoryBlocks(window.text);
         ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), extraction: previewExtraction(drafts) }, null, 2), drafts.length > 0 ? "warning" : "info");
+        return;
+      }
+
+      if (subcommand === "curate") {
+        if (!rest.includes("--dry-run")) {
+          ctx.ui.notify("Usage: /sediment curate --dry-run", "warning");
+          return;
+        }
+        if (!ctx.sessionManager?.getBranch) {
+          ctx.ui.notify("Session manager unavailable; cannot build sediment window", "error");
+          return;
+        }
+        const modelRegistry = ctx.modelRegistry as ModelRegistryLike | undefined;
+        if (!modelRegistry || typeof modelRegistry.find !== "function" || typeof modelRegistry.getApiKeyAndHeaders !== "function") {
+          ctx.ui.notify("Model registry unavailable; cannot run sediment curator dry-run", "error");
+          return;
+        }
+        const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
+        const window = buildRunWindow(ctx.sessionManager.getBranch(), checkpoint, settings);
+        if (window.skipReason) {
+          ctx.ui.notify(JSON.stringify({ window: checkpointSummary(window), plans: [] }, null, 2), "warning");
+          return;
+        }
+
+        const llmStart = Date.now();
+        const llmResult = await runLlmExtractorDryRun(window.text, {
+          settings,
+          modelRegistry,
+          signal: ctx.signal,
+        });
+        const llmDurationMs = Date.now() - llmStart;
+        const llmAuditSummary = summarizeLlmExtractorDryRun(llmResult, {
+          maxCandidates: settings.extractorMaxCandidates,
+          rawPreviewChars: settings.extractorAuditRawChars,
+        });
+        const drafts = (llmResult.rawText && llmResult.rawText !== "SKIP") ? parseExplicitMemoryBlocks(llmResult.rawText) : [];
+        const extraction = previewExtraction(drafts);
+        const compliantDrafts = drafts.filter((_, i) => extraction.drafts[i]?.validationErrors.length === 0);
+        const plans = [] as Array<Record<string, unknown>>;
+        for (const draft of compliantDrafts) {
+          const curated = await curateProjectDraft(draft, {
+            projectRoot: cwd,
+            sedimentSettings: settings,
+            memorySettings: resolveMemorySettings(),
+            modelRegistry,
+            signal: ctx.signal,
+          });
+          plans.push({
+            candidate: { title: draft.title, kind: draft.kind, status: draft.status, confidence: draft.confidence },
+            decision: curated.decision,
+            neighbors: curated.audit.neighbors,
+            stage_ms: curated.audit.stage_ms,
+            error: curated.audit.error,
+          });
+        }
+        ctx.ui.notify(JSON.stringify({
+          dry_run: true,
+          window: checkpointSummary(window),
+          llm: llmAuditSummary,
+          llmDurationMs,
+          extraction,
+          plans,
+          note: "No markdown written, no checkpoint advanced, no audit appended.",
+        }, null, 2), plans.length > 0 ? "info" : "warning");
         return;
       }
 
@@ -281,7 +345,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
+      ctx.ui.notify("Usage: /sediment status OR /sediment window --dry-run OR /sediment extract --dry-run OR /sediment curate --dry-run OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes OR /sediment smoke --dry-run", "warning");
     },
   });
 }
@@ -544,7 +608,7 @@ export default function (pi: ExtensionAPI) {
               entry_breakdown: entryBreakdown,
               candidate_count: auto.drafts.length,
               candidates: auto.drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
-              results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, gitCommit: r.gitCommit })),
+              results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, deleteMode: r.deleteMode, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, gitCommit: r.gitCommit })),
               curator: auto.curatorAudits,
               llm: auto.llmAuditSummary,
               raw_text: auto.rawTextStored,
@@ -563,13 +627,17 @@ export default function (pi: ExtensionAPI) {
             }
             const createdCount = auto.results.filter(r => r.status === "created").length;
             const updatedCount = auto.results.filter(r => r.status === "updated").length;
+            const mergedCount = auto.results.filter(r => r.status === "merged").length;
+            const archivedCount = auto.results.filter(r => r.status === "archived").length;
+            const supersededCount = auto.results.filter(r => r.status === "superseded").length;
             const skippedCount = auto.results.filter(r => r.status === "skipped").length;
             const deletedCount = auto.results.filter(r => r.status === "deleted").length;
             const rejectedCount = auto.results.filter(r => r.status === "rejected").length;
+            const okSummary = `${createdCount} created, ${updatedCount} updated, ${mergedCount} merged, ${archivedCount} archived, ${supersededCount} superseded, ${deletedCount} deleted, ${skippedCount} skipped`;
             if (rejectedCount > 0) {
-              applySedimentStatus(setStatus, sessionId, "failed", `auto-write: ${createdCount} created, ${updatedCount} updated, ${deletedCount} deleted, ${skippedCount} skipped, ${rejectedCount} rejected`);
+              applySedimentStatus(setStatus, sessionId, "failed", `auto-write: ${okSummary}, ${rejectedCount} rejected`);
             } else {
-              applySedimentStatus(setStatus, sessionId, "completed", `auto-write: ${createdCount} created, ${updatedCount} updated, ${deletedCount} deleted, ${skippedCount} skipped`);
+              applySedimentStatus(setStatus, sessionId, "completed", `auto-write: ${okSummary}`);
             }
             return;
           }
@@ -715,7 +783,7 @@ function truncateRawForAudit(raw: string | undefined, cap: number): { text?: str
  * Run the LLM auto-write lane end-to-end. The function performs all
  * gate checks, runs the LLM extractor when enabled, and applies
  * `previewExtraction` plus the curator loop so compliant candidates
- * become create/update/skip operations. Semantic hard gates were
+ * become create/update/merge/archive/supersede/delete/skip operations. Semantic hard gates were
  * removed in ADR 0016; git + audit provide rollback.
  */
 async function tryAutoWriteLane(args: {
@@ -771,7 +839,7 @@ async function tryAutoWriteLane(args: {
   }
 
   // 2. Keep only schema-valid candidates. Semantic gates are gone; the
-  //    curator decides create/update/skip after looking up existing memory.
+  //    curator decides create/update/merge/archive/supersede/delete/skip after looking up existing memory.
   const fullDrafts = (llmResult.rawText && llmResult.rawText !== "SKIP")
     ? (await import("./extractor")).parseExplicitMemoryBlocks(llmResult.rawText)
     : [];
@@ -816,12 +884,48 @@ async function tryAutoWriteLane(args: {
       }));
       continue;
     }
+    if (curated.decision.op === "merge") {
+      results.push(...await mergeProjectEntries(curated.decision.target, curated.decision.sources, {
+        compiledTruth: curated.decision.compiledTruth,
+        timelineNote: curated.decision.timelineNote,
+        reason: curated.decision.rationale || curated.decision.timelineNote || "merged by sediment curator",
+        sessionId,
+      }, {
+        projectRoot: cwd,
+        settings,
+        dryRun: false,
+      }));
+      continue;
+    }
+    if (curated.decision.op === "archive") {
+      results.push(await archiveProjectEntry(curated.decision.slug, {
+        projectRoot: cwd,
+        settings,
+        dryRun: false,
+        reason: curated.decision.reason || curated.decision.rationale || "archived by sediment curator",
+        sessionId,
+      }));
+      continue;
+    }
+    if (curated.decision.op === "supersede") {
+      results.push(await supersedeProjectEntry(curated.decision.oldSlug, {
+        projectRoot: cwd,
+        settings,
+        dryRun: false,
+        newSlug: curated.decision.newSlug,
+        reason: curated.decision.reason || curated.decision.rationale || "superseded by sediment curator",
+        sessionId,
+      }));
+      continue;
+    }
     if (curated.decision.op === "delete") {
       results.push(await deleteProjectEntry(curated.decision.slug, {
         projectRoot: cwd,
         settings,
         dryRun: false,
+        mode: curated.decision.mode,
         reason: curated.decision.reason || curated.decision.rationale || "deleted by sediment curator",
+        sessionId,
       }));
       continue;
     }

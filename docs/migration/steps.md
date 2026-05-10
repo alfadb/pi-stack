@@ -169,7 +169,7 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 1.4 — Sediment project-only pipeline
 
-**实现状态（2026-05-10）**：`extensions/sediment/writer.ts` 已实现 project-only create/update/delete substrate；`extensions/sediment/checkpoint.ts` 已实现 per-session checkpoint + RMW 锁 + run window builder；`extensions/sediment/extractor.ts` 已实现 fence-aware deterministic explicit `MEMORY:` block extractor；`extensions/sediment/llm-extractor.ts` 已实现 prompt (含 Trust Boundary role-aware 指令) + model call + parser；`extensions/sediment/curator.ts` 已接入 ADR 0015 `memory_search` lookup loop；`extensions/sediment/index.ts` 注册 `/sediment` 子命令 + `agent_end` hook。底层走 deterministic explicit `MEMORY:` lane；**LLM auto-write lane 已接入 hook并按 ADR 0016 删除 readiness/rolling/rate/sampling/G2-G13 机械门控**：显式 miss 后直接调用 LLM extractor + curator，git/audit 作为回滚面。
+**实现状态（2026-05-10）**：`extensions/sediment/writer.ts` 已实现 project-only create/update/merge/archive/supersede/delete substrate；`extensions/sediment/checkpoint.ts` 已实现 per-session checkpoint + RMW 锁 + run window builder；`extensions/sediment/extractor.ts` 已实现 fence-aware deterministic explicit `MEMORY:` block extractor；`extensions/sediment/llm-extractor.ts` 已实现 prompt (含 Trust Boundary role-aware 指令) + model call + parser；`extensions/sediment/curator.ts` 已接入 ADR 0015 `memory_search` lookup loop；`extensions/sediment/index.ts` 注册 `/sediment` 子命令 + `agent_end` hook。底层走 deterministic explicit `MEMORY:` lane；**LLM auto-write lane 已接入 hook并按 ADR 0016 删除 readiness/rolling/rate/sampling/G2-G13 机械门控**：显式 miss 后直接调用 LLM extractor + curator，git/audit 作为回滚面。
 
 已完成 checkpoint/window substrate：
 - checkpoint path：`.pi-astack/sediment/checkpoint.json`
@@ -216,12 +216,13 @@ memory_search(query: "dispatch agent prompt")
 已完成 LLM auto-write lane（A1 + A2 + A3，2026-05-08）：
 - A1（安全前置 G2-G8）：`writeProjectEntry.opts.policy` + `forceProvisional`；`validateProjectEntryDraft(draft, policy)` overlay（`disallowMaxim` / `disallowArchived` / `maxConfidence`）；sanitizer 扩 4 pattern（JWT / PEM / AWS / connection URL）；`normalizeCompiledTruth` 对 `^---$` body 行退转；triggerPhrases 过 sanitizer；extractor prompt 加 Trust Boundary 指令。
   - **ADR 0016 更新（2026-05-10）**：G2-G13 / readiness / rolling / rate / sampling 机械门控已删除；不再强制 provisional、不禁 maxim、不 cap confidence、不用 G13 hard reject 代替语义判断。hard gate 收敛为敏感信息 + 存储完整性。
-  - 新增 `updateProjectEntry(slug, patch, ...)` writer substrate；`extensions/sediment/curator.ts` 已接入 `memory_search` lookup loop，当前支持 create/update/delete/skip subset，避免 append-only 新增。
+  - 新增 `updateProjectEntry(slug, patch, ...)` writer substrate；`extensions/sediment/curator.ts` 已接入 `memory_search` lookup loop，当前支持 create/update/merge/archive/supersede/delete/skip，避免 append-only 新增。
 - A2（接入 + G9-G12）：`agent_end` 在 `parseExplicitMemoryBlocks(window) === []` 之后调用 `tryAutoWriteLane`。闸门顺序：
   1. modelRegistry 存在 + `autoLlmWriteEnabled=true`
   2. `runLlmExtractorDryRun()` → `parseExplicitMemoryBlocks(rawText)` → `previewExtraction(drafts)` schema-only 过滤
-  3. `curateProjectDraft()` 调 `memory_search` 找近邻 → curator LLM 输出 create/update/delete/skip
-  4. `writeProjectEntry()` / `updateProjectEntry()` / `deleteProjectEntry()` 写盘；git/audit 负责回滚与追踪。
+  3. `curateProjectDraft()` 调 `memory_search` 找近邻 → curator LLM 输出 create/update/merge/archive/supersede/delete/skip
+  4. `writeProjectEntry()` / `updateProjectEntry()` / `mergeProjectEntries()` / `archiveProjectEntry()` / `supersedeProjectEntry()` / `deleteProjectEntry()` 写盘；git/audit 负责回滚与追踪。
+  5. `/sediment curate --dry-run` 可预览 extractor → memory_search → curator operation plan（不写 markdown、不推进 checkpoint、不写 audit）。
 - audit：`operation: "auto_write"` 含 candidate_count / candidates / results / curator decisions / **raw_text 全文** (cap `autoWriteRawAuditChars` 默认 8000) / stage_ms.llm_total。如果 LLM 打一鱼三天这些都够复现。
 - 独立模型：复用现有 `extractorModel` settings（默认 deepseek-v4-pro）；不强制隔离主会话模型，仅靠 settings 表达意图。
 
@@ -235,7 +236,7 @@ memory_search(query: "dispatch agent prompt")
   - `agent_start` 当上轮终态 (completed/failed) → 重置 idle；当 running/idle 不动
   - `agent_end` 进入 running，bg 完成后 → completed（`N entries` / `LLM returned skip` / `ineligible`）或 failed（`LLM error` / `bg threw`）
   - 用户感知：`💪 sediment idle` / `📝 sediment running: auto-write (model=...)` / `✅ sediment completed: N entries` / `⚠️ sediment failed: <reason>`
-- **历史注记**：Rolling/G13 曾在 burn-in 期存在，ADR 0016 后已删除；重复改述由 curator update/skip/merge/delete 处理。
+- **历史注记**：Rolling/G13 曾在 burn-in 期存在，ADR 0016 后已删除；重复改述由 curator update/archive/supersede/delete/skip/merge 处理。
 - **Extractor model 临时切换**（settings.json）：`deepseek/deepseek-v4-pro` → `openai/gpt-5.4-mini`，因 deepseek API 当日 hang（flash 和 pro 都 30s+ 无输出）；hot-reload 即刻生效。deepseek 恢复后回切。
 
 剩余待实现 pipeline：
@@ -249,6 +250,9 @@ memory_search(query: "dispatch agent prompt")
 
 /sediment extract --dry-run
 # → 对当前 checkpoint window 解析显式 MEMORY blocks，但不写 markdown/不推进 checkpoint
+
+/sediment curate --dry-run
+# → 对当前 checkpoint window 调 LLM extractor + memory_search + curator，展示 operation plan；不写 markdown/不推进 checkpoint/不写 audit
 
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果
@@ -272,7 +276,7 @@ memory_search(query: "dispatch agent prompt")
 **当前 live 验收**：
 - sediment 在 agent_end 后自动运行
 - 新洞察 create 到 `.pensieve/knowledge/` 或 `.pensieve/staging/`
-- 重复/旧洞察由 curator 输出 update/skip/merge（当前实现 create/update/skip subset）
+- 重复/旧洞察由 curator 输出 update/merge/archive/supersede/delete/skip（当前实现 create/update/merge/archive/supersede/delete/skip）
 - audit log 记录完整 pipeline + curator decisions
 
 ---

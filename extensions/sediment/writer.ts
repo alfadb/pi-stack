@@ -43,8 +43,12 @@ export interface WriteProjectEntryOptions {
   projectRoot: string;
   settings: SedimentSettings;
   dryRun?: boolean;
+  auditOperation?: string;
+  auditExtras?: Record<string, unknown>;
 
 }
+
+export type DeleteMode = "soft" | "hard";
 
 export interface ProjectEntryUpdateDraft {
   title?: string;
@@ -53,19 +57,22 @@ export interface ProjectEntryUpdateDraft {
   confidence?: number;
   compiledTruth?: string;
   triggerPhrases?: string[];
+  frontmatterPatch?: Record<string, Jsonish | undefined>;
   sessionId?: string;
   timelineNote?: string;
+  timelineAction?: string;
 }
 
 export interface WriteProjectEntryResult {
   slug: string;
   path: string;
-  status: "created" | "updated" | "deleted" | "skipped" | "dry_run" | "rejected";
+  status: "created" | "updated" | "merged" | "archived" | "superseded" | "deleted" | "skipped" | "dry_run" | "rejected";
   reason?: string;
   lintErrors?: number;
   lintWarnings?: number;
   gitCommit?: string | null;
   auditPath?: string;
+  deleteMode?: DeleteMode;
   sanitizedReplacements?: string[];
   duplicate?: DedupeResult;
   validationErrors?: Array<{ field: string; message: string }>;
@@ -275,6 +282,7 @@ function mergeUpdateMarkdown(
   const safeTitle = titleSanitize.text ?? title;
   const safeCompiledTruth = bodySanitize.text ?? compiledTruth;
   const safeTimelineNote = patch.timelineNote ? (noteSanitize.text ?? patch.timelineNote) : "updated by sediment curator";
+  const safeTimelineAction = (patch.timelineAction || "updated").replace(/[|\r\n]/g, " ").trim() || "updated";
   const sanitizedReplacements = [
     ...titleSanitize.replacements,
     ...bodySanitize.replacements,
@@ -293,7 +301,11 @@ function mergeUpdateMarkdown(
     title: safeTitle,
     created: frontmatter.created ?? timestamp,
     updated: timestamp,
+    ...(patch.frontmatterPatch ?? {}),
   };
+  for (const [key, value] of Object.entries(patch.frontmatterPatch ?? {})) {
+    if (value === undefined) delete nextFrontmatter[key];
+  }
   if (triggerPhrases) {
     nextFrontmatter.trigger_phrases = triggerPhraseSanitizes.map((s, i) => s.text ?? triggerPhrases[i]);
   }
@@ -301,7 +313,7 @@ function mergeUpdateMarkdown(
   const timelineSession = patch.sessionId || "sediment";
   const nextTimeline = [
     ...timeline,
-    `- ${timestamp} | ${timelineSession} | updated | ${safeTimelineNote}`,
+    `- ${timestamp} | ${timelineSession} | ${safeTimelineAction} | ${safeTimelineNote}`,
   ];
   const markdown = [
     renderFrontmatter(nextFrontmatter, frontmatterOrder(frontmatterText)),
@@ -383,16 +395,100 @@ export async function appendAudit(projectRoot: string, event: Record<string, unk
   return auditPath;
 }
 
+export async function mergeProjectEntries(
+  targetSlugRaw: string,
+  sourceSlugRaws: string[],
+  patch: { compiledTruth: string; reason?: string; sessionId?: string; timelineNote?: string },
+  opts: WriteProjectEntryOptions,
+): Promise<WriteProjectEntryResult[]> {
+  const targetSlug = slugify(targetSlugRaw);
+  const sources = Array.from(new Set(sourceSlugRaws.map((slug) => slugify(slug)).filter(Boolean)));
+  const nonTargetSources = sources.filter((slug) => slug !== targetSlug);
+  const reason = patch.reason || patch.timelineNote || "merged by sediment curator";
+  const targetResult = await updateProjectEntry(targetSlug, {
+    compiledTruth: patch.compiledTruth,
+    sessionId: patch.sessionId,
+    timelineAction: "merged",
+    timelineNote: reason,
+    frontmatterPatch: nonTargetSources.length > 0 ? { derives_from: nonTargetSources } : undefined,
+  }, {
+    projectRoot: opts.projectRoot,
+    settings: opts.settings,
+    dryRun: opts.dryRun,
+    auditOperation: "merge",
+    auditExtras: { sources, reason },
+  });
+
+  const results: WriteProjectEntryResult[] = [
+    { ...targetResult, status: targetResult.status === "dry_run" ? "dry_run" : targetResult.status === "rejected" ? "rejected" : "merged" },
+  ];
+  if (targetResult.status === "rejected") return results;
+  for (const source of nonTargetSources) {
+    results.push(await archiveProjectEntry(source, {
+      projectRoot: opts.projectRoot,
+      settings: opts.settings,
+      dryRun: opts.dryRun,
+      reason: `merged into ${targetSlug}: ${reason}`,
+      sessionId: patch.sessionId,
+    }));
+  }
+  return results;
+}
+
+export async function archiveProjectEntry(
+  slugRaw: string,
+  opts: WriteProjectEntryOptions & { reason?: string; sessionId?: string },
+): Promise<WriteProjectEntryResult> {
+  const reason = opts.reason || "archived by sediment curator";
+  const result = await updateProjectEntry(slugRaw, {
+    status: "archived",
+    sessionId: opts.sessionId,
+    timelineAction: "archived",
+    timelineNote: reason,
+  }, {
+    projectRoot: opts.projectRoot,
+    settings: opts.settings,
+    dryRun: opts.dryRun,
+    auditOperation: "archive",
+    auditExtras: { reason },
+  });
+  return { ...result, status: result.status === "dry_run" ? "dry_run" : result.status === "rejected" ? "rejected" : "archived" };
+}
+
+export async function supersedeProjectEntry(
+  slugRaw: string,
+  opts: WriteProjectEntryOptions & { reason?: string; newSlug?: string; sessionId?: string },
+): Promise<WriteProjectEntryResult> {
+  const reason = opts.reason || "superseded by sediment curator";
+  const note = opts.newSlug ? `superseded by ${opts.newSlug}: ${reason}` : reason;
+  const result = await updateProjectEntry(slugRaw, {
+    status: "superseded",
+    sessionId: opts.sessionId,
+    timelineAction: "superseded",
+    timelineNote: note,
+    frontmatterPatch: opts.newSlug ? { superseded_by: [opts.newSlug] } : undefined,
+  }, {
+    projectRoot: opts.projectRoot,
+    settings: opts.settings,
+    dryRun: opts.dryRun,
+    auditOperation: "supersede",
+    auditExtras: { reason, ...(opts.newSlug ? { new_slug: opts.newSlug } : {}) },
+  });
+  return { ...result, status: result.status === "dry_run" ? "dry_run" : result.status === "rejected" ? "rejected" : "superseded" };
+}
+
 export async function deleteProjectEntry(
   slugRaw: string,
-  opts: WriteProjectEntryOptions & { reason?: string },
+  opts: WriteProjectEntryOptions & { reason?: string; mode?: DeleteMode; sessionId?: string },
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const pensieveRoot = path.join(projectRoot, ".pensieve");
   const slug = slugify(slugRaw);
+  const mode: DeleteMode = opts.mode === "hard" ? "hard" : "soft";
+  const reason = opts.reason || "deleted by sediment curator";
   if (!fsSync.existsSync(pensieveRoot)) {
-    return { slug, path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
+    return { slug, path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found", deleteMode: mode };
   }
 
   const target = await findProjectEntryFile(projectRoot, slug);
@@ -401,38 +497,57 @@ export async function deleteProjectEntry(
       operation: "reject",
       reason: "entry_not_found",
       target: `project:${slug}`,
+      delete_mode: mode,
       duration_ms: Date.now() - started,
     });
-    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath };
+    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, deleteMode: mode };
+  }
+
+  if (mode === "soft") {
+    const result = await updateProjectEntry(slug, {
+      status: "archived",
+      sessionId: opts.sessionId,
+      timelineAction: "deleted",
+      timelineNote: `soft delete: ${reason}`,
+    }, {
+      projectRoot,
+      settings: opts.settings,
+      dryRun: opts.dryRun,
+      auditOperation: "delete",
+      auditExtras: { delete_mode: "soft", reason },
+    });
+    return { ...result, status: result.status === "dry_run" ? "dry_run" : result.status === "rejected" ? "rejected" : "deleted", deleteMode: "soft" };
   }
 
   if (opts.dryRun) {
-    return { slug, path: target, status: "dry_run" };
+    return { slug, path: target, status: "dry_run", deleteMode: "hard" };
   }
 
   let lock: LockHandle | undefined;
   try {
     lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
     await fs.unlink(target);
-    const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `delete ${slug}`) : null;
+    const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `hard delete ${slug}`) : null;
     const auditPath = await appendAudit(projectRoot, {
       operation: "delete",
       target: `project:${slug}`,
       path: path.relative(projectRoot, target),
-      reason: opts.reason || "deleted by sediment curator",
+      delete_mode: "hard",
+      reason,
       git_commit: git,
       duration_ms: Date.now() - started,
     });
-    return { slug, path: target, status: "deleted", gitCommit: git, auditPath };
+    return { slug, path: target, status: "deleted", gitCommit: git, auditPath, deleteMode: "hard" };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
     const auditPath = await appendAudit(projectRoot, {
       operation: "error",
       target: `project:${slug}`,
+      delete_mode: "hard",
       reason: message,
       duration_ms: Date.now() - started,
     });
-    return { slug, path: target, status: "rejected", reason: message, auditPath };
+    return { slug, path: target, status: "rejected", reason: message, auditPath, deleteMode: "hard" };
   } finally {
     await lock?.release();
   }
@@ -519,14 +634,16 @@ export async function updateProjectEntry(
   try {
     lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
     await atomicWrite(target, merged.markdown);
-    const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `update ${slug}`) : null;
+    const operation = opts.auditOperation || "update";
+    const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `${operation} ${slug}`) : null;
     const auditPath = await appendAudit(projectRoot, {
-      operation: "update",
+      operation,
       target: `project:${slug}`,
       path: path.relative(projectRoot, target),
       lint_result: "pass",
       git_commit: git,
       duration_ms: Date.now() - started,
+      ...(opts.auditExtras ?? {}),
     });
     return {
       slug,

@@ -81,18 +81,18 @@ UPDATE / MERGE existing memory
 - LLM extractor prompt 改为允许 `kind=maxim`、status、confidence `[0,10]`，让模型表达真实知识状态。
 - 新增 writer update substrate：`updateProjectEntry(slug, patch, ...)`，支持修改 compiled truth/frontmatter 并追加 timeline。
 
-### Phase 1 — Curator lookup loop（已落地 create/update/delete/skip）
+### Phase 1 — Curator lookup loop（已落地 create/update/merge/archive/supersede/delete/skip）
 
 - Auto-write lane 对每个 candidate 调用 ADR 0015 `memory_search` 找语义近邻。
 - 读取 top candidates full entry。
-- Curator LLM 输出 `create/update/delete/skip` operation。
-- 默认优先 update/skip，不平行新增重复 entry；delete 只用于明确垃圾/噪声或应被移除的旧条目，git history 是回滚面。
-- 实现文件：`extensions/sediment/curator.ts` + `tryAutoWriteLane()`；当前 operation subset 为 create/update/delete/skip。
+- Curator LLM 输出 `create/update/merge/archive/supersede/delete/skip` operation。
+- 默认优先 update/merge/archive/supersede/skip，不平行新增重复 entry；delete 默认 soft（归档 + timeline），hard 只用于 secret/明显垃圾/用户明确移除，git history 是回滚面。
+- 实现文件：`extensions/sediment/curator.ts` + `tryAutoWriteLane()`；当前 operation set 为 create/update/merge/archive/supersede/delete/skip。
 
 ### Phase 2 — Full memory ops
 
-- 实现 `merge/supersede/archive`（delete 已有 hard-delete substrate）。
-- `/sediment curate --dry-run` 展示 operations plan。
+- `merge` 已有 first-class substrate：更新 target compiled truth + `derives_from`，并 archive 非 target sources；supersede 当前支持 old_slug + optional existing new_slug，不负责自动创建 replacement。
+- `/sediment curate --dry-run` 已展示 extractor → memory_search → curator operation plan；不写 markdown、不推进 checkpoint、不写 audit。
 - 自动 apply 仍只在 safety/storage gates 通过后执行。
 
 ## Consequences
@@ -115,10 +115,10 @@ UPDATE / MERGE existing memory
 
 - secret gate 和 storage gate 仍 fail-closed；
 - 所有 operation 写 audit + git commit，可回滚；
-- hard delete 默认不用，只在 secret/junk/用户明确要求时启用；
-- Phase 1 先做 create/update/skip，再扩展 merge/archive/delete。
+- delete 默认 soft；hard delete 默认不用，只在 secret/junk/用户明确要求时启用；
+- Phase 1/2 已支持 create/update/merge/archive/supersede/delete/skip 与 `/sediment curate --dry-run`。
 
 ## Implementation notes
 
-- `writeProjectEntry` 继续负责 create；新增 `updateProjectEntry` 作为 curator update substrate。
+- `writeProjectEntry` 继续负责 create；`updateProjectEntry` 作为 curator update substrate；`archiveProjectEntry` / `supersedeProjectEntry` / `deleteProjectEntry` 承接生命周期操作。
 - 主会话 `memory_*` 工具仍保持只读；不要新增 LLM-facing `memory_update/delete` 工具。
