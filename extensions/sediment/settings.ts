@@ -7,6 +7,8 @@ const PI_STACK_SETTINGS_PATH = path.join(
   os.homedir(), ".pi", "agent", "pi-astack-settings.json",
 );
 
+export type AutoWriteSemanticPolicyMode = "llm" | "mechanical";
+
 export interface SedimentSettings {
   enabled: boolean;
   gitCommit: boolean;
@@ -23,13 +25,16 @@ export interface SedimentSettings {
   autoLlmWriteEnabled: boolean;
   minDryRunSamples: number;
   requiredDryRunPassRate: number;
-  // Phase 1.4 LLM auto-write content gates. These shape the
+  // ADR 0016 (2026-05-10): by default, semantic write/update decisions
+  // belong to the LLM curator, not to mechanical hard gates. The old
+  // G2-G13-style policy overlay remains available as an emergency legacy
+  // mode, but the default is "llm".
+  autoWriteSemanticPolicy: AutoWriteSemanticPolicyMode;
+  // Legacy Phase 1.4 LLM auto-write content gates. These shape the
   // `DraftPolicy` passed into `validateProjectEntryDraft` and the
-  // `forceProvisional` knob in `writeProjectEntry` whenever sediment
-  // takes the LLM auto-write lane (NOT for explicit MEMORY: blocks,
-  // which are user-attested and pass through without policy overlay).
-  // Defaults are intentionally strict; relaxing them widens the LLM's
-  // attack/error surface.
+  // `forceProvisional` knob in `writeProjectEntry` only when
+  // autoWriteSemanticPolicy === "mechanical" (NOT for explicit MEMORY:
+  // blocks, and not for the ADR 0016 default LLM-curator posture).
   autoWriteForceProvisional: boolean;
   autoWriteDisallowMaxim: boolean;
   autoWriteDisallowArchived: boolean;
@@ -76,6 +81,7 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoLlmWriteEnabled: false,
   minDryRunSamples: 20,
   requiredDryRunPassRate: 0.9,
+  autoWriteSemanticPolicy: "llm",
   autoWriteForceProvisional: true,
   autoWriteDisallowMaxim: true,
   autoWriteDisallowArchived: true,
@@ -93,6 +99,10 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   autoWriteRollingPassRate: 0.85,
   autoWriteRawAuditChars: 8_000,
 };
+
+function asSemanticPolicyMode(value: unknown, fallback: AutoWriteSemanticPolicyMode): AutoWriteSemanticPolicyMode {
+  return value === "mechanical" || value === "llm" ? value : fallback;
+}
 
 function loadPiStackSettings(): Record<string, unknown> {
   try {
@@ -123,6 +133,7 @@ export function resolveSedimentSettings(): SedimentSettings {
     autoLlmWriteEnabled: asBoolean(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     minDryRunSamples: Math.max(1, Math.floor(asNumber(cfg.minDryRunSamples, DEFAULT_SEDIMENT_SETTINGS.minDryRunSamples))),
     requiredDryRunPassRate: Math.min(1, Math.max(0, asNumber(cfg.requiredDryRunPassRate, DEFAULT_SEDIMENT_SETTINGS.requiredDryRunPassRate))),
+    autoWriteSemanticPolicy: asSemanticPolicyMode(cfg.autoWriteSemanticPolicy, DEFAULT_SEDIMENT_SETTINGS.autoWriteSemanticPolicy),
     autoWriteForceProvisional: asBoolean(cfg.autoWriteForceProvisional, DEFAULT_SEDIMENT_SETTINGS.autoWriteForceProvisional),
     autoWriteDisallowMaxim: asBoolean(cfg.autoWriteDisallowMaxim, DEFAULT_SEDIMENT_SETTINGS.autoWriteDisallowMaxim),
     autoWriteDisallowArchived: asBoolean(cfg.autoWriteDisallowArchived, DEFAULT_SEDIMENT_SETTINGS.autoWriteDisallowArchived),

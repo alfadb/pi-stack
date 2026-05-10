@@ -9,18 +9,22 @@
  *   3. buildRunWindow over the per-session checkpoint slot.
  *   4. parseExplicitMemoryBlocks (deterministic, fence-aware). Always
  *      attempted. If hit, write each block via writeProjectEntry.
- *   5. *NEW (Phase 1.4 A2)*: When (4) yielded zero blocks AND
- *      autoLlmWriteEnabled gates pass, the LLM auto-write lane runs.
- *      It is bounded by:
+ *   5. When (4) yielded zero blocks AND autoLlmWriteEnabled gates pass,
+ *      the LLM auto-write lane runs in the background. ADR 0016 changes
+ *      the default posture from mechanical semantic gates to an LLM-curator
+ *      posture: the LLM decides whether a durable candidate is worth
+ *      writing; hard gates are reserved for sensitive information and
+ *      storage integrity.
+ *      Operational bounds still apply:
  *        - readiness gate (sample count + dry-run pass rate)
- *        - per-session sampling stride (autoWriteSampleEveryNRuns)
- *        - per-session rate limit (autoWriteMaxPerHour, sliding 60min)
  *        - rolling-quality circuit breaker (in-process trip)
- *        - content gates (forceProvisional, disallowMaxim, maxConfidence,
- *          disallowArchived; G2/G3/G4)
- *        - all standard write-side defenses (G5/G6/G7/G8 from A1)
- *   6. saveSessionCheckpoint advances iff write outcomes are terminal
- *      (created / dry_run / dedupe_reject / validation / lint).
+ *        - per-session rate limit (autoWriteMaxPerHour, sliding 60min)
+ *        - per-session sampling stride (autoWriteSampleEveryNRuns)
+ *        - standard write-side defenses (schema, sanitizer, lint, lock,
+ *          atomic write, audit)
+ *   6. Lane A advances checkpoint after terminal write outcomes. Lane C
+ *      optimistically advances before bg work because auto-write is
+ *      best-effort, not an authoritative replay queue.
  *   7. Audit row.
  */
 
@@ -154,7 +158,7 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
     "duplicate_slug", "duplicate_title", "validation_error", "lint_error",
   ]);
   return results.every((result) => {
-    if (result.status === "created" || result.status === "dry_run") return true;
+    if (result.status === "created" || result.status === "updated" || result.status === "dry_run") return true;
     if (!result.reason) return false;
     return terminalReasons.has(result.reason) || result.reason.startsWith("credential pattern detected");
   });
@@ -193,7 +197,8 @@ function registerSedimentCommand(pi: ExtensionAPI) {
             `LLM extractor model: ${settings.extractorModel}`,
             `Auto LLM write enabled: ${settings.autoLlmWriteEnabled}`,
             `Auto LLM write gate: samples>=${settings.minDryRunSamples}, passRate>=${settings.requiredDryRunPassRate}`,
-            "Auto LLM extractor: dry-run command only; agent_end uses explicit MEMORY blocks",
+            `Auto LLM semantic policy: ${settings.autoWriteSemanticPolicy}`,
+            "Auto LLM extractor: LIVE on agent_end after explicit MEMORY miss; default posture trusts the LLM curator and keeps only safety/storage gates",
           ].join("\n"),
           "info",
         );
@@ -923,7 +928,7 @@ async function tryAutoWriteLane(args: {
       settings,
       dryRun: false,
       policy,
-      forceProvisional: settings.autoWriteForceProvisional,
+      forceProvisional: shouldForceAutoWriteProvisional(settings),
     }));
   }
 
@@ -957,6 +962,7 @@ function snapshotSedimentSettings(settings: ReturnType<typeof resolveSedimentSet
     defaultConfidence: settings.defaultConfidence,
     maxWindowChars: settings.maxWindowChars,
     maxWindowEntries: settings.maxWindowEntries,
+    autoWriteSemanticPolicy: settings.autoWriteSemanticPolicy,
     autoWriteForceProvisional: settings.autoWriteForceProvisional,
     autoWriteDisallowMaxim: settings.autoWriteDisallowMaxim,
     autoWriteDisallowArchived: settings.autoWriteDisallowArchived,
@@ -970,12 +976,17 @@ function snapshotSedimentSettings(settings: ReturnType<typeof resolveSedimentSet
 
 /** Build the DraftPolicy passed into validation/writer for the LLM lane. */
 export function buildAutoWritePolicy(settings: SedimentSettings): DraftPolicy {
+  if (settings.autoWriteSemanticPolicy !== "mechanical") return {};
   return {
     disallowMaxim: settings.autoWriteDisallowMaxim,
     disallowArchived: settings.autoWriteDisallowArchived,
     maxConfidence: settings.autoWriteMaxConfidence,
     disallowNearDuplicate: settings.autoWriteDisallowNearDuplicate,
   };
+}
+
+function shouldForceAutoWriteProvisional(settings: SedimentSettings): boolean {
+  return settings.autoWriteSemanticPolicy === "mechanical" && settings.autoWriteForceProvisional;
 }
 
 /**

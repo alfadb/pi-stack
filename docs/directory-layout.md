@@ -36,7 +36,8 @@ alfadb/pi-astack/
 │   │   ├── 0012-sediment-pensieve-gbrain-dual-target.md  # superseded by memory-architecture.md
 │   │   ├── 0013-asymmetric-trust-three-lanes.md          # Lane A/B/C/D trust tier (2026-05-08)；Lane B/D 被 ADR 0014 失效
 │   │   ├── 0014-abrain-as-personal-brain.md              # ✅ ~/.abrain 重定位为数字孪生七区结构 (2026-05-09, v1.4)
-│   │   └── 0015-memory-search-llm-driven-retrieval.md    # ✅ memory_search 双阶段 LLM rerank (2026-05-10, Accepted; Phase 0/1 implemented)
+│   │   ├── 0015-memory-search-llm-driven-retrieval.md    # ✅ memory_search 双阶段 LLM rerank (2026-05-10, Accepted; Phase 0/1 implemented)
+│   │   └── 0016-sediment-as-llm-curator.md               # ✅ sediment 从 gate-heavy extractor 转向 LLM curator (2026-05-10)
 │   ├── brain-redesign-spec.md         # ✅ ADR 0014 详细规范 (v1.3) — abrain 七区拓扑/vault 双层/Lane G/V
 │   └── migration/
 │       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6（Phase 2 起部分被 ADR 0014 重新规划）
@@ -72,7 +73,7 @@ alfadb/pi-astack/
 │   │   ├── migrate.ts                 # legacy migration dry-run planner
 │   │   ├── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
 │   │   └── index-file.ts              # generated enhanced _index.md rebuild writer
-│   ├── sediment/                      # ✅ 实现：project-only writer + LLM auto-write lane（Phase 1.4 A1+A2+A3）
+│   ├── sediment/                      # ✅ 实现：project-only writer + LLM auto-write lane + ADR 0016 LLM semantic policy/update substrate
 │   │   ├── index.ts                   # /sediment 子命令 + agent_end hook + footer status FSM (idle/running/completed/failed) + bg promise tracking
 │   │   ├── settings.ts                # sediment 配置读取
 │   │   ├── checkpoint.ts              # per-session checkpoint + run window builder + RMW lock
@@ -83,7 +84,7 @@ alfadb/pi-astack/
 │   │   ├── validation.ts              # draft runtime validation + DraftPolicy overlay (G3/G3.5/G4/G13)
 │   │   ├── dedupe.ts                  # HARD (slug/word-trigram≥0.7) + SOFT G13 (char-trigram + rare token + same kind) duplicate detection
 │   │   ├── sanitizer.ts               # G5 写前脱敏/fail-closed (jwt/pem/aws/url/email/ip/$HOME)
-│   │   └── writer.ts                  # validate + sanitize + dedupe + lint + lock + atomic write + audit + git best-effort
+│   │   └── writer.ts                  # create/update substrate + validate/sensitive-info sanitize/dedupe/lint/lock/atomic write/audit/git
 │   ├── compaction-tuner/              # ✅ 实现：计划外落地（2026-05-08）
 │   │   ├── index.ts                   # agent_end hook 读 ctx.getContextUsage() 超阈 → ctx.compact()；/compaction-tuner [status|trigger]
 │   │   └── settings.ts                # thresholdPercent / rearmMarginPercent
@@ -116,7 +117,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
-| `extensions/sediment/` | ✅ 实现（explicit extractor + LLM dry-run + LLM auto-write lane LIVE + migrate-one + status FSM + G2-G13 闸门） | Phase 1.4 A1+A2+A3 |
+| `extensions/sediment/` | ✅ 实现（explicit extractor + LLM dry-run + LLM auto-write lane LIVE + migrate-one + status FSM + ADR 0016 默认 LLM semantic policy + update substrate；legacy mechanical gates 可选） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
 | `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + /vault + /secret 命令） | ADR 0014 §D4 (2026-05-09) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
@@ -270,7 +271,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | `extensions/model-curator/` | alfadb（C 类迁入） | ✅ 已实现 | ✅ |
 | `extensions/model-fallback/` | alfadb（A 类永久 own） | ✅ 已实现 | ✅ |
 | `extensions/memory/` | alfadb（v7 新建） | ✅ 已实现（只读 Facade） | ✅ |
-| `extensions/sediment/` | alfadb（A 类改造） | ✅ 部分实现（explicit extractor + LLM dry-run + migrate-one plan/apply/restore + migration-backups；自动 LLM 写入未启用） | ✅ |
+| `extensions/sediment/` | alfadb（A 类改造） | ✅ 实现（explicit extractor + LLM auto-write LIVE + migrate-one plan/apply/restore + migration-backups + LLM semantic policy/update substrate） | ✅ |
 | `extensions/browse/` | alfadb（C 类迁入） | [计划] | ✅ |
 | `skills/` | alfadb（B 类端口） | [计划] | ✅ |
 | `prompts/` | alfadb（A 类 + B 类） | [计划] | ✅ |
@@ -300,7 +301,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
   memory/   ──→ markdown + git (source of truth, read-only)
                  ├── <project>/.pensieve/     (项目级)
                  └── ~/.abrain/               (世界级，可选)
-  sediment/ ──→ markdown + git (唯一写入者；explicit extractor 可写，LLM 自动写入计划中)
+  sediment/ ──→ markdown + git (唯一写入者；explicit extractor + LLM auto-write LIVE；ADR 0016 转向 curator/update)
 ```
 
 **严禁的引用关系**:

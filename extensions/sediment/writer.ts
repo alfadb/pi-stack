@@ -8,6 +8,8 @@ import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
 import { type DraftPolicy, type EntryKind, type EntryStatus, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
+import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
+import type { Jsonish } from "../memory/types";
 // `slugify` is the free-text-to-bare-slug normalizer. We deliberately
 // do NOT use `normalizeBareSlug` here, because that one is designed
 // for path/wikilink/id inputs (`[[X]]`, `project:foo:bar`,
@@ -63,10 +65,21 @@ export interface WriteProjectEntryOptions {
   forceProvisional?: boolean;
 }
 
+export interface ProjectEntryUpdateDraft {
+  title?: string;
+  kind?: EntryKind;
+  status?: EntryStatus;
+  confidence?: number;
+  compiledTruth?: string;
+  triggerPhrases?: string[];
+  sessionId?: string;
+  timelineNote?: string;
+}
+
 export interface WriteProjectEntryResult {
   slug: string;
   path: string;
-  status: "created" | "dry_run" | "rejected";
+  status: "created" | "updated" | "dry_run" | "rejected";
   reason?: string;
   lintErrors?: number;
   lintWarnings?: number;
@@ -88,6 +101,15 @@ function nowIso(): string {
 function yamlString(value: string): string {
   if (/^[A-Za-z0-9_.:/@+-]+$/.test(value)) return value;
   return JSON.stringify(value);
+}
+
+function yamlValue(value: Jsonish): string[] {
+  if (Array.isArray(value)) return value.map((item) => `  - ${yamlString(String(item))}`);
+  if (value && typeof value === "object") return [yamlString(JSON.stringify(value))];
+  if (typeof value === "boolean") return [value ? "true" : "false"];
+  if (typeof value === "number") return [String(value)];
+  if (value === null) return ["null"];
+  return [yamlString(String(value ?? ""))];
 }
 
 function yamlList(key: string, values: string[] | undefined): string[] {
@@ -176,6 +198,147 @@ function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: s
   return { slug, markdown };
 }
 
+function frontmatterOrder(frontmatterText: string): string[] {
+  const out: string[] = [];
+  for (const line of frontmatterText.split("\n")) {
+    const match = line.match(/^([A-Za-z0-9_-]+):/);
+    if (match && !out.includes(match[1])) out.push(match[1]);
+  }
+  return out;
+}
+
+function renderFrontmatter(frontmatter: Record<string, Jsonish>, originalOrder: string[]): string {
+  const preferred = [
+    "id", "scope", "kind", "status", "confidence", "schema_version",
+    "title", "created", "updated", "trigger_phrases",
+  ];
+  const keys = [
+    ...preferred,
+    ...originalOrder,
+    ...Object.keys(frontmatter).sort(),
+  ].filter((key, index, arr) => frontmatter[key] !== undefined && arr.indexOf(key) === index);
+
+  const lines = ["---"];
+  for (const key of keys) {
+    const value = frontmatter[key];
+    if (Array.isArray(value)) {
+      if (value.length === 0) continue;
+      lines.push(`${key}:`, ...yamlValue(value));
+      continue;
+    }
+    lines.push(`${key}: ${yamlValue(value)[0]}`);
+  }
+  lines.push("---", "");
+  return lines.join("\n");
+}
+
+async function findProjectEntryFile(projectRoot: string, slug: string): Promise<string | undefined> {
+  const pensieveRoot = path.join(projectRoot, ".pensieve");
+  const targetName = `${slug}.md`;
+  async function walk(dir: string): Promise<string | undefined> {
+    let entries: fsSync.Dirent[];
+    try {
+      entries = await fs.readdir(dir, { withFileTypes: true });
+    } catch {
+      return undefined;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git" || entry.name === ".state" || entry.name === ".index") continue;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const hit = await walk(abs);
+        if (hit) return hit;
+      } else if (entry.isFile() && entry.name === targetName) {
+        return abs;
+      }
+    }
+    return undefined;
+  }
+  return walk(pensieveRoot);
+}
+
+function mergeUpdateMarkdown(
+  raw: string,
+  patch: ProjectEntryUpdateDraft,
+  slug: string,
+  projectRoot: string,
+): { markdown: string; validationDraft: ProjectEntryDraft; sanitizedReplacements: string[] } | { error: string } {
+  const timestamp = nowIso();
+  const { frontmatterText, body } = splitFrontmatter(raw);
+  const frontmatter = parseFrontmatter(frontmatterText);
+  const { compiledTruth: existingCompiledTruth, timeline } = splitCompiledTruth(body);
+
+  const title = patch.title ?? (typeof frontmatter.title === "string" ? frontmatter.title : slug);
+  const kind = patch.kind ?? (typeof frontmatter.kind === "string" ? frontmatter.kind as EntryKind : "fact");
+  const status = patch.status ?? (typeof frontmatter.status === "string" ? frontmatter.status as EntryStatus : "provisional");
+  const confidenceRaw = patch.confidence ?? (typeof frontmatter.confidence === "number" ? frontmatter.confidence : Number(frontmatter.confidence ?? 3));
+  const confidence = Math.min(10, Math.max(0, Math.round(Number.isFinite(confidenceRaw) ? confidenceRaw : 3)));
+  const compiledTruth = patch.compiledTruth !== undefined
+    ? normalizeCompiledTruth(title, patch.compiledTruth)
+    : existingCompiledTruth.trim();
+
+  const validationDraft: ProjectEntryDraft = { title, kind, status, confidence, compiledTruth };
+  const validationErrors = validateProjectEntryDraft(validationDraft);
+  if (validationErrors.length > 0) return { error: `validation_error: ${validationErrors.map((e) => `${e.field}:${e.message}`).join("; ")}` };
+
+  const titleSanitize = sanitizeForMemory(title);
+  const bodySanitize = sanitizeForMemory(compiledTruth);
+  const noteSanitize = patch.timelineNote
+    ? sanitizeForMemory(patch.timelineNote)
+    : { ok: true, text: undefined, replacements: [] as string[] };
+  const triggerPhrases = patch.triggerPhrases;
+  const triggerPhraseSanitizes = (triggerPhrases ?? []).map((p) => sanitizeForMemory(p));
+  const failedSanitize = [titleSanitize, bodySanitize, noteSanitize, ...triggerPhraseSanitizes].find((result) => !result.ok);
+  if (failedSanitize) return { error: failedSanitize.error ?? "sanitize_error" };
+
+  const safeTitle = titleSanitize.text ?? title;
+  const safeCompiledTruth = bodySanitize.text ?? compiledTruth;
+  const safeTimelineNote = patch.timelineNote ? (noteSanitize.text ?? patch.timelineNote) : "updated by sediment curator";
+  const sanitizedReplacements = [
+    ...titleSanitize.replacements,
+    ...bodySanitize.replacements,
+    ...noteSanitize.replacements,
+    ...triggerPhraseSanitizes.flatMap((s) => s.replacements),
+  ];
+
+  const nextFrontmatter: Record<string, Jsonish> = {
+    ...frontmatter,
+    id: frontmatter.id ?? `project:${projectSlug(projectRoot)}:${slug}`,
+    scope: "project",
+    kind,
+    status,
+    confidence,
+    schema_version: frontmatter.schema_version ?? 1,
+    title: safeTitle,
+    created: frontmatter.created ?? timestamp,
+    updated: timestamp,
+  };
+  if (triggerPhrases) {
+    nextFrontmatter.trigger_phrases = triggerPhraseSanitizes.map((s, i) => s.text ?? triggerPhrases[i]);
+  }
+
+  const timelineSession = patch.sessionId || "sediment";
+  const nextTimeline = [
+    ...timeline,
+    `- ${timestamp} | ${timelineSession} | updated | ${safeTimelineNote}`,
+  ];
+  const markdown = [
+    renderFrontmatter(nextFrontmatter, frontmatterOrder(frontmatterText)),
+    safeCompiledTruth.trim(),
+    "",
+    "## Timeline",
+    "",
+    ...nextTimeline,
+    "",
+  ].join("\n");
+
+  return {
+    markdown,
+    validationDraft: { title: safeTitle, kind, status, confidence, compiledTruth: safeCompiledTruth },
+    sanitizedReplacements,
+  };
+}
+
 async function acquireLock(projectRoot: string, timeoutMs: number): Promise<LockHandle> {
   const lockDir = sedimentLocksDir(projectRoot);
   const lockPath = path.join(lockDir, "sediment.lock");
@@ -237,6 +400,120 @@ export async function appendAudit(projectRoot: string, event: Record<string, unk
   };
   await fs.appendFile(auditPath, `${JSON.stringify(enriched)}\n`, "utf-8");
   return auditPath;
+}
+
+export async function updateProjectEntry(
+  slugRaw: string,
+  patch: ProjectEntryUpdateDraft,
+  opts: WriteProjectEntryOptions,
+): Promise<WriteProjectEntryResult> {
+  const started = Date.now();
+  const projectRoot = path.resolve(opts.projectRoot);
+  const pensieveRoot = path.join(projectRoot, ".pensieve");
+  const slug = slugify(slugRaw);
+  if (!fsSync.existsSync(pensieveRoot)) {
+    return { slug, path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
+  }
+
+  const target = await findProjectEntryFile(projectRoot, slug);
+  if (!target) {
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "reject",
+      reason: "entry_not_found",
+      target: `project:${slug}`,
+      duration_ms: Date.now() - started,
+    });
+    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath };
+  }
+
+  let raw: string;
+  try {
+    raw = await fs.readFile(target, "utf-8");
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "reject",
+      reason: `read_error: ${message}`,
+      target: `project:${slug}`,
+      duration_ms: Date.now() - started,
+    });
+    return { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath };
+  }
+
+  const merged = mergeUpdateMarkdown(raw, patch, slug, projectRoot);
+  if ("error" in merged) {
+    const reason = merged.error.startsWith("credential pattern detected") ? merged.error : merged.error.split(":")[0];
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "reject",
+      reason,
+      target: `project:${slug}`,
+      detail: merged.error,
+      duration_ms: Date.now() - started,
+    });
+    return { slug, path: target, status: "rejected", reason, auditPath };
+  }
+
+  const lint = lintMarkdown(merged.markdown, target);
+  const lintErrors = lint.filter((issue) => issue.severity === "error").length;
+  const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
+  if (lintErrors > 0) {
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "reject",
+      reason: "lint_error",
+      target: `project:${slug}`,
+      lintErrors,
+      lintWarnings,
+      duration_ms: Date.now() - started,
+    });
+    return { slug, path: target, status: "rejected", reason: "lint_error", lintErrors, lintWarnings, auditPath };
+  }
+
+  if (opts.dryRun) {
+    return {
+      slug,
+      path: target,
+      status: "dry_run",
+      lintErrors,
+      lintWarnings,
+      sanitizedReplacements: merged.sanitizedReplacements,
+    };
+  }
+
+  let lock: LockHandle | undefined;
+  try {
+    lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
+    await atomicWrite(target, merged.markdown);
+    const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `update ${slug}`) : null;
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "update",
+      target: `project:${slug}`,
+      path: path.relative(projectRoot, target),
+      lint_result: "pass",
+      git_commit: git,
+      duration_ms: Date.now() - started,
+    });
+    return {
+      slug,
+      path: target,
+      status: "updated",
+      lintErrors,
+      lintWarnings,
+      gitCommit: git,
+      auditPath,
+      sanitizedReplacements: merged.sanitizedReplacements,
+    };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await appendAudit(projectRoot, {
+      operation: "error",
+      target: `project:${slug}`,
+      reason: message,
+      duration_ms: Date.now() - started,
+    });
+    return { slug, path: target, status: "rejected", reason: message, lintErrors, lintWarnings, auditPath };
+  } finally {
+    await lock?.release();
+  }
 }
 
 export async function writeProjectEntry(

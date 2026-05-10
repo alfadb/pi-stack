@@ -1,8 +1,8 @@
 # Migration — memory_search 升级为 LLM-driven retrieval
 
-> **状态**：In progress（2026-05-10；Phase 0/1 implemented，Phase 2 pending burn-in）
+> **状态**：In progress（2026-05-10；Phase 0/1 implemented；Phase 2 被 [ADR 0016](../adr/0016-sediment-as-llm-curator.md) 扩展为 curator update loop，不再只是 dedupe reject）
 > **依赖**：[ADR 0015](../adr/0015-memory-search-llm-driven-retrieval.md)（决策本身）
-> **关联**：[ADR 0010](../adr/0010-sediment-single-agent-with-lookup-tools.md)（lookup-tools loop 设计，Phase 2 落地其内核）
+> **关联**：[ADR 0010](../adr/0010-sediment-single-agent-with-lookup-tools.md)（lookup-tools loop 设计）/ [ADR 0016](../adr/0016-sediment-as-llm-curator.md)（curator + update/delete 方向）
 > **触发**：见 ADR 0015 背景
 
 ## 总览
@@ -11,10 +11,10 @@
 |---|---|---|---|
 | **Phase 0** | 增强 `_index.md` 格式 | ✅ implemented | 无 |
 | **Phase 1** | LLM-driven search 核心实现 | ✅ implemented | Phase 0 |
-| **Phase 2** | sediment dedupe 接入新 search（ADR 0010 lookup-tools loop） | 1-2 小时 | Phase 1 burn-in 1-2 天 |
+| **Phase 2** | sediment curator 接入新 search：优先 update/merge，create 次之（ADR 0010 lookup-tools loop + ADR 0016） | 2-4 小时 | Phase 1 burn-in 1-2 天 |
 | **Phase 3** | memory-architecture / brain-redesign-spec 全量文档对齐 + ADR 0010 状态升级 | 30 分钟 | Phase 1+2 落地 |
 
-总工作量约一个 4-6 小时会话窗口。Phase 0+1 可一次性做完，Phase 2 建议 Phase 1 灰度跑 1-2 天观察后再上。
+总工作量约一个 4-6 小时会话窗口。Phase 0+1 可一次性做完；Phase 2 不再以“拒绝同义重复”为终点，而是进入“找旧条目 → update/merge/skip/create”的 curator loop。
 
 ---
 
@@ -217,7 +217,7 @@ promptGuidelines:
 
 ---
 
-## Phase 2：sediment dedupe 接入新 search（ADR 0010 lookup-tools loop）
+## Phase 2：sediment curator 接入新 search（ADR 0010 lookup-tools loop + ADR 0016）
 
 ### 现状
 
@@ -230,51 +230,55 @@ promptGuidelines:
 
 ### 目标
 
-sediment writer 在 lint 之后、写盘之前调一次：
+sediment curator 在 create 前调用 ADR 0015 `memory_search`：
 
 ```typescript
-const semanticNeighbors = await llmSearch({
-  query: `语义近邻：${draft.compiledTruth}`,
+const neighbors = await memorySearch({
+  query: `找与这个候选知识语义相关、可能应被更新/合并/跳过的旧条目：${draft.compiledTruth}`,
   filters: { limit: 5 },
 }, settings, modelRegistry);
 
-if (semanticNeighbors.some(n => n.score > SEMANTIC_DUP_THRESHOLD)) {
-  return { rejected: true, reason: "semantic_duplicate", neighbor: ... };
-}
+const op = await curatorLlm.decide({ draft, neighbors: fullEntries });
+// op: skip | create | update | merge | supersede | archive | delete
 ```
 
-LLM 在 stage 2 精排时已经做过"语义相似"判断；sediment 直接复用结果。
+LLM 在 stage 2 精排时已经做过语义相似和 timeline 判断；sediment 不再把结果简化成 `semantic_duplicate => reject`，而是让 curator 决定 update/merge/skip/create。
 
-### 关键阈值
+### 关键策略
 
-`SEMANTIC_DUP_THRESHOLD`（建议默认 0.85）：stage 2 输出的 score（0-10），≥ 8.5 视为同一洞察。需要在 burn-in 期实测调校。
+不设置固定 `SEMANTIC_DUP_THRESHOLD` 作为 hard reject。相似度、freshness、status、timeline supersession 都交给 curator prompt 判断：
+
+- 同义改述 → update/merge/skip
+- 旧决策已实现 → update compiled truth + append timeline
+- 旧知识被推翻 → supersede/archive
+- 全新知识 → create
 
 ### settings 字段
 
 ```jsonc
 {
   "sediment": {
-    "semanticDedupeEnabled": true,
-    "semanticDedupeScoreThreshold": 8.5
+    "autoWriteSemanticPolicy": "llm"
   }
 }
 ```
 
-可单独 disable（回退到当前 HARD + G13 dedupe）。
+`mechanical` legacy mode 可临时恢复旧 G2-G13 行为，但不是长期默认。
 
 ### audit 扩展
 
-`audit.jsonl` 写 dedupe 决策时 log：
-- LLM 返回的 top-5 neighbor 及 score
-- 触发 reject 的 neighbor slug + score
+`audit.jsonl` 写 curator 决策时 log：
+- LLM 返回的 top-5 neighbor 及 score/rank_reason
+- curator operation（skip/create/update/merge/supersede/archive/delete）
+- operation rationale
 - 决策耗时（用于评估"sediment 调 search → search 调 LLM"的总延迟）
 
 ### Phase 2 验收
 
-- 同义改述被拒：手工构造一条与已有 entry 同义但表达不同的 draft，sediment 在 dedupe 阶段拒绝，audit 记录 LLM neighbor 证据
-- 真新洞察通过：另一条全新内容正常写入
-- LLM 不可用时 fallback 到当前 HARD + G13 dedupe（sediment 与 search 在此处分歧——sediment 必须能写，所以走宽松 dedupe；search 是查询不能宽松，所以 hard error）
-- D6 自重复在 burn-in 期不再出现
+- 同义改述不再平行新增：手工构造一条与已有 entry 同义但表达不同的 draft，sediment curator 输出 update/skip/merge，audit 记录 LLM neighbor 证据
+- 真新洞察通过：另一条全新内容正常 create
+- LLM 不可用时 hard error / audit failed；不要静默回退到 G13 机械语义判断
+- D6 自重复在 burn-in 期不再出现；旧知识能被 update/supersede 而不是无限累加
 
 ---
 

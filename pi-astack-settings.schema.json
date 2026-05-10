@@ -88,7 +88,7 @@
 
     "sediment": {
       "type": "object",
-      "description": "Project-only sediment writer settings (extensions/sediment/). Current slice provides writer substrate only: sanitize + lint + lock + atomic markdown write + audit + best-effort git commit. Automatic LLM extraction is not enabled yet.",
+      "description": "Project-only sediment writer settings (extensions/sediment/). Provides explicit MEMORY writes plus live LLM auto-write. ADR 0016 default posture trusts the LLM curator for semantic write decisions; hard gates focus on sensitive information and storage integrity.",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -196,22 +196,29 @@
           "description": "Required pass rate over llm_dry_run samples before automatic LLM writing may be enabled."
         },
 
+        "autoWriteSemanticPolicy": {
+          "type": "string",
+          "enum": ["llm", "mechanical"],
+          "default": "llm",
+          "description": "ADR 0016 semantic policy mode for the LLM auto-write lane. `llm` trusts the extractor/curator to decide kind/status/confidence and whether a candidate is worth writing; mechanical G2-G13-style policy gates are disabled except for sensitive-info and storage-integrity checks. `mechanical` restores the legacy policy overlay using autoWriteForceProvisional/DisallowMaxim/DisallowArchived/MaxConfidence/DisallowNearDuplicate."
+        },
+
         "autoWriteForceProvisional": {
           "type": "boolean",
           "default": true,
-          "description": "When the LLM auto-write lane fires, coerce the entry's `status` to `provisional` regardless of what the LLM proposed. Defends against the LLM auto-creating an `active`/`archived` entry that should require human curation. Strongly recommended to leave true; relaxing this widens the LLM's authority over sediment state transitions."
+          "description": "Legacy mechanical-mode setting. When autoWriteSemanticPolicy=mechanical, coerce the entry's `status` to `provisional` regardless of what the LLM proposed. Ignored in the default `llm` mode."
         },
 
         "autoWriteDisallowMaxim": {
           "type": "boolean",
           "default": true,
-          "description": "Reject any LLM auto-write candidate with `kind: maxim`. Maxims are the highest authority entry kind; we never want an LLM minting them. Strongly recommended to leave true."
+          "description": "Legacy mechanical-mode setting. Reject any LLM auto-write candidate with `kind: maxim` when autoWriteSemanticPolicy=mechanical. Ignored in the default `llm` mode."
         },
 
         "autoWriteDisallowArchived": {
           "type": "boolean",
           "default": true,
-          "description": "Reject any LLM auto-write candidate whose `status` is `archived`, `deprecated`, or `superseded`. These transitions should follow citation/curation flows, not appear at first creation."
+          "description": "Legacy mechanical-mode setting. Reject any LLM auto-write candidate whose `status` is `archived`, `deprecated`, or `superseded` when autoWriteSemanticPolicy=mechanical. Ignored in the default `llm` mode."
         },
 
         "autoWriteMaxConfidence": {
@@ -219,13 +226,13 @@
           "default": 6,
           "minimum": 0,
           "maximum": 10,
-          "description": "Cap on `confidence` for LLM auto-written entries. Confidence in [7, 10] is reserved for human-attested entries that have survived peer review or repeated citation. Default 6 keeps auto-written entries clearly second-tier."
+          "description": "Legacy mechanical-mode setting. Cap `confidence` for LLM auto-written entries when autoWriteSemanticPolicy=mechanical. Ignored in the default `llm` mode."
         },
 
         "autoWriteDisallowNearDuplicate": {
           "type": "boolean",
           "default": true,
-          "description": "Reject LLM auto-write candidates flagged by the soft near-duplicate signal: char-trigram jaccard >= 0.20 AND a shared rare technical token (df <= 2) AND same kind as an existing entry. Catches paraphrased restatements that the strict word-trigram dedupe misses (e.g. two entries about `normalizeBareSlug` with no shared 3-token windows). Hard duplicates (slug_exact, word-trigram >= 0.7) are always rejected regardless of this flag. Explicit MEMORY: blocks bypass this gate (user-attested writes can still record refined restatements)."
+          "description": "Legacy mechanical-mode setting. Reject LLM auto-write candidates flagged by the soft near-duplicate signal when autoWriteSemanticPolicy=mechanical. Ignored in the default `llm` mode; semantic duplicate/update decisions should be handled by the LLM curator with memory_search rather than char-trigram hard gates. Hard duplicates (slug_exact, word-trigram >= 0.7) remain storage-level rejects."
         },
 
         "autoWriteSampleEveryNRuns": {

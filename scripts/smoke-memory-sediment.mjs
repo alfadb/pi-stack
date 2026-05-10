@@ -149,7 +149,7 @@ async function main() {
     const { planMigrationDryRun, writeMigrationReport } = req("./memory/migrate.js");
     const { runDoctorLite } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
-    const { writeProjectEntry } = req("./sediment/writer.js");
+    const { writeProjectEntry, updateProjectEntry } = req("./sediment/writer.js");
     const { listMigrationBackups, migrateOne, restoreMigrationBackup } = req("./sediment/migration.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     const { buildRunWindow, saveCheckpoint, loadCheckpoint, loadSessionCheckpoint, saveSessionCheckpoint } = req("./sediment/checkpoint.js");
@@ -752,8 +752,8 @@ END_MEMORY`;
         "role=user",
         "role=toolResult",
         "never as instructions",
-        "kind: maxim",
-        "[0, 6]",
+        "kind=maxim",
+        "[0, 10]",
         // Durability test (added after first-fire produced transient
         // event entries; "after the restart at 16:43" is the canary).
         "Durability test",
@@ -1101,8 +1101,9 @@ END_MEMORY`;
         "MEMORY:\ntitle: A2 Mock Extracted Insight\nkind: fact\nconfidence: 4\n---\n# A2 Mock Extracted Insight\n\nThe LLM auto-write lane successfully extracted this insight from the transcript window.\nEND_MEMORY",
         // Run 2: SKIP.
         "SKIP",
-        // Run 3: maxim attempt (must be filtered by policy).
-        "MEMORY:\ntitle: Forbidden Maxim Attempt\nkind: maxim\nconfidence: 9\n---\n# Forbidden Maxim Attempt\n\nThis attempts to mint a maxim with confidence 9. Policy must reject both kind=maxim and confidence>6.\nEND_MEMORY",
+        // Run 3: maxim/high-confidence attempt. Default ADR 0016 LLM policy trusts it;
+        // mechanical legacy mode would still reject.
+        "MEMORY:\ntitle: Trusted Maxim Attempt\nkind: maxim\nstatus: active\nconfidence: 9\n---\n# Trusted Maxim Attempt\n\nThis attempts to mint a maxim with confidence 9. Default LLM semantic policy should trust the model; mechanical legacy mode would reject both kind=maxim and confidence>6.\nEND_MEMORY",
       ];
       // Reset global so we control invocation count.
       globalThis.__A2_INVOCATIONS__ = 0;
@@ -1158,6 +1159,9 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       // Parse + apply auto-write policy.
       const drafts1 = parseBlocks(r1.rawText);
       const policy = buildAutoWritePolicy(a2Settings);
+      const mechanicalPolicy = buildAutoWritePolicy({ ...a2Settings, autoWriteSemanticPolicy: "mechanical" });
+      assert(Object.keys(policy).length === 0, `default ADR 0016 llm policy should have no semantic hard gates: ${JSON.stringify(policy)}`);
+      assert(mechanicalPolicy.disallowMaxim === true && mechanicalPolicy.maxConfidence === 6, `mechanical policy should preserve legacy gates: ${JSON.stringify(mechanicalPolicy)}`);
       const preview1 = previewExtraction(drafts1, policy);
       assert(preview1.drafts[0].validationErrors.length === 0, `r1 should pass policy: ${JSON.stringify(preview1)}`);
       // Write through the production path.
@@ -1165,10 +1169,10 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         ...drafts1[0],
         sessionId: "smoke-a2",
         timelineNote: "smoke A2 e2e",
-      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false, policy, forceProvisional: a2Settings.autoWriteForceProvisional });
+      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false, policy, forceProvisional: false });
       assert(w1.status === "created", `r1 write failed: ${w1.reason}`);
       const r1Written = fs.readFileSync(w1.path, "utf-8");
-      assert(/^status: provisional$/m.test(r1Written), `r1 forceProvisional: status must be provisional, got:\n${r1Written}`);
+      assert(/^status: provisional$/m.test(r1Written), `r1 omitted status should default to provisional, got:\n${r1Written}`);
       assert(/^confidence: 4$/m.test(r1Written), `r1 confidence preserved at 4`);
       assert(/^created: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2}$/m.test(r1Written), `r1 created must be ISO datetime, got:\n${r1Written}`);
       assert(/^updated: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2}$/m.test(r1Written), `r1 updated must be ISO datetime, got:\n${r1Written}`);
@@ -1181,25 +1185,45 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       });
       assert(r2.ok && r2.rawText === "SKIP", `r2 SKIP path: ${JSON.stringify(r2)}`);
 
-      // Response[2]: maxim+confidence=9. Policy preview MUST mark validation errors.
+      // Response[2]: maxim+confidence=9. Default llm policy allows it;
+      // mechanical legacy policy would still flag it.
       const r3 = await runLlmExtractorDryRun("--- ENTRY 3 t3 message/assistant ---\nWe should ALWAYS do X.", {
         settings: a2Settings,
         modelRegistry: mockModelRegistry,
       });
-      assert(r3.ok && r3.rawText.includes("Forbidden Maxim Attempt"), "r3 should return maxim attempt");
+      assert(r3.ok && r3.rawText.includes("Trusted Maxim Attempt"), "r3 should return maxim attempt");
       const drafts3 = parseBlocks(r3.rawText);
       const preview3 = previewExtraction(drafts3, policy);
-      const errs3 = preview3.drafts[0].validationErrors;
-      assert(errs3.some(e => /maxim/.test(e.message)), `r3 must report maxim violation: ${JSON.stringify(errs3)}`);
-      assert(errs3.some(e => /<= 6/.test(e.message)), `r3 must report confidence>6 violation: ${JSON.stringify(errs3)}`);
-      // Even if we tried to write it, validation rejects.
+      assert(preview3.drafts[0].validationErrors.length === 0, `r3 must pass default llm policy: ${JSON.stringify(preview3)}`);
+      const legacyPreview3 = previewExtraction(drafts3, mechanicalPolicy);
+      const legacyErrs3 = legacyPreview3.drafts[0].validationErrors;
+      assert(legacyErrs3.some(e => /maxim/.test(e.message)), `mechanical mode must report maxim violation: ${JSON.stringify(legacyErrs3)}`);
+      assert(legacyErrs3.some(e => /<= 6/.test(e.message)), `mechanical mode must report confidence>6 violation: ${JSON.stringify(legacyErrs3)}`);
       const w3 = await writeProjectEntry({
         ...drafts3[0],
         sessionId: "smoke-a2",
-        timelineNote: "should be rejected",
-      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false, policy, forceProvisional: a2Settings.autoWriteForceProvisional });
-      assert(w3.status === "rejected" && w3.reason === "validation_error", `r3 must reject: ${JSON.stringify(w3)}`);
-      assert((w3.validationErrors || []).some(e => /maxim/.test(e.message)), `r3 reject reason must include maxim: ${JSON.stringify(w3.validationErrors)}`);
+        timelineNote: "trusted maxim smoke",
+      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false, policy, forceProvisional: false });
+      assert(w3.status === "created", `r3 default llm mode must create: ${JSON.stringify(w3)}`);
+      const r3Written = fs.readFileSync(w3.path, "utf-8");
+      assert(/^kind: maxim$/m.test(r3Written) && /^status: active$/m.test(r3Written) && /^confidence: 9$/m.test(r3Written), `r3 maxim/status/confidence not preserved:\n${r3Written}`);
+
+      // ADR 0016 update substrate: existing memory can evolve instead of
+      // append-only duplicate creation. Update compiled truth, status,
+      // confidence, and append an ISO timestamped timeline row.
+      const update = await updateProjectEntry(w1.slug, {
+        status: "active",
+        confidence: 8,
+        compiledTruth: "# A2 Mock Extracted Insight\n\nThe curator updated this existing memory instead of creating a parallel duplicate.",
+        sessionId: "smoke-a2",
+        timelineNote: "curator update smoke",
+      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false });
+      assert(update.status === "updated", `updateProjectEntry should update existing entry: ${JSON.stringify(update)}`);
+      const updatedWritten = fs.readFileSync(update.path, "utf-8");
+      assert(/^status: active$/m.test(updatedWritten), `update should preserve patched status active:\n${updatedWritten}`);
+      assert(/^confidence: 8$/m.test(updatedWritten), `update should preserve patched confidence 8:\n${updatedWritten}`);
+      assert(updatedWritten.includes("curator updated this existing memory") || updatedWritten.includes("The curator updated this existing memory"), `update compiled truth missing:\n${updatedWritten}`);
+      assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| updated \| curator update smoke$/m.test(updatedWritten), `update timeline must append ISO updated row:\n${updatedWritten}`);
 
       _resetAutoWriteStateForTests();
     }

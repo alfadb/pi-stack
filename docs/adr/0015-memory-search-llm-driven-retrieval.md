@@ -1,6 +1,6 @@
 # ADR 0015 — memory_search 升级为双阶段 LLM-driven retrieval
 
-- **状态**：Accepted（2026-05-10；Phase 0/1 已实现，Phase 2 sediment semantic dedupe 待 burn-in 后接入）
+- **状态**：Accepted（2026-05-10；Phase 0/1 已实现；Phase 2 被 [ADR 0016](0016-sediment-as-llm-curator.md) 扩展为 sediment curator lookup/update loop）
 - **日期**：2026-05-10
 - **决策者**：alfadb
 - **依赖**：[ADR 0010](0010-sediment-single-agent-with-lookup-tools.md)（lookup-tools loop 设计，本 ADR 落地其内核）/ [memory-architecture.md](../memory-architecture.md) §6（read facade 契约）/ [brain-redesign-spec.md](../brain-redesign-spec.md) §4（cross-project 召回）
@@ -144,9 +144,9 @@ sediment 新写入的 `created` / `updated` / timeline 时间戳改为本地 ISO
 - 🟡 **graceful degradation 不变量打破**：LLM 不可用时 hard error，不提供 grep 降级
 - 🟡 **单 family 失败**：deepseek 挂同时影响 sediment extractor + search；可通过 settings 异构化规避
 
-### D7. 副作用：彻底解决 sediment dedupe D6 自重复
+### D7. 副作用：为 sediment curator 解决 D6 自重复提供 lookup 内核
 
-ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment writer 在 dedupe 阶段调一次 `memory_search("语义近邻 of <new entry compiled_truth>")`，LLM 返回"已有 entry X、Y、Z 是同一意思"。dedupe 从字面 trigram 跃迁到语义层——这是质量复审 D6 的根本解，不是修补 dedupe substrate 能达到的层级。
+ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment curator 在 create 前调 `memory_search("找与这个候选知识语义相关、可能应被更新/合并/跳过的旧条目：...")`，LLM 返回相关旧 entry 及 timeline/freshness 证据。ADR 0016 进一步修正：目标不是把语义近邻简化成 `duplicate => reject`，而是让 curator 输出 update/merge/skip/create 等 operation，从 append-only 转向知识自我演化。
 
 ## 实施路线
 
@@ -154,7 +154,7 @@ ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment writer 在 de
 
 - **Phase 0**：增强 `_index.md` 格式（已实现）
 - **Phase 1**：实现 `extensions/memory/llm-search.ts` + tool 路由 + settings schema（已实现）
-- **Phase 2**：sediment writer 在 dedupe 阶段调新 search（待 Phase 1 burn-in 后落地 ADR 0010）
+- **Phase 2**：sediment curator 在 create 前调新 search，优先 update/merge/skip，create 次之（ADR 0016）
 - **Phase 3**：memory-architecture / brain-redesign-spec 全量文档对齐 + ADR 0010 状态从 deferred 升 implemented
 
 ## 与现有 ADR 的关系
