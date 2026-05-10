@@ -114,7 +114,6 @@ function parseCursor(cursor: string | undefined): number {
 }
 
 export function listEntries(entries: MemoryEntry[], filters: ListFilters, settings: MemorySettings) {
-  const scope = filters.scope;
   const limit = clamp(
     Math.floor(filters.limit ?? settings.defaultLimit),
     1,
@@ -122,8 +121,10 @@ export function listEntries(entries: MemoryEntry[], filters: ListFilters, settin
   );
   const start = parseCursor(filters.cursor);
 
+  // Facade (memory-architecture.md §3 + brain-redesign-spec.md §4.3): list does
+  // NOT filter by scope or expose scope to the LLM. Results are merged across
+  // all stores; ordering is by updated/created/confidence/slug only.
   const filtered = entries
-    .filter((entry) => scope && scope !== "all" ? entry.scope === scope : true)
     .filter((entry) => entryMatchesFilters(entry, filters))
     .sort((a, b) => {
       const au = a.updated || a.created || "";
@@ -146,7 +147,6 @@ export function listEntries(entries: MemoryEntry[], filters: ListFilters, settin
       updated: entry.updated,
       created: entry.created,
       summary: entry.summary,
-      scope: entry.scope,
     })),
     ...(next ? { next_cursor: next } : {}),
   };

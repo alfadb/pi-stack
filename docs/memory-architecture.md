@@ -495,9 +495,12 @@ memory_get(slug: string, options?: { include_related?: boolean })
   → KnowledgeEntry { ...full entry including timeline, scope, source_path }
   // 完整条目含 scope——scope 是条目的固有属性，不是搜索时的选择
 
-memory_list(filters: { scope?, kind?, status?, limit?, cursor? })
+memory_list(filters: { kind?, status?, limit?, cursor? })
   → { entries: EntryMeta[], next_cursor? }
   // 分页浏览，主要用于人工调试
+  // **`scope` 形参与 EntryMeta 里的 scope 字段均不暴露**（superseded by
+  //  brain-redesign-spec.md §4.3 + ADR 0014）——与 memory_search 同一 facade
+  //  不变量。当前实现静默忽略 LLM 传入的 `scope` key。
 
 memory_neighbors(slug: string, options?: { hop?: number, max?: number })
   → { slug, title, kind, edge_type }[]

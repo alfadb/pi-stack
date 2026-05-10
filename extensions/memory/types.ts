@@ -49,7 +49,10 @@ export interface SearchFilters {
 }
 
 export interface ListFilters extends SearchFilters {
-  scope?: Scope | "all";
+  // scope intentionally not exposed to LLM (Facade per memory-architecture.md §3 +
+  // brain-redesign-spec.md §4.3): list is a browse/debug surface, not a routing
+  // selector. Internal callers needing scope routing should slice the loaded
+  // entries array directly.
   cursor?: string;
 }
 

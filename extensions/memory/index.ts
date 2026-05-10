@@ -263,14 +263,14 @@ export default function (pi: ExtensionAPI) {
     description:
       "List markdown memory metadata with pagination. Mostly for browsing/debugging; " +
       "use memory_search for relevance-ranked retrieval.",
-    promptSnippet: "memory_list(filters?: { scope?, kind?, status?, limit?, cursor? })",
+    promptSnippet: "memory_list(filters?: { kinds?, status?, limit?, cursor? })",
     promptGuidelines: [
       "Use memory_list when you need an overview of available memory entries or to browse by kind/status.",
       "Use memory_search for task-specific retrieval; list is not relevance-ranked.",
     ],
     parameters: Type.Object({
       filters: Type.Optional(Type.Any({
-        description: "Optional filters: { scope?: 'project'|'world'|'all', kinds?: string[], status?: string|string[], limit?: number, cursor?: string }",
+        description: "Optional filters: { kinds?: string[], status?: string|string[], limit?: number, cursor?: string }",
       })),
     }),
     prepareArguments(args: Record<string, unknown>) {

@@ -54,14 +54,14 @@ export function normalizeSearchFilters(value: unknown): SearchFilters {
 }
 
 export function normalizeListFilters(value: unknown): ListFilters {
+  // scope is intentionally NOT read from LLM input (Facade per
+  // memory-architecture.md §3 + brain-redesign-spec.md §4.3). Any `scope`
+  // key supplied by the LLM is silently ignored—list returns merged results
+  // across all stores.
   const obj = (parseMaybeJson(value) as Record<string, unknown>) ?? {};
   const base = normalizeSearchFilters(obj);
-  const scopeRaw = typeof obj.scope === "string" ? obj.scope.toLowerCase() : undefined;
-  const scope = scopeRaw === "project" || scopeRaw === "world" || scopeRaw === "all"
-    ? scopeRaw
-    : undefined;
   const cursor = obj.cursor === undefined ? undefined : String(obj.cursor);
-  return { ...base, ...(scope ? { scope } : {}), ...(cursor ? { cursor } : {}) };
+  return { ...base, ...(cursor ? { cursor } : {}) };
 }
 
 export function normalizeBareSlug(input: string): string {
