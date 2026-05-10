@@ -360,11 +360,11 @@ export default function (pi: ExtensionAPI) {
     // Capture EVERY ctx field we'll need post-await synchronously.
     // pi may invalidate ctx ("stale ctx") between any await pair if a
     // newSession/fork/reload/process-shutdown race fires; touching
-    // ctx after invalidation throws "Extension error: stale ctx". This
-    // bit us in A2 because we read ctx.modelRegistry / ctx.signal
-    // INSIDE the auto-write lane after several awaits.
+    // ctx after invalidation throws "Extension error: stale ctx". Do NOT
+    // pass ctx.signal into fire-and-forget LLM work: it is tied to the
+    // foreground turn lifecycle and gets aborted when the user continues,
+    // which would cancel sediment mid-flight.
     const modelRegistry = ctx.modelRegistry;
-    const signal = ctx.signal;
     const settingsSnapshot = snapshotSedimentSettings(settings);
 
     // Ephemeral sessions (`pi --print --no-session`, dispatch_agent
@@ -529,7 +529,7 @@ export default function (pi: ExtensionAPI) {
             settings,
             window,
             modelRegistry,
-            signal,
+            signal: undefined,
           });
           const tAutoEnd = Date.now();
 
