@@ -81,12 +81,13 @@ UPDATE / MERGE existing memory
 - LLM extractor prompt 改为允许 `kind=maxim`、status、confidence `[0,10]`，让模型表达真实知识状态。
 - 新增 writer update substrate：`updateProjectEntry(slug, patch, ...)`，支持修改 compiled truth/frontmatter 并追加 timeline。
 
-### Phase 1 — Curator lookup loop
+### Phase 1 — Curator lookup loop（首批同批落地 create/update/skip）
 
 - Auto-write lane 对每个 candidate 调用 ADR 0015 `memory_search` 找语义近邻。
 - 读取 top candidates full entry。
 - Curator LLM 输出 `create/update/skip` operation。
 - 默认优先 update/skip，不平行新增重复 entry。
+- 实现文件：`extensions/sediment/curator.ts` + `tryAutoWriteLane()`；当前 operation subset 为 create/update/skip。
 
 ### Phase 2 — Full memory ops
 

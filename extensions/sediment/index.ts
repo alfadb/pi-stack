@@ -32,6 +32,7 @@ import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveSedimentSettings, type SedimentSettings } from "./settings";
 import { buildRunWindow, checkpointSummary, hasPensieve, loadSessionCheckpoint, saveSessionCheckpoint, type RunWindow } from "./checkpoint";
+import { curateProjectDraft, type CuratorAudit } from "./curator";
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun, type LlmExtractorDryRunResult } from "./llm-extractor";
@@ -39,7 +40,7 @@ import { listMigrationBackups, migrateOne, restoreMigrationBackup } from "./migr
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 import { evaluateLlmAutoWriteReadiness, evaluateRollingGate, formatLlmAutoWriteReadiness, formatLlmDryRunReport, readLlmDryRunReport, type RollingGateState } from "./report";
 import type { DraftPolicy } from "./validation";
-import { appendAudit, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult } from "./writer";
+import { appendAudit, updateProjectEntry, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult } from "./writer";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 
 // ---------------------------------------------------------------
@@ -158,7 +159,7 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
     "duplicate_slug", "duplicate_title", "validation_error", "lint_error",
   ]);
   return results.every((result) => {
-    if (result.status === "created" || result.status === "updated" || result.status === "dry_run") return true;
+    if (result.status === "created" || result.status === "updated" || result.status === "skipped" || result.status === "dry_run") return true;
     if (!result.reason) return false;
     return terminalReasons.has(result.reason) || result.reason.startsWith("credential pattern detected");
   });
@@ -626,6 +627,7 @@ export default function (pi: ExtensionAPI) {
               candidate_count: auto.drafts.length,
               candidates: auto.drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
               results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, gitCommit: r.gitCommit })),
+              curator: auto.curatorAudits,
               llm: auto.llmAuditSummary,
               rolling: auto.rollingState,
               raw_text: auto.rawTextStored,
@@ -643,11 +645,13 @@ export default function (pi: ExtensionAPI) {
               } catch {}
             }
             const createdCount = auto.results.filter(r => r.status === "created").length;
+            const updatedCount = auto.results.filter(r => r.status === "updated").length;
+            const skippedCount = auto.results.filter(r => r.status === "skipped").length;
             const rejectedCount = auto.results.filter(r => r.status === "rejected").length;
             if (rejectedCount > 0) {
-              applySedimentStatus(setStatus, sessionId, "failed", `auto-write: ${createdCount} created, ${rejectedCount} rejected`);
+              applySedimentStatus(setStatus, sessionId, "failed", `auto-write: ${createdCount} created, ${updatedCount} updated, ${skippedCount} skipped, ${rejectedCount} rejected`);
             } else {
-              applySedimentStatus(setStatus, sessionId, "completed", `auto-write: ${createdCount} ${createdCount === 1 ? "entry" : "entries"}`);
+              applySedimentStatus(setStatus, sessionId, "completed", `auto-write: ${createdCount} created, ${updatedCount} updated, ${skippedCount} skipped`);
             }
             return;
           }
@@ -782,7 +786,7 @@ type AutoWriteLaneOutcome =
   | { kind: "ineligible"; eligibility: AutoWriteEligibility }
   | { kind: "llm_skip"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
   | { kind: "llm_error"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
-  | { kind: "wrote"; drafts: ProjectEntryDraft[]; results: WriteProjectEntryResult[]; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; writeStart: number; rawTextStored?: string; rawTextTruncated?: boolean };
+  | { kind: "wrote"; drafts: ProjectEntryDraft[]; results: WriteProjectEntryResult[]; curatorAudits?: CuratorAudit[]; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; rollingState: RollingGateState; llmDurationMs: number; writeStart: number; rawTextStored?: string; rawTextTruncated?: boolean };
 
 function truncateRawForAudit(raw: string | undefined, cap: number): { text?: string; truncated?: boolean } {
   if (!raw || cap <= 0) return {};
@@ -887,16 +891,9 @@ async function tryAutoWriteLane(args: {
     return { kind: "llm_error", llmAuditSummary, rollingState: postRolling, llmDurationMs, rawTextStored, rawTextTruncated };
   }
 
-  // 5. Filter candidates against the auto-write policy. The LLM
-  //    extractor returns ANY MEMORY block it parsed; we keep only
-  //    those that pass `validateProjectEntryDraft(d, policy)`.
-  const drafts = (llmResult.extraction?.drafts ?? [])
-    .filter((d) => d.validationErrors.length === 0)
-    .map((d) => d.markerIndex);
-  // We need full drafts (not previews) for writing; re-parse via
-  // policy-aware previewExtraction to get fresh validation outcome.
-  // Using the rawText path: parseExplicitMemoryBlocks on the LLM
-  // output, then validate with the policy overlay.
+  // 5. Filter candidates against the configured policy. In default ADR 0016
+  //    `llm` mode this is schema-only; in legacy `mechanical` mode it also
+  //    applies the old G2-G13 semantic hard gates.
   const fullDrafts = (llmResult.rawText && llmResult.rawText !== "SKIP")
     ? (await import("./extractor")).parseExplicitMemoryBlocks(llmResult.rawText)
     : [];
@@ -915,10 +912,46 @@ async function tryAutoWriteLane(args: {
     return { kind: "llm_skip", llmAuditSummary, rollingState: postRolling, llmDurationMs, rawTextStored, rawTextTruncated };
   }
 
-  // 6. Write each compliant draft.
+  // 6. Apply each compliant draft. In ADR 0016 default mode, a curator
+  //    lookup loop asks memory_search + a curator LLM whether to create,
+  //    update, or skip. Legacy mechanical mode keeps the old create-only
+  //    behavior.
   const writeStart = Date.now();
   const results: WriteProjectEntryResult[] = [];
+  const curatorAudits: CuratorAudit[] = [];
   for (const draft of compliantDrafts) {
+    if (settings.autoWriteSemanticPolicy === "llm") {
+      const curated = await curateProjectDraft(draft, {
+        projectRoot: cwd,
+        sedimentSettings: settings,
+        memorySettings: resolveMemorySettings(),
+        modelRegistry,
+        signal: args.signal,
+      });
+      curatorAudits.push(curated.audit);
+      if (curated.decision.op === "skip") {
+        results.push({
+          slug: draft.title,
+          path: "",
+          status: "skipped",
+          reason: curated.decision.reason,
+        });
+        continue;
+      }
+      if (curated.decision.op === "update") {
+        results.push(await updateProjectEntry(curated.decision.slug, {
+          ...curated.decision.patch,
+          sessionId,
+          timelineNote: curated.decision.patch.timelineNote || curated.decision.rationale || "updated by sediment curator",
+        }, {
+          projectRoot: cwd,
+          settings,
+          dryRun: false,
+        }));
+        continue;
+      }
+    }
+
     results.push(await writeProjectEntry({
       ...draft,
       sessionId,
@@ -944,6 +977,7 @@ async function tryAutoWriteLane(args: {
     kind: "wrote",
     drafts: compliantDrafts,
     results,
+    curatorAudits,
     llmAuditSummary,
     rollingState: postRolling,
     llmDurationMs,

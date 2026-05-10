@@ -79,7 +79,7 @@ export interface ProjectEntryUpdateDraft {
 export interface WriteProjectEntryResult {
   slug: string;
   path: string;
-  status: "created" | "updated" | "dry_run" | "rejected";
+  status: "created" | "updated" | "skipped" | "dry_run" | "rejected";
   reason?: string;
   lintErrors?: number;
   lintWarnings?: number;

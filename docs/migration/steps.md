@@ -230,7 +230,7 @@ memory_search(query: "dispatch agent prompt")
 已完成 LLM auto-write lane（A1 + A2 + A3，2026-05-08）：
 - A1（安全前置 G2-G8）：`writeProjectEntry.opts.policy` + `forceProvisional`；`validateProjectEntryDraft(draft, policy)` overlay（`disallowMaxim` / `disallowArchived` / `maxConfidence`）；sanitizer 扩 4 pattern（JWT / PEM / AWS / connection URL）；`normalizeCompiledTruth` 对 `^---$` body 行退转；triggerPhrases 过 sanitizer；extractor prompt 加 Trust Boundary 指令。
   - **ADR 0016 更新（2026-05-10）**：上述 G2-G13 机械语义 gate 保留为 `autoWriteSemanticPolicy="mechanical"` legacy/emergency mode；默认 `autoWriteSemanticPolicy="llm"`，不再强制 provisional、不禁 maxim、不 cap confidence、不用 G13 hard reject 代替语义判断。hard gate 收敛为敏感信息 + 存储完整性。
-  - 新增 `updateProjectEntry(slug, patch, ...)` writer substrate，后续 curator loop 可 update 旧条目而不是 append-only 新增。
+  - 新增 `updateProjectEntry(slug, patch, ...)` writer substrate；`extensions/sediment/curator.ts` 已接入 `memory_search` lookup loop，当前支持 create/update/skip subset，避免 append-only 新增。
 - A2（接入 + G9-G12）：`agent_end` 在 `parseExplicitMemoryBlocks(window) === []` 之后调用 `tryAutoWriteLane`。闸门顺序：
   1. modelRegistry 存在 → `evaluateLlmAutoWriteReadiness(report, policy)` → `evaluateRollingGate(rollingReport, ...)` → `decideAutoWriteEligibility({sessionId, settings, readiness, rolling})`
   2. 全部放行后：`runLlmExtractorDryRun()` → `parseExplicitMemoryBlocks(rawText)` → `previewExtraction(drafts, policy)` → 过滤 schema 违反项 → `writeProjectEntry({...draft, policy, forceProvisional})`；默认 ADR 0016 `llm` mode 下 policy 为空、forceProvisional=false，LLM 决定 kind/status/confidence

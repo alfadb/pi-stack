@@ -79,6 +79,7 @@ alfadb/pi-astack/
 │   │   ├── checkpoint.ts              # per-session checkpoint + run window builder + RMW lock
 │   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor (fence-aware)
 │   │   ├── llm-extractor.ts           # LLM extractor prompt (Trust Boundary + durability test) + model call + parser
+│   │   ├── curator.ts                 # ADR 0016 memory_search-powered curator loop (create/update/skip subset)
 │   │   ├── report.ts                  # llm_dry_run + auto_write audit reports + rolling gate evaluator
 │   │   ├── migration.ts               # /sediment migrate-one/migration-backups legacy migration plan/apply/restore/list
 │   │   ├── validation.ts              # draft runtime validation + DraftPolicy overlay (G3/G3.5/G4/G13)
@@ -117,7 +118,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
-| `extensions/sediment/` | ✅ 实现（explicit extractor + LLM dry-run + LLM auto-write lane LIVE + migrate-one + status FSM + ADR 0016 默认 LLM semantic policy + update substrate；legacy mechanical gates 可选） | Phase 1.4 A1+A2+A3 + ADR 0016 |
+| `extensions/sediment/` | ✅ 实现（explicit extractor + LLM dry-run + LLM auto-write lane LIVE + migrate-one + status FSM + ADR 0016 默认 LLM semantic policy + memory_search-powered create/update/skip curator；legacy mechanical gates 可选） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
 | `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + /vault + /secret 命令） | ADR 0014 §D4 (2026-05-09) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
