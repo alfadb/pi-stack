@@ -183,23 +183,23 @@ export default function (pi: ExtensionAPI) {
     name: "memory_search",
     label: "Search Memory",
     description:
-      "Search markdown memory using natural-language prompts or keywords via the unified read-only Facade. " +
+      "Search markdown memory using a natural-language retrieval prompt via the unified read-only Facade. " +
       "Internally uses ADR 0015 two-stage LLM rerank by default (stage 1 candidate selection from memory index, stage 2 full-content rerank) " +
       "so Chinese-English mixed queries, semantic paraphrases, trigger phrases, and timeline-aware relevance work. " +
       "Searches current project .pensieve/ and, when configured/present, ~/.abrain/. " +
       "Returns normalized cards without scope/backend/source_path so the LLM does not choose a backend.",
-    promptSnippet: "memory_search(query: natural-language prompt or keywords, filters?: { kinds?, status?, limit? })",
+    promptSnippet: "memory_search(query: natural-language retrieval prompt, filters?: { kinds?, status?, limit? })",
     promptGuidelines: [
       "Use memory_search before planning, designing, reviewing code, or making project-specific decisions.",
-      "Query can be a natural-language prompt or keywords; both are understood semantically.",
-      "Mixed-language queries work: e.g. '知识沉淀 prompt' can match both Chinese and English entries such as sediment/extractor/prompt.",
+      "Write query as a natural-language retrieval prompt that states the full intent, not just terse keywords.",
+      "Mixed-language retrieval prompts work: e.g. '找关于知识沉淀 extractor prompt 的 durable rule' can match both Chinese and English entries."
       "Do not ask for a project/world/backend selector; the Facade merges and ranks results internally.",
       "Search results are summaries. Call memory_get(slug) when you need the full compiled truth or timeline.",
       "Default results exclude archived entries; pass filters.status if the user explicitly asks for archived/deprecated history.",
       "LLM search hard-errors if its configured model is unavailable; set MEMORY_SEARCH_GREP_ONLY=1 to force legacy grep+tf-idf for debug/temporary fallback.",
     ],
     parameters: Type.Object({
-      query: Type.String({ description: "Natural-language search prompt or keyword query. Prefer expressing the full retrieval intent, including Chinese/English mixed terms and semantic context; ADR 0015 LLM retrieval will interpret paraphrases and translate intent across languages." }),
+      query: Type.String({ description: "Natural-language retrieval prompt. State the full retrieval intent, including Chinese/English mixed terms, semantic context, and what kind of memory would be useful; ADR 0015 LLM retrieval interprets paraphrases and translates intent across languages." }),
       filters: Type.Optional(Type.Any({
         description: "Optional filters: { kinds?: string[], status?: string|string[], limit?: number }",
       })),

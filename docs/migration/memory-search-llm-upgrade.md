@@ -184,20 +184,20 @@ MEMORY_SEARCH_GREP_ONLY=1   # 强制 bypass LLM，走原 grep+tf-idf
 #### memory_search 工具描述更新
 
 ```
-description: "Search markdown memory using natural-language prompts or
-keywords. Internally uses two-stage LLM rerank (stage 1 candidate
-selection from index, stage 2 full-content rerank) to handle Chinese-
-English mixed queries, semantic paraphrase, and trigger-phrase matching.
-Returns relevance-ranked entries; results are merged across stores
-without scope/backend/source_path."
+description: "Search markdown memory using a natural-language retrieval
+prompt. Internally uses two-stage LLM rerank (stage 1 candidate selection
+from index, stage 2 full-content rerank) to handle Chinese-English mixed
+queries, semantic paraphrase, and trigger-phrase matching. Returns
+relevance-ranked entries; results are merged across stores without
+scope/backend/source_path."
 
 promptGuidelines:
-- "Query can be a natural-language prompt or keywords; both are
-  understood semantically."
-- "Mixed-language queries work: '沉淀提示词 prompt' will match both
-  Chinese and English entries."
+- "Write query as a natural-language retrieval prompt that states the full
+  intent, not just terse keywords."
+- "Mixed-language retrieval prompts work: '找关于知识沉淀 extractor prompt 的
+  durable rule' will match both Chinese and English entries."
 - "Hard error if LLM unavailable; set MEMORY_SEARCH_GREP_ONLY=1 env to
-  fall back to keyword grep."
+  force legacy grep fallback."
 ```
 
 ### Phase 1 验收
