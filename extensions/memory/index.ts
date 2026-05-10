@@ -12,8 +12,8 @@ import { Type } from "typebox";
 import { asBoolean, asNumber, resolveSettings } from "./settings";
 import type { GetParams, ListFilters, NeighborsParams, SearchParams } from "./types";
 import { loadEntries } from "./parser";
-import { findEntry, listEntries, neighbors, searchEntries, serializeEntry } from "./search";
-import { llmSearchEntries, shouldUseGrepSearch } from "./llm-search";
+import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
+import { llmSearchEntries } from "./llm-search";
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "./migrate";
 import { formatDoctorLiteReport, runDoctorLite } from "./doctor";
@@ -192,11 +192,11 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use memory_search before planning, designing, reviewing code, or making project-specific decisions.",
       "Write query as a natural-language retrieval prompt that states the full intent, not just terse keywords.",
-      "Mixed-language retrieval prompts work: e.g. '找关于知识沉淀 extractor prompt 的 durable rule' can match both Chinese and English entries."
+      "Mixed-language retrieval prompts work: e.g. '找关于知识沉淀 extractor prompt 的 durable rule' can match both Chinese and English entries.",
       "Do not ask for a project/world/backend selector; the Facade merges and ranks results internally.",
       "Search results are summaries. Call memory_get(slug) when you need the full compiled truth or timeline.",
       "Default results exclude archived entries; pass filters.status if the user explicitly asks for archived/deprecated history.",
-      "LLM search hard-errors if its configured model is unavailable; set MEMORY_SEARCH_GREP_ONLY=1 to force legacy grep+tf-idf for debug/temporary fallback.",
+      "LLM search hard-errors if its configured model is unavailable; there is no grep degradation path because accuracy is the contract.",
     ],
     parameters: Type.Object({
       query: Type.String({ description: "Natural-language retrieval prompt. State the full retrieval intent, including Chinese/English mixed terms, semantic context, and what kind of memory would be useful; ADR 0015 LLM retrieval interprets paraphrases and translates intent across languages." }),
@@ -213,19 +213,13 @@ export default function (pi: ExtensionAPI) {
     async execute(_id: string, params: SearchParams, signal: AbortSignal, _onUpdate: unknown, ctx: { cwd?: string; modelRegistry?: unknown }) {
       const settings = resolveSettings();
       const entries = await loadEntries(ctx.cwd, settings, signal);
-      if (shouldUseGrepSearch(settings)) {
-        return wrapToolResult(searchEntries(entries, params, settings));
-      }
       try {
         return wrapToolResult(await llmSearchEntries(entries, params, settings, ctx.modelRegistry, signal));
       } catch (err: unknown) {
-        if (settings.search.fallbackToGrep) {
-          return wrapToolResult(searchEntries(entries, params, settings));
-        }
         return wrapToolResult({
           ok: false,
           error: err instanceof Error ? err.message : String(err),
-          hint: "memory_search uses ADR 0015 LLM retrieval by default. Set MEMORY_SEARCH_GREP_ONLY=1 to force legacy grep+tf-idf, or configure memory.search.fallbackToGrep=true for best-effort fallback.",
+          hint: "memory_search uses ADR 0015 LLM retrieval and does not degrade to grep. Fix model/auth/network/configuration and retry.",
         });
       }
     },

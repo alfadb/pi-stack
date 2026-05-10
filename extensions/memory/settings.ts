@@ -7,18 +7,15 @@ const PI_STACK_SETTINGS_PATH = path.join(
 );
 
 export interface SearchSettings {
-  // ADR 0015 (memory_search LLM-driven retrieval, Proposed 2026-05-10).
+  // ADR 0015 (memory_search LLM-driven retrieval, Accepted 2026-05-10).
   // Two-stage rerank: stage 1 selects candidates from enhanced _index.md,
   // stage 2 reranks full content. Defaults to deepseek family for in-China
-  // latency + reasoning + bilingual quality. Set MEMORY_SEARCH_GREP_ONLY=1
-  // env to bypass entirely. Hard error on LLM failure (no silent grep
-  // fallback) so accuracy guarantees stay strict.
+  // latency + reasoning + bilingual quality. Accuracy is a hard contract:
+  // LLM failures hard-error; there is no grep degradation path.
   stage1Model: string;
   stage1Limit: number;
   stage2Model: string;
   stage2Limit: number;
-  stage2SkipThreshold: number;
-  fallbackToGrep: boolean;
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
@@ -26,8 +23,6 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage1Limit: 50,
   stage2Model: "deepseek/deepseek-v4-pro",
   stage2Limit: 10,
-  stage2SkipThreshold: 3,
-  fallbackToGrep: false,
 };
 
 export interface MemorySettings {
@@ -89,8 +84,6 @@ function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
     stage1Limit: Math.max(1, asNumber(search.stage1Limit, DEFAULT_SEARCH_SETTINGS.stage1Limit)),
     stage2Model: asString(search.stage2Model, DEFAULT_SEARCH_SETTINGS.stage2Model),
     stage2Limit: Math.max(1, asNumber(search.stage2Limit, DEFAULT_SEARCH_SETTINGS.stage2Limit)),
-    stage2SkipThreshold: Math.max(0, asNumber(search.stage2SkipThreshold, DEFAULT_SEARCH_SETTINGS.stage2SkipThreshold)),
-    fallbackToGrep: asBoolean(search.fallbackToGrep, DEFAULT_SEARCH_SETTINGS.fallbackToGrep),
   };
 }
 

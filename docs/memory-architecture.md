@@ -6,7 +6,7 @@
 > - **§4.1 三层 Scope（Session / Project / World）的物理拓扑**：`<project>/.pensieve/` 物理位置已废止；项目知识迁入 `~/.abrain/projects/<id>/`。所有数据统一在 `~/.abrain/` 内部按七区结构（identity/skills/habits/workflows/projects/knowledge/vault）组织。
 > - **scope=project\|world 二元划分（含 4.1 表 / 8 节 sediment 路由 / 9 节 promotion）**：被 brain 内部结构吸收。Lane B（manual promote）和 Lane D（auto-promote）失去意义。新增 Lane G（about-me declare）和 Lane V（vault declare）。
 > - **§7 工具接口**：`memory_search` 等 facade 接口形状保留，但 `scope` 参数语义重新定义（详见 brain-redesign-spec.md §4）。
-> - **§5.3 `memory_search` 算法规格 / §3.8 Graceful degradation**：被 ADR 0015 supersede。Phase 1.3 grep+tf-idf 仍保留为 `MEMORY_SEARCH_GREP_ONLY=1` debug/fallback 路径；默认 `memory_search` 走双阶段 LLM retrieval，且 LLM 失败默认 hard error（不静默降级）。
+> - **§5.3 `memory_search` 算法规格 / §3.8 Graceful degradation**：被 ADR 0015 supersede。`memory_search` runtime 只走双阶段 LLM retrieval；grep+tf-idf 代码仅作为历史 baseline/diagnostics，不作为降级路径。LLM 失败 hard error。
 >
 > **仍然有效的部分**：sediment writer policy / 7 节 LLM-facing facade 契约 / Compiled Truth + Timeline 双段格式 / Lint 规则 / Brain Health 评分 / 8 节 sediment pipeline 的 extractor/triage/writer/reviewer 内核 / dedupe gates / rolling pass-rate fuse —— 这些与新 brain 物理拓扑正交，继续使用。
 >
@@ -70,7 +70,7 @@
 5. **Markdown 为唯一 source of truth**：索引是 view，文本是 table。索引 gitignored，可随时从 md 重建。
 6. **Facade 模式隔离**：LLM 只看到统一的读接口，底层存储和索引拓扑变更不影响上层。LLM-facing schema 绝不暴露 backend selector、scope filter、物理路径。
 7. **默认永久，显式临时**：大多数知识无过期时间。只有实验性的条目显式声明 ttl。
-8. **Graceful degradation**：索引不可用时降级到 ripgrep 关键词搜索，结果标注 `degraded: true`。系统不失效。**ADR 0015 例外**：默认 `memory_search` 以准确度为硬约束，LLM 路径失败时 hard error，不静默降级；可用 `MEMORY_SEARCH_GREP_ONLY=1` 或 `memory.search.fallbackToGrep=true` 显式选择 best-effort。
+8. **Graceful degradation**：索引不可用时降级到 ripgrep 关键词搜索，结果标注 `degraded: true`。系统不失效。**ADR 0015 例外**：`memory_search` 以准确度为硬约束，LLM 路径失败时 hard error，且不提供 grep 降级开关。
 9. **核心接口必须完备，边缘功能渐进迭代**：数据模型、写入安全、读接口契约不能有空白。性能优化、高级治理可以按 Phase 迭代。
 
 ---
@@ -327,7 +327,7 @@ world/                                    ├── locks/
 
 > ⚠️ **Superseded by ADR 0015（2026-05-10）**：默认实现已从 hybrid keyword/qmd 规划改为双阶段 LLM retrieval（stage1 enhanced index candidate selection + stage2 full-content rerank）。下方 hybrid/grep/qmd 规格保留为历史背景与 fallback/qmd-future 参考。
 
-**legacy/future hybrid = 关键词搜索（rg + tf-idf）+ (可选) qmd 向量语义，RRF 融合，grep fallback。**
+**historical/future hybrid = 关键词搜索（rg + tf-idf）+ (可选) qmd 向量语义，RRF 融合。** 当前 `memory_search` runtime 不使用该路径降级；它只作为历史 baseline 与未来 qmd 设计参考。
 
 > "BM25" 术语保留给 Phase 3+ qmd 提供真正 Okapi BM25 实现时使用。Phase 1 为 rg + 简单 tf-idf。
 > qmd 作为 Facade 的 QmdBackend 接入。完整集成方案见附录 C。

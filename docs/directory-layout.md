@@ -65,7 +65,7 @@ alfadb/pi-astack/
 │   │   ├── types.ts                   # 共享类型
 │   │   ├── utils.ts                   # slug/filter/path helpers
 │   │   ├── parser.ts                  # markdown/frontmatter/parser + store scan
-│   │   ├── search.ts                  # legacy grep+tf-idf fallback + list/get/neighbors 逻辑
+│   │   ├── search.ts                  # legacy grep+tf-idf implementation for diagnostics/tests + list/get/neighbors 逻辑
 │   │   ├── llm-search.ts              # ADR 0015 双阶段 LLM retrieval（stage1 candidate + stage2 rerank）
 │   │   ├── lint.ts                    # T1-T10 lint engine
 │   │   ├── doctor.ts                  # doctor-lite aggregate health report

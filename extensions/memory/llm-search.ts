@@ -39,7 +39,7 @@ function parseModelRef(ref: string): { provider: string; id: string } | null {
 function assertModelRegistry(modelRegistry: unknown): asserts modelRegistry is ModelRegistryLike {
   const reg = modelRegistry as ModelRegistryLike | undefined;
   if (!reg || typeof reg.find !== "function" || typeof reg.getApiKeyAndHeaders !== "function") {
-    throw new Error("memory_search LLM path requires ctx.modelRegistry; set MEMORY_SEARCH_GREP_ONLY=1 to use grep fallback");
+    throw new Error("memory_search requires ctx.modelRegistry for ADR 0015 LLM retrieval; no grep degradation path is available");
   }
 }
 
@@ -275,7 +275,7 @@ function makeStage1Prompt(query: string, indexText: string, limit: number): stri
     "Output JSON only: an array of objects [{\"slug\": string, \"reason\": string}]. No markdown wrapper.",
     "",
     "Hard rules:",
-    "- The query may be a natural-language prompt OR a keyword phrase. Treat both as user intent.",
+    "- The query is a natural-language retrieval prompt. Prefer the user's full intent over literal token overlap.",
     "- The query may be Chinese, English, or mixed. Match across languages semantically, not just literally (e.g. 沉淀 ≡ sediment, 自动写入 ≡ auto-write).",
     "- Prefer entries whose title, summary, trigger_phrases, or related slugs match query intent.",
     "- Prefer recent and high-confidence entries over stale/low-confidence ones, all else equal.",
@@ -365,18 +365,6 @@ function resultCard(entry: MemoryEntry, score: number) {
   };
 }
 
-function rankFromStage1(entriesBySlug: Map<string, MemoryEntry>, picks: CandidatePick[], limit: number) {
-  const hits = picks
-    .map((pick, i) => {
-      const entry = entriesBySlug.get(pick.slug);
-      if (!entry) return undefined;
-      const score = picks.length <= 1 ? 1 : 1 - (i / Math.max(1, picks.length - 1)) * 0.35;
-      return resultCard(entry, score);
-    })
-    .filter((x): x is ReturnType<typeof resultCard> => !!x);
-  return hits.slice(0, limit);
-}
-
 function rankFromStage2(entriesBySlug: Map<string, MemoryEntry>, picks: FinalPick[], limit: number) {
   const hits = picks
     .map((pick, i) => {
@@ -395,10 +383,6 @@ function rankFromStage2(entriesBySlug: Map<string, MemoryEntry>, picks: FinalPic
 
 function filteredEntries(entries: MemoryEntry[], filters: SearchFilters | undefined): MemoryEntry[] {
   return entries.filter((entry) => entryMatchesFilters(entry, filters));
-}
-
-export function shouldUseGrepSearch(settings: MemorySettings): boolean {
-  return process.env.MEMORY_SEARCH_GREP_ONLY === "1" || !settings.search.stage1Model.trim();
 }
 
 export async function llmSearchEntries(
@@ -421,7 +405,6 @@ export async function llmSearchEntries(
     settings.maxLimit,
   );
   const candidateLimit = Math.max(finalLimit, Math.floor(settings.search.stage1Limit));
-  const stage2Model = settings.search.stage2Model.trim();
 
   const corpus = filteredEntries(entries, filters);
   if (corpus.length === 0) return [];
@@ -443,12 +426,9 @@ export async function llmSearchEntries(
     .filter((entry): entry is MemoryEntry => !!entry);
 
   if (candidateEntries.length === 0) return [];
-  if (!stage2Model || candidateEntries.length <= settings.search.stage2SkipThreshold) {
-    return rankFromStage1(entriesBySlug, stage1Picks, finalLimit);
-  }
 
   const stage2 = await callSearchModel(
-    stage2Model,
+    settings.search.stage2Model,
     makeStage2Prompt(query, candidateEntries, finalLimit),
     modelRegistry,
     signal,

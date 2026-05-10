@@ -111,12 +111,12 @@
 
 **状态**：迁移完成（2026-05-08）。~/.pi 父仓 173 → 0 pending，14 batch，所有 commit 逆向可追。batch apply CLI 按原计划**不再追加**（详见 [apply-checklist.md](./apply-checklist.md) Status 段）。
 
-### Phase 1.3 — memory_search（ADR 0015 LLM-driven；grep 为 fallback）
+### Phase 1.3 — memory_search（ADR 0015 LLM-driven；无 grep 降级）
 
-**实现状态（2026-05-08 grep baseline；2026-05-10 ADR 0015 Phase 0/1）**：`extensions/memory/search.ts` + `parser.ts` 保留 legacy grep+tf-idf fallback；`extensions/memory/llm-search.ts` 实现双阶段 LLM retrieval；`extensions/memory/index.ts` 注册 `memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 四个只读工具，且 `memory_search` 默认走 LLM 路径（`MEMORY_SEARCH_GREP_ONLY=1` 强制回退）。详见 [ADR 0015](../adr/0015-memory-search-llm-driven-retrieval.md) + [memory-search-llm-upgrade.md](./memory-search-llm-upgrade.md)。
+**实现状态（2026-05-08 grep baseline；2026-05-10 ADR 0015 Phase 0/1；2026-05-10 fallback removal）**：`extensions/memory/search.ts` + `parser.ts` 保留 legacy grep+tf-idf implementation 供 diagnostics/tests 与 list/get/neighbors 共享逻辑；`extensions/memory/llm-search.ts` 实现双阶段 LLM retrieval；`extensions/memory/index.ts` 注册 `memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 四个只读工具，且 `memory_search` runtime 只走 LLM 路径，失败 hard error。详见 [ADR 0015](../adr/0015-memory-search-llm-driven-retrieval.md) + [memory-search-llm-upgrade.md](./memory-search-llm-upgrade.md)。
 
-- 默认：stage1 从内存生成的 enhanced index 选 top-K 候选；stage2 读取候选完整 compiled_truth + timeline 精排
-- fallback：rg 文件发现 + per-file tf-idf 评分 + title/slug boost
+- runtime：stage1 从内存生成的 enhanced index 选 top-K 候选；stage2 读取候选完整 compiled_truth + timeline 精排
+- no fallback：LLM/model/auth/network/JSON 失败直接返回 error，不用 grep 结果替代
 - project 层为主；`ABRAIN_ROOT` / `~/.abrain` 存在时可选只读扫描 world 层
 - 默认排除 status=archived
 - `memory_search` 返回 LLM-facing schema（bare slug, 不含 scope/backend/source_path）

@@ -68,8 +68,7 @@ Stage 0 (本地)：
 Stage 1 (粗排，可配模型，默认 deepseek-v4-flash)：
   输入: query + 全库 _index.md
   输出: top-K 候选 slug + 简短理由（K 默认 50）
-  目标: 高召回率，低 reasoning 成本
-  跳过条件: 候选 ≤ stage2SkipThreshold (默认 3) 时直接返回
+  目标: 高召回率。只要有候选，必须进入 Stage 2；不因候选数少而跳过精排
 
 Stage 1.5 (本地)：
   memory_get(slug) × K 拿 candidate 完整 entry（compiled_truth + timeline）
@@ -89,7 +88,7 @@ Stage 2 (精排，可配模型，默认 deepseek-v4-pro)：
 
 **单 family 风险**：sediment extractor 也是 v4-pro，deepseek 服务一挂两个子系统同时失能。可接受理由：
 - sediment 是 fire-and-forget + rolling pass-rate fuse，挂了下轮重试
-- search 用 hard error（不 fallback grep），用户能立即感知 + 手工切 `MEMORY_SEARCH_GREP_ONLY=1` env
+- search 用 hard error（不 fallback grep），用户能立即感知模型/网络问题并修复，不拿低准确度结果继续工作
 - 单 family 风险换国内速度 + reasoning + 中文质量，对 alfadb 主用场景是合理 trade-off
 - **任何用户/任何环境随时可通过 settings 切异构**（D4）
 
@@ -102,21 +101,17 @@ Stage 2 (精排，可配模型，默认 deepseek-v4-pro)：
       "stage1Model": "deepseek/deepseek-v4-flash",
       "stage1Limit": 50,
       "stage2Model": "deepseek/deepseek-v4-pro",
-      "stage2Limit": 10,
-      "stage2SkipThreshold": 3,
-      "fallbackToGrep": false
+      "stage2Limit": 10
     }
   }
 }
 ```
 
 切异构 example：`stage2Model: "anthropic/claude-opus-4-7"` 或 `"openai/gpt-5.5"`。
-完全 bypass LLM：`stage1Model: ""` 退到 grep。
-调试 / smoke：`MEMORY_SEARCH_GREP_ONLY=1` env 强制 bypass。
 
-### D5. 失败模式：hard error，不静默降级到 grep
+### D5. 失败模式：hard error，且没有 grep 降级路径
 
-理由：用户明确诉求是"准确"。grep fallback 会让"准确"约束变成时灵时不灵——LLM 不可用时主会话拿到的结果突然变弱，用户无感知。hard error + 工具描述里说明"依赖 LLM"，让用户在网络/服务异常时立即看到错误信号，可手工切 `MEMORY_SEARCH_GREP_ONLY=1` env 临时降级。
+理由：用户明确诉求是"准确"。grep fallback 会让"准确"约束变成时灵时不灵——LLM 不可用时主会话拿到的结果突然变弱，用户无感知。hard error + 工具描述里说明"依赖 LLM"，让用户在网络/服务异常时立即看到错误信号并修复模型/网络/配置。**不提供 `MEMORY_SEARCH_GREP_ONLY`、`fallbackToGrep` 或空模型退回 grep 的开关。**
 
 graceful degradation 原则（memory-architecture.md §3 第 8 条）**显式让位于准确度**——这是设计选择，不是 bug。
 
@@ -136,9 +131,9 @@ graceful degradation 原则（memory-architecture.md §3 第 8 条）**显式让
 
 ### 负面（已接受）
 
-- 🟡 **延迟 +15-20s/call**：alfadb 明示"不考虑"
+- 🟡 **延迟 +15-20s/call**：alfadb 明示"不考虑"；Stage 2 不跳过
 - 🟡 **成本 ~$0.045/call**：alfadb 明示"不考虑"；1000 次 ≈ $45
-- 🟡 **graceful degradation 不变量打破**：LLM 不可用时 hard error，需手工切 grep 模式
+- 🟡 **graceful degradation 不变量打破**：LLM 不可用时 hard error，不提供 grep 降级
 - 🟡 **单 family 失败**：deepseek 挂同时影响 sediment extractor + search；可通过 settings 异构化规避
 
 ### D7. 副作用：彻底解决 sediment dedupe D6 自重复

@@ -358,7 +358,7 @@
 
         "search": {
           "type": "object",
-          "description": "LLM-driven memory_search settings (ADR 0015, Proposed 2026-05-10). Two-stage rerank: stage 1 selects candidates from enhanced _index.md, stage 2 reranks full content. Defaults to deepseek family for in-China latency + reasoning + bilingual quality; switch stage2Model to anthropic/openai for diverse failure modes if deepseek service degrades. Set MEMORY_SEARCH_GREP_ONLY=1 env to bypass entirely. Hard errors on LLM failure (no silent grep fallback) so accuracy guarantees stay strict.",
+          "description": "LLM-driven memory_search settings (ADR 0015, Accepted 2026-05-10). Two-stage rerank: stage 1 selects candidates from enhanced _index.md, stage 2 reranks full content. Defaults to deepseek family for in-China latency + reasoning + bilingual quality; switch stage2Model to anthropic/openai for diverse failure modes if deepseek service degrades. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",
           "additionalProperties": false,
           "properties": {
             "_comment": { "type": "string" },
@@ -366,7 +366,8 @@
             "stage1Model": {
               "type": "string",
               "default": "deepseek/deepseek-v4-flash",
-              "description": "Stage 1 candidate-selection model. Reads enhanced _index.md (~37k tokens for 250 entries) and outputs top-stage1Limit slug candidates. Recommended: a fast model (high-volume eval task, no deep reasoning needed). Empty string disables LLM path entirely (degrades to grep+tf-idf)."
+              "minLength": 1,
+              "description": "Stage 1 candidate-selection model. Reads enhanced _index.md (~37k tokens for 250 entries) and outputs top-stage1Limit slug candidates. Recommended: a fast model (high-volume eval task, no deep reasoning needed). Must be non-empty; invalid/missing models hard-error rather than degrading."
             },
             "stage1Limit": {
               "type": "number",
@@ -377,24 +378,14 @@
             "stage2Model": {
               "type": "string",
               "default": "deepseek/deepseek-v4-pro",
+              "minLength": 1,
               "description": "Stage 2 final-rerank model. Reads stage 1 candidates' full content (compiled_truth + timeline) and produces ranked top-stage2Limit. Needs strong reasoning (cross-entry comparison, timeline-aware: 'X is deprecated by Y'). Recommended: top-tier reasoning model. Set to a different family from stage1Model + sediment.extractorModel for diversity if cost is not a concern."
             },
             "stage2Limit": {
               "type": "number",
               "default": 10,
               "minimum": 1,
-              "description": "Final result count returned to caller. Overrides memory.defaultLimit when memory_search uses LLM path."
-            },
-            "stage2SkipThreshold": {
-              "type": "number",
-              "default": 3,
-              "minimum": 0,
-              "description": "If stage 1 returns this many or fewer candidates, skip stage 2 rerank and return stage 1 directly. Stage 2 rerank for ~3 candidates rarely improves ranking enough to justify another LLM call."
-            },
-            "fallbackToGrep": {
-              "type": "boolean",
-              "default": false,
-              "description": "If true, fall back to grep+tf-idf when LLM path errors. Default false (hard error) keeps the 'accuracy' contract strict — LLM intermittent failures should NOT silently degrade results. Toggle to true only if you prefer best-effort over correctness."
+              "description": "Final result count returned to caller. Overrides memory.defaultLimit when memory_search uses LLM path. Stage 2 always runs when stage 1 returns any candidate; accuracy is prioritized over latency/cost."
             }
           }
         }

@@ -253,28 +253,28 @@ async function main() {
     writeFile(path.join(root, ".pensieve", "staging", "beta.md"), makeEntry({ title: "Beta Smell", kind: "smell", status: "provisional", confidence: 2 }));
 
     const search = tools.get("memory_search");
-    const prevGrepOnly = process.env.MEMORY_SEARCH_GREP_ONLY;
-    process.env.MEMORY_SEARCH_GREP_ONLY = "1";
-    const searchRaw = await search.execute("smoke", search.prepareArguments({ query: "dispatch facade", limit: 2 }), new AbortController().signal, null, { cwd: root });
-    // memory tools wrap results in ToolResult envelope { content: [{ type, text }], isError? }
-    // since commit 7f2b5d8 (fix(memory): wrap tool results in ToolResult shape).
-    // smoke must unwrap to access the business payload (plain JSON array/object).
-    assert(!searchRaw.isError, `memory_search returned isError envelope: ${JSON.stringify(searchRaw)}`);
-    assert(Array.isArray(searchRaw?.content) && searchRaw.content[0]?.type === "text", "memory_search envelope shape regressed (expected { content: [{type:'text', text}] })");
-    const searchRes = JSON.parse(searchRaw.content[0].text);
-    assert(Array.isArray(searchRes) && searchRes.length >= 1 && searchRes[0].slug === "alpha", `memory_search failed: ${JSON.stringify(searchRes)}`);
-    if (prevGrepOnly === undefined) delete process.env.MEMORY_SEARCH_GREP_ONLY;
-    else process.env.MEMORY_SEARCH_GREP_ONLY = prevGrepOnly;
-
-    // ADR 0015 smoke: default memory_search path should call the two-stage LLM
-    // reranker when a modelRegistry is available, and return the same normalized
-    // ToolResult envelope shape.
     const mockModelRegistry = {
       find(provider, id) { return { provider, id }; },
       async getApiKeyAndHeaders() { return { ok: true, apiKey: "smoke-key" }; },
     };
-    const llmSearchRaw = await search.execute("smoke-llm", search.prepareArguments({ query: "知识沉淀 prompt", limit: 2 }), new AbortController().signal, null, { cwd: root, modelRegistry: mockModelRegistry });
+
+    // memory tools wrap results in ToolResult envelope { content: [{ type, text }], isError? }
+    // since commit 7f2b5d8 (fix(memory): wrap tool results in ToolResult shape).
+    // smoke must unwrap to access the business payload (plain JSON array/object).
+    // ADR 0015: memory_search has no grep degradation path; it requires LLM
+    // modelRegistry and should return a hard error when modelRegistry is missing.
+    const missingRegistryRaw = await search.execute("smoke-no-registry", search.prepareArguments({ query: "find memory about dispatch facade", limit: 2 }), new AbortController().signal, null, { cwd: root });
+    assert(missingRegistryRaw.isError, `memory_search without modelRegistry must hard-error, got: ${JSON.stringify(missingRegistryRaw)}`);
+    const missingRegistryPayload = JSON.parse(missingRegistryRaw.content[0].text);
+    assert(String(missingRegistryPayload.error || "").includes("modelRegistry"), `missing-registry error should mention modelRegistry: ${JSON.stringify(missingRegistryPayload)}`);
+    assert(String(missingRegistryPayload.hint || "").includes("does not degrade to grep"), `missing-registry hint should reject grep degradation: ${JSON.stringify(missingRegistryPayload)}`);
+
+    // ADR 0015 smoke: default memory_search path should call the two-stage LLM
+    // reranker when a modelRegistry is available, and return the same normalized
+    // ToolResult envelope shape.
+    const llmSearchRaw = await search.execute("smoke-llm", search.prepareArguments({ query: "找关于 dispatch facade 的 memory entry", limit: 2 }), new AbortController().signal, null, { cwd: root, modelRegistry: mockModelRegistry });
     assert(!llmSearchRaw.isError, `memory_search LLM path returned isError envelope: ${JSON.stringify(llmSearchRaw)}`);
+    assert(Array.isArray(llmSearchRaw?.content) && llmSearchRaw.content[0]?.type === "text", "memory_search envelope shape regressed (expected { content: [{type:'text', text}] })");
     const llmSearchRes = JSON.parse(llmSearchRaw.content[0].text);
     assert(Array.isArray(llmSearchRes) && llmSearchRes.length === 1 && llmSearchRes[0].slug === "alpha" && llmSearchRes[0].score === 1, `memory_search LLM path failed: ${JSON.stringify(llmSearchRes)}`);
 
