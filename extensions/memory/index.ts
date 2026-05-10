@@ -188,7 +188,7 @@ export default function (pi: ExtensionAPI) {
       "so Chinese-English mixed queries, semantic paraphrases, trigger phrases, and timeline-aware relevance work. " +
       "Searches current project .pensieve/ and, when configured/present, ~/.abrain/. " +
       "Returns normalized cards without scope/backend/source_path so the LLM does not choose a backend.",
-    promptSnippet: "memory_search(query, filters?: { kinds?, status?, limit? })",
+    promptSnippet: "memory_search(query: natural-language prompt or keywords, filters?: { kinds?, status?, limit? })",
     promptGuidelines: [
       "Use memory_search before planning, designing, reviewing code, or making project-specific decisions.",
       "Query can be a natural-language prompt or keywords; both are understood semantically.",
@@ -199,7 +199,7 @@ export default function (pi: ExtensionAPI) {
       "LLM search hard-errors if its configured model is unavailable; set MEMORY_SEARCH_GREP_ONLY=1 to force legacy grep+tf-idf for debug/temporary fallback.",
     ],
     parameters: Type.Object({
-      query: Type.String({ description: "Search query" }),
+      query: Type.String({ description: "Natural-language search prompt or keyword query. Prefer expressing the full retrieval intent, including Chinese/English mixed terms and semantic context; ADR 0015 LLM retrieval will interpret paraphrases and translate intent across languages." }),
       filters: Type.Optional(Type.Any({
         description: "Optional filters: { kinds?: string[], status?: string|string[], limit?: number }",
       })),
