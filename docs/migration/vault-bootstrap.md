@@ -257,6 +257,20 @@ pi 启动时首次未检测到初始化过的 vault（`~/.abrain/.vault-backend`
 选任一 backend → 跑 §3 流程对应路径 + 写 `~/.abrain/.vault-backend`，结束后 `pi vault status` 显示 `unlocked`。
 选 [s] → 写 `~/.abrain/.state/vault-disabled` flag，pi 继续运行。
 选 [i] → 跨设备导入流程（§6）。
+### 4.1 `/vault status` 语义（v1.4.2 补，dogfood 发现）
+
+`/vault status` 不是“如果现在 init 会选哪个 backend”——那是 §4 onboarding 菜单。status **优先读 `~/.abrain/.vault-backend`** 呈现**当前**状态：
+
+| .vault-backend | detection | 状态 | 输出 |
+|---|---|---|---|
+| 存在 | （不跳） | **initialized** | 显示 init 记录的 backend / identity、在哪里取 master、auto-unlock 判断、`.vault-pubkey` 内容 |
+| 不存在 | 命中某 backend | **not initialized, ready** | 提示 `运行 /vault init [--backend=<选中的>]` |
+| 不存在 | disabled | **disabled (no backend)** | 同现状（detection 返回 disabled） |
+| 任何 | （不跳）且 vault-disabled flag | **user-disabled** | 提示 `rm 该 flag` 重开 |
+| sub-pi (PI_ABRAIN_DISABLED=1) | （不跳） | **sub-pi disabled** | 独立状 |
+
+这避免 v1.4.x 初版的 P0a-era status “note: master key generation lands in P0b” 这种在用户已经 init 之后还说“P0b 未交付”的 spec drift。P0a 初版中主 session 用 detection 驱动 status 是因为 `.vault-backend` 概念是 v1.4 才引入的；v1.4.2 dogfood patch 补齐。
+
 ## 5. 每个 pi 进程启动时的 unlock check（v1.4 重写）
 
 v1.4 启动 **不重跑 detection chain**——读 `~/.abrain/.vault-backend` 拿 init 时记录的 backend。这避免环境变化（加入 GPG key / 卸载 ssh-key / 临时无 ssh-agent）让启动跳到不同 backend 造成 unlock 失败。

@@ -29,7 +29,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { detectBackend, formatStatus, type BackendInfo, type DetectDeps } from "./backend-detect";
+import { detectBackend, formatStatus, type BackendInfo, type DetectDeps, type InitializedState } from "./backend-detect";
 import {
   createInstallTmpDir, generateMasterKey, cleanupInstallDir, execCapture,
 } from "./bootstrap";
@@ -345,5 +345,45 @@ function handleStatus(ui: { notify(message: string, type?: string): void }): voi
     ui.notify("🔒 vault: disabled (PI_ABRAIN_DISABLED=1, sub-pi context)", "info");
     return;
   }
-  ui.notify(formatStatus(status.backend, status.userDisabledFlag), "info");
+
+  // v1.4.2: prefer .vault-backend (init record) over detection. Detection
+  // is only used when vault is not yet initialized. See vault-bootstrap §4.1.
+  const initialized = readInitializedState(ABRAIN_HOME);
+  ui.notify(formatStatus(status.backend, status.userDisabledFlag, initialized), "info");
+}
+
+/**
+ * Read everything formatStatus needs to render the 'initialized' state.
+ * Returns null if .vault-backend doesn't exist (= vault not yet initialized).
+ * Best-effort on optional bits (.vault-pubkey, .vault-master.age) — a
+ * missing optional doesn't make the state unreadable.
+ */
+function readInitializedState(abrainHome: string): InitializedState | null {
+  const backendInfo = readBackendFile(abrainHome);
+  if (!backendInfo) return null;
+
+  const result: InitializedState = {
+    backend: backendInfo.backend,
+    identity: backendInfo.identity,
+    vaultMasterPresent: false,
+  };
+
+  // .vault-pubkey is best-effort
+  try {
+    const pkPath = path.join(abrainHome, ".vault-pubkey");
+    if (fs.existsSync(pkPath)) {
+      result.publicKey = fs.readFileSync(pkPath, "utf8").trim();
+    }
+  } catch { /* ignore */ }
+
+  // .vault-master.age existence + mode (file backends only)
+  try {
+    const mkPath = path.join(abrainHome, ".vault-master.age");
+    if (fs.existsSync(mkPath)) {
+      result.vaultMasterPresent = true;
+      result.vaultMasterMode = fs.statSync(mkPath).mode;
+    }
+  } catch { /* ignore */ }
+
+  return result;
 }

@@ -227,32 +227,109 @@ export function detectBackend(deps: DetectDeps): BackendInfo {
   //   - ~/.abrain/.state/vault-disabled flag (handled in index.ts, not here)
 }
 
-/** Format backend info for /vault status output. Pure formatter. */
-export function formatStatus(info: BackendInfo, vaultDisabledFlag: boolean): string {
+/**
+ * Initialized vault state — caller passes when ~/.abrain/.vault-backend
+ * exists. Disambiguates 'system already set up' from 'system would set up
+ * to ssh-key if you ran /vault init now'.
+ */
+export interface InitializedState {
+  /** value of `backend=` from .vault-backend (one of EncryptableBackend) */
+  backend: string;
+  /** value of `identity=` from .vault-backend, if applicable */
+  identity?: string;
+  /** contents of ~/.abrain/.vault-pubkey, if readable */
+  publicKey?: string;
+  /** does ~/.abrain/.vault-master.age exist? (file backends only) */
+  vaultMasterPresent: boolean;
+  /** mode bits of .vault-master.age, if present (for hygiene check display) */
+  vaultMasterMode?: number;
+}
+
+/**
+ * Format /vault status output (v1.4.2).
+ *
+ * Priority (matches vault-bootstrap.md §4.1 table):
+ *   sub-pi disabled  > user-disabled flag  > initialized  > detection
+ *
+ * Pure formatter — no I/O. Caller (index.ts handleStatus) reads files and
+ * passes everything in.
+ */
+export function formatStatus(
+  info: BackendInfo,
+  vaultDisabledFlag: boolean,
+  initialized: InitializedState | null = null,
+): string {
   const lines: string[] = [];
+
   if (vaultDisabledFlag) {
     lines.push("🔒 vault: disabled (~/.abrain/.state/vault-disabled flag set)");
-    lines.push(`   detected backend: ${info.backend}`);
-    lines.push(`   reason: ${info.reason}`);
+    if (initialized) {
+      lines.push(`   was initialized as: backend=${initialized.backend}`);
+    } else {
+      lines.push(`   detected backend: ${info.backend}`);
+      lines.push(`   reason: ${info.reason}`);
+    }
     lines.push("   to re-enable: rm ~/.abrain/.state/vault-disabled");
     return lines.join("\n");
   }
 
+  // ── State A: initialized (vault-backend file exists) ────────────────
+  if (initialized) {
+    lines.push(`🗝  vault: initialized   backend=${initialized.backend}`);
+    if (initialized.identity) lines.push(`   identity: ${initialized.identity}`);
+    if (initialized.publicKey) lines.push(`   public key: ${initialized.publicKey}`);
+
+    const isFileBackend =
+      initialized.backend === "ssh-key" ||
+      initialized.backend === "gpg-file" ||
+      initialized.backend === "passphrase-only";
+    if (isFileBackend) {
+      if (initialized.vaultMasterPresent) {
+        const modeStr = initialized.vaultMasterMode != null
+          ? `0${(initialized.vaultMasterMode & 0o777).toString(8)}`
+          : "unknown";
+        const modeWarn = initialized.vaultMasterMode != null
+          && (initialized.vaultMasterMode & 0o077) !== 0
+          ? "  ⚠ group/other readable"
+          : "";
+        lines.push(`   master encrypted: ~/.abrain/.vault-master.age (${modeStr})${modeWarn}`);
+      } else {
+        lines.push("   ⚠ master encrypted file MISSING (~/.abrain/.vault-master.age)");
+        lines.push("   vault is in inconsistent state. consider re-running /vault init");
+      }
+    } else {
+      lines.push(`   master stored in: ${describeKeychainLocation(initialized.backend)}`);
+    }
+
+    lines.push("   note: P0c (vaultWriter + /secret) not yet implemented — cannot write or read secrets yet");
+    return lines.join("\n");
+  }
+
+  // ── State B/D: not initialized; show detection result ──────────────
   const target = info.backend === "env-override" ? info.overrideTarget : info.backend;
   if (info.backend === "disabled") {
-    lines.push("🔒 vault: locked (no backend available)");
+    lines.push("🔒 vault: not initialized; no backend available");
     lines.push(`   reason: ${info.reason}`);
-    lines.push("   run `pi vault init` to set up");
+    lines.push("   run `/vault init` to set up");
   } else {
-    lines.push(`🗝  vault: backend=${info.backend}${info.overrideTarget ? ` (→ ${info.overrideTarget})` : ""}`);
+    lines.push(`🔒 vault: not initialized; ready to init`);
+    lines.push(`   detected backend: ${info.backend}${info.overrideTarget ? ` (→ ${info.overrideTarget})` : ""}`);
     lines.push(`   reason: ${info.reason}`);
     if (info.identity) lines.push(`   identity: ${info.identity}`);
     if (info.gpgRecipient) lines.push(`   gpg recipient: 0x${info.gpgRecipient}`);
     lines.push(`   auto-unlock: ${info.capabilities.autoUnlock ? "yes (agent cache or active session)" : "no (manual unlock required)"}`);
-    lines.push(`   key rotation: ${info.capabilities.canRotate ? "supported" : "not supported in current spec"}`);
     if (target && target !== "disabled") {
-      lines.push("   note: P0a only detects the backend. master key generation lands in P0b.");
+      lines.push(`   to init: \`/vault init\`  (will use detected backend) or \`/vault init --backend=<name>\``);
     }
   }
   return lines.join("\n");
+}
+
+function describeKeychainLocation(backend: string): string {
+  switch (backend) {
+    case "macos": return "macOS Keychain (service=alfadb-abrain-master)";
+    case "secret-service": return "Secret Service (service=abrain key=master)";
+    case "pass": return "pass (abrain/master)";
+    default: return `[${backend} backend]`;
+  }
 }

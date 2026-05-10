@@ -312,38 +312,120 @@ check("$SECRETS_BACKEND case-insensitive (SSH-KEY honored)", () => {
 
 // ── 8. formatStatus ─────────────────────────────────────────────
 
-check("formatStatus(ssh-key) shows identity path", () => {
+// ── State B: not initialized (initialized=null) ─────────────────
+
+check("formatStatus B (not initialized, ssh-key detected): shows 'ready to init' + identity", () => {
   const info = detectBackend(deps({
     fileExists: (p) => p.includes("id_ed25519"),
   }));
-  const out = formatStatus(info, false);
+  const out = formatStatus(info, false, null);
+  if (!out.includes("not initialized")) throw new Error("output missing 'not initialized'");
   if (!out.includes("ssh-key")) throw new Error("output missing 'ssh-key'");
-  if (!out.includes("identity:")) throw new Error("output missing identity line");
   if (!out.includes("/home/test/.ssh/id_ed25519")) throw new Error("output missing identity path");
+  if (!out.includes("to init:")) throw new Error("output missing 'to init:' hint");
 });
 
-check("formatStatus(gpg-file) shows gpg recipient", () => {
+check("formatStatus B (gpg-file detected) shows gpg recipient + 'ready to init'", () => {
   const info = detectBackend(deps({
     commandExists: (c) => c === "gpg",
     gpgFirstSecretKey: () => "DEADBEEF12345678",
   }));
-  const out = formatStatus(info, false);
+  const out = formatStatus(info, false, null);
+  if (!out.includes("not initialized")) throw new Error("output missing 'not initialized'");
   if (!out.includes("gpg recipient")) throw new Error("output missing gpg recipient line");
   if (!out.includes("0xDEADBEEF12345678")) throw new Error("output missing recipient id");
 });
 
-check("formatStatus(passphrase-only, false) renders unlock UX warning", () => {
+check("formatStatus B (passphrase-only fall-through) renders unlock UX warning", () => {
   const info = detectBackend(deps({}));
-  const out = formatStatus(info, false);
+  const out = formatStatus(info, false, null);
   if (!out.includes("passphrase-only")) throw new Error("output missing 'passphrase-only'");
   if (!out.includes("manual unlock")) throw new Error("output should warn about manual unlock");
 });
 
-check("formatStatus(any, vaultDisabledFlag=true) shows user-disabled state", () => {
+// ── State C: user-disabled flag set ─────────────────────────────
+
+check("formatStatus C (vaultDisabledFlag=true, no init record) shows user-disabled state", () => {
   const info = detectBackend(deps({}));
-  const out = formatStatus(info, true);
+  const out = formatStatus(info, true, null);
   if (!out.includes("disabled")) throw new Error("output missing 'disabled'");
   if (!out.includes("vault-disabled")) throw new Error("output missing path hint");
+});
+
+check("formatStatus C with init record: shows 'was initialized as'", () => {
+  // edge case: user disabled vault AFTER initializing — make it explicit
+  const info = detectBackend(deps({ fileExists: () => true }));
+  const out = formatStatus(info, true, {
+    backend: "ssh-key", identity: "/test", vaultMasterPresent: true,
+  });
+  if (!out.includes("was initialized as")) throw new Error("missing 'was initialized as'");
+});
+
+// ── State A: initialized (the dogfood-flagged case) ────────────────
+
+check("★ formatStatus A (initialized): NO 'P0a' or 'P0b not delivered' wording", () => {
+  // The dogfood discovery: previous status said 'P0a only detects' even after
+  // user successfully ran /vault init. Verify we never regress to that wording.
+  const info = detectBackend(deps({ fileExists: () => true }));
+  const out = formatStatus(info, false, {
+    backend: "ssh-key",
+    identity: "/home/worker/.ssh/id_rsa",
+    publicKey: "age1zu6pzj7",
+    vaultMasterPresent: true,
+    vaultMasterMode: 0o600,
+  });
+  if (out.includes("P0a only detects")) throw new Error("REGRESSION: P0a wording in initialized status");
+  if (out.includes("master key generation lands in P0b")) throw new Error("REGRESSION: 'P0b lands' wording");
+  if (!out.includes("initialized")) throw new Error("missing 'initialized'");
+  if (!out.includes("ssh-key")) throw new Error("missing backend");
+  if (!out.includes("/home/worker/.ssh/id_rsa")) throw new Error("missing identity");
+  if (!out.includes("age1zu6pzj7")) throw new Error("missing public key");
+});
+
+check("formatStatus A with file backend missing master file: warns inconsistent", () => {
+  const info = detectBackend(deps({}));
+  const out = formatStatus(info, false, {
+    backend: "ssh-key",
+    identity: "/x",
+    vaultMasterPresent: false, // ← simulates corrupted state
+  });
+  if (!out.includes("MISSING")) throw new Error("missing 'MISSING' warning");
+  if (!out.includes("inconsistent")) throw new Error("missing 'inconsistent' warning");
+});
+
+check("formatStatus A with permissive .vault-master.age mode: warns group/other readable", () => {
+  // Regression for the dogfood-flagged 0664 issue (v1.4.1 fix): if for some
+  // reason a future bug puts .vault-master.age back at 0664, status surfaces it.
+  const info = detectBackend(deps({}));
+  const out = formatStatus(info, false, {
+    backend: "ssh-key",
+    identity: "/x",
+    vaultMasterPresent: true,
+    vaultMasterMode: 0o664,
+  });
+  if (!out.includes("⚠")) throw new Error("missing warning marker for permissive mode");
+  if (!out.includes("group/other readable")) throw new Error("missing mode warning text");
+});
+
+check("formatStatus A with keychain backend: shows 'master stored in: macOS Keychain'", () => {
+  const info = detectBackend(deps({}));
+  const out = formatStatus(info, false, {
+    backend: "macos",
+    vaultMasterPresent: false, // keychain backends don't write file
+  });
+  if (out.includes("MISSING")) throw new Error("keychain backend should NOT trigger MISSING warning");
+  if (!out.includes("master stored in:")) throw new Error("missing 'master stored in:' line");
+  if (!out.includes("macOS Keychain")) throw new Error("missing 'macOS Keychain' description");
+});
+
+check("formatStatus A says 'P0c (vaultWriter + /secret) not yet implemented'", () => {
+  // Verify the new note wording — directs user to the actually-pending milestone.
+  const info = detectBackend(deps({}));
+  const out = formatStatus(info, false, {
+    backend: "ssh-key", identity: "/x", vaultMasterPresent: true, vaultMasterMode: 0o600,
+  });
+  if (!out.includes("P0c")) throw new Error("missing 'P0c' note");
+  if (!out.includes("not yet implemented")) throw new Error("missing 'not yet implemented'");
 });
 
 // ── 9. activate() respects PI_ABRAIN_DISABLED=1 ─────────────────
