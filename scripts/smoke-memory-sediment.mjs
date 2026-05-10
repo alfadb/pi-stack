@@ -87,7 +87,9 @@ exports.Type = {
   // exports; no real model call is made.
   writeFile(path.join(outRoot, "node_modules", "@earendil-works", "pi-ai", "index.js"), `
 exports.__calls = [];
-exports.streamSimple = (_model, opts) => {
+exports.__configs = [];
+exports.streamSimple = (_model, opts, config) => {
+  exports.__configs.push(config || {});
   const prompt = opts && opts.messages && opts.messages[0] && opts.messages[0].content && opts.messages[0].content[0] && opts.messages[0].content[0].text || '';
   let text;
   if (prompt.includes('MEMORY_SEARCH_CANDIDATES')) {
@@ -254,7 +256,14 @@ async function main() {
 
     const search = tools.get("memory_search");
     const mockModelRegistry = {
-      find(provider, id) { return { provider, id }; },
+      find(provider, id) {
+        return {
+          provider,
+          id,
+          reasoning: true,
+          thinkingLevelMap: { off: "", high: "high", xhigh: "xhigh", minimal: null, low: null, medium: null },
+        };
+      },
       async getApiKeyAndHeaders() { return { ok: true, apiKey: "smoke-key" }; },
     };
 
@@ -277,6 +286,13 @@ async function main() {
     assert(Array.isArray(llmSearchRaw?.content) && llmSearchRaw.content[0]?.type === "text", "memory_search envelope shape regressed (expected { content: [{type:'text', text}] })");
     const llmSearchRes = JSON.parse(llmSearchRaw.content[0].text);
     assert(Array.isArray(llmSearchRes) && llmSearchRes.length === 1 && llmSearchRes[0].slug === "alpha" && llmSearchRes[0].score === 1, `memory_search LLM path failed: ${JSON.stringify(llmSearchRes)}`);
+    assert(llmSearchRes[0].degraded === undefined, "memory_search LLM result must not expose degraded flag when no degradation path exists");
+    assert(llmSearchRes[0].created === "2026-05-08", "memory_search LLM result should expose created freshness signal");
+    assert(Array.isArray(llmSearchRes[0].timeline_tail) && llmSearchRes[0].timeline_tail.length === 1, "memory_search LLM result should expose timeline_tail freshness signal");
+    assert(llmSearchRes[0].rank_reason === "direct match", "memory_search LLM result should expose stage2 rank_reason");
+    const piAiStub = req("@earendil-works/pi-ai");
+    assert(JSON.stringify(piAiStub.__calls) === JSON.stringify(["memory-search-stage1", "memory-search-stage2"]), `memory_search should call stage1+stage2, got ${JSON.stringify(piAiStub.__calls)}`);
+    assert(piAiStub.__configs[0]?.reasoning === "off" && piAiStub.__configs[1]?.reasoning === "high", `memory_search thinking config mismatch: ${JSON.stringify(piAiStub.__configs)}`);
 
     const graph = await rebuildGraphIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "graph.json not written");
@@ -1154,6 +1170,9 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       const r1Written = fs.readFileSync(w1.path, "utf-8");
       assert(/^status: provisional$/m.test(r1Written), `r1 forceProvisional: status must be provisional, got:\n${r1Written}`);
       assert(/^confidence: 4$/m.test(r1Written), `r1 confidence preserved at 4`);
+      assert(/^created: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2}$/m.test(r1Written), `r1 created must be ISO datetime, got:\n${r1Written}`);
+      assert(/^updated: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2}$/m.test(r1Written), `r1 updated must be ISO datetime, got:\n${r1Written}`);
+      assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| captured \| smoke A2 e2e$/m.test(r1Written), `r1 timeline must use ISO datetime, got:\n${r1Written}`);
 
       // Response[1]: SKIP. Caller should treat as no candidates.
       const r2 = await runLlmExtractorDryRun("--- ENTRY 2 t2 message/assistant ---\nNothing notable.", {

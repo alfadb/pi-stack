@@ -81,8 +81,8 @@ interface LockHandle {
   release(): Promise<void>;
 }
 
-function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+function nowIso(): string {
+  return formatLocalIsoTimestamp();
 }
 
 function yamlString(value: string): string {
@@ -139,7 +139,7 @@ function projectSlug(projectRoot: string): string {
 }
 
 function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: string; markdown: string } {
-  const date = todayIso();
+  const timestamp = nowIso();
   const status = draft.status ?? "provisional";
   const confidence = Math.min(10, Math.max(0, Math.round(draft.confidence ?? 3)));
   const slug = slugify(draft.title);
@@ -156,8 +156,8 @@ function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: s
     `confidence: ${confidence}`,
     "schema_version: 1",
     `title: ${yamlString(draft.title)}`,
-    `created: ${date}`,
-    `updated: ${date}`,
+    `created: ${timestamp}`,
+    `updated: ${timestamp}`,
     ...yamlList("trigger_phrases", draft.triggerPhrases),
     "---",
     "",
@@ -169,7 +169,7 @@ function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: s
     "",
     "## Timeline",
     "",
-    `- ${date} | ${timelineSession} | captured | ${timelineNote}`,
+    `- ${timestamp} | ${timelineSession} | captured | ${timelineNote}`,
     "",
   ].join("\n");
 

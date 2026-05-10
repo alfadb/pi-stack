@@ -6,23 +6,31 @@ const PI_STACK_SETTINGS_PATH = path.join(
   os.homedir(), ".pi", "agent", "pi-astack-settings.json",
 );
 
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+
 export interface SearchSettings {
   // ADR 0015 (memory_search LLM-driven retrieval, Accepted 2026-05-10).
   // Two-stage rerank: stage 1 selects candidates from enhanced _index.md,
   // stage 2 reranks full content. Defaults to deepseek family for in-China
   // latency + reasoning + bilingual quality. Accuracy is a hard contract:
   // LLM failures hard-error; there is no grep degradation path.
+  // DeepSeek v4 only supports off/high/xhigh; stage 1 must default to off
+  // rather than minimal because pi-ai would otherwise clamp minimal to high.
   stage1Model: string;
   stage1Limit: number;
+  stage1Thinking: ThinkingLevel;
   stage2Model: string;
   stage2Limit: number;
+  stage2Thinking: ThinkingLevel;
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage1Model: "deepseek/deepseek-v4-flash",
   stage1Limit: 50,
+  stage1Thinking: "off",
   stage2Model: "deepseek/deepseek-v4-pro",
   stage2Limit: 10,
+  stage2Thinking: "high",
 };
 
 export interface MemorySettings {
@@ -77,13 +85,21 @@ function asString(value: unknown, fallback: string): string {
   return fallback;
 }
 
+function asThinkingLevel(value: unknown, fallback: ThinkingLevel): ThinkingLevel {
+  const s = typeof value === "string" ? value.toLowerCase() : "";
+  if (["off", "minimal", "low", "medium", "high", "xhigh"].includes(s)) return s as ThinkingLevel;
+  return fallback;
+}
+
 function resolveSearchSettings(cfg: Record<string, unknown>): SearchSettings {
   const search = (cfg.search as Record<string, unknown>) ?? {};
   return {
     stage1Model: asString(search.stage1Model, DEFAULT_SEARCH_SETTINGS.stage1Model),
     stage1Limit: Math.max(1, asNumber(search.stage1Limit, DEFAULT_SEARCH_SETTINGS.stage1Limit)),
+    stage1Thinking: asThinkingLevel(search.stage1Thinking, DEFAULT_SEARCH_SETTINGS.stage1Thinking),
     stage2Model: asString(search.stage2Model, DEFAULT_SEARCH_SETTINGS.stage2Model),
     stage2Limit: Math.max(1, asNumber(search.stage2Limit, DEFAULT_SEARCH_SETTINGS.stage2Limit)),
+    stage2Thinking: asThinkingLevel(search.stage2Thinking, DEFAULT_SEARCH_SETTINGS.stage2Thinking),
   };
 }
 

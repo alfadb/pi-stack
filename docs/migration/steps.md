@@ -199,6 +199,7 @@ memory_search(query: "dispatch agent prompt")
 - 格式：`MEMORY:` header + `---` + compiled truth body + `END_MEMORY`
 - no marker → SKIP 并推进 checkpoint
 - created / duplicate / validation/lint/credential terminal reject → 推进 checkpoint
+- 新写入的 `created` / `updated` / timeline 首行使用本地 ISO datetime（精确到毫秒 + 时区），避免一天几十条 entry 时 date-only 无法排序
 - transient writer error → 不推进 checkpoint，留待下轮重试
 
 已完成 LLM extractor dry-run：
@@ -418,7 +419,7 @@ npm run smoke:memory
 ### 格式测试
 - 10 条 Lint 规则全部通过 fixtures
 - `## Timeline` 为最后一个 H2
-- Timeline bullet 格式正确（`- YYYY-MM-DD | ...`）
+- Timeline bullet 格式正确（旧 `- YYYY-MM-DD | ...` 兼容；新 sediment 写入用 ISO datetime）
 - 无 code fence / table 在 Timeline 内
 
 ### 生命周期测试

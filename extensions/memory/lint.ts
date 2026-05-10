@@ -171,12 +171,12 @@ export function lintMarkdown(raw: string, file?: string): LintIssue[] {
         }, file);
       }
 
-      const bullet = trimmed.match(/^-\s+(\d{4}-\d{2}-\d{2})\s+\|\s+(.+)$/);
+      const bullet = trimmed.match(/^-\s+(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2}))?)\s+\|\s+(.+)$/);
       if (!bullet) {
         pushIssue(issues, {
           rule: "T4 timeline-bullet-format",
           severity: "warning",
-          message: "timeline entry should be `- YYYY-MM-DD | ...`",
+          message: "timeline entry should be `- <time> | ...` where <time> is YYYY-MM-DD or ISO datetime",
           line: lineNo,
         }, file);
       } else {

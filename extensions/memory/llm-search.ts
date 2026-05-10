@@ -1,4 +1,4 @@
-import type { MemorySettings } from "./settings";
+import type { MemorySettings, ThinkingLevel } from "./settings";
 import type { MemoryEntry, SearchFilters, SearchParams } from "./types";
 import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
@@ -25,6 +25,11 @@ interface ModelCallResult {
   stopReason?: string;
 }
 
+interface ModelLike {
+  reasoning?: boolean;
+  thinkingLevelMap?: Record<string, string | null | undefined>;
+}
+
 const STAGE1_TIMEOUT_MS = 120_000;
 const STAGE2_TIMEOUT_MS = 180_000;
 const STAGE_MAX_RETRIES = 1;
@@ -43,18 +48,32 @@ function assertModelRegistry(modelRegistry: unknown): asserts modelRegistry is M
   }
 }
 
+function supportsThinkingLevel(model: unknown, level: ThinkingLevel): boolean {
+  if (level === "off") return true;
+  const m = model as ModelLike | undefined;
+  if (!m?.reasoning) return false;
+  const mapped = m.thinkingLevelMap?.[level];
+  if (mapped === null) return false;
+  if (level === "xhigh" && mapped === undefined && m.thinkingLevelMap) return false;
+  return true;
+}
+
 async function callSearchModel(
   modelRef: string,
   prompt: string,
   modelRegistry: ModelRegistryLike,
   signal?: AbortSignal,
   timeoutMs = STAGE1_TIMEOUT_MS,
+  thinking: ThinkingLevel = "off",
 ): Promise<ModelCallResult> {
   const parsed = parseModelRef(modelRef);
   if (!parsed) throw new Error(`invalid memory.search model ref: ${modelRef || "<empty>"}; expected provider/model`);
 
   const model = modelRegistry.find(parsed.provider, parsed.id);
   if (!model) throw new Error(`memory.search model not found in registry: ${modelRef}`);
+  if (!supportsThinkingLevel(model, thinking)) {
+    throw new Error(`memory.search ${modelRef} does not support requested thinking level '${thinking}'`);
+  }
 
   const auth = await modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok || !auth.apiKey) {
@@ -65,7 +84,7 @@ async function callSearchModel(
     streamSimple(
       model: unknown,
       opts: { messages: unknown[] },
-      config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number },
+      config: { apiKey: string; headers?: Record<string, string>; signal?: AbortSignal; timeoutMs?: number; maxRetries?: number; reasoning?: ThinkingLevel },
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai");
 
@@ -84,6 +103,7 @@ async function callSearchModel(
       signal,
       timeoutMs,
       maxRetries: STAGE_MAX_RETRIES,
+      reasoning: thinking,
     },
   );
 
@@ -338,7 +358,10 @@ function makeStage2Prompt(query: string, candidates: MemoryEntry[], limit: numbe
     "- Read each entry's compiled_truth AND timeline. Timeline may refine, supersede, or invalidate compiled_truth; reflect this in ranking.",
     "- Match Chinese/English/mixed intent semantically, not literally.",
     "- Prefer the most directly useful entry for the query over broad background entries.",
+    "- Use freshness when it matters: for current-state / implementation / next-step queries, prefer recently updated and non-superseded entries.",
+    "- Do NOT rank newer entries above older high-confidence maxims/principles solely because they are newer.",
     "- If an entry is obsolete/superseded by another candidate, rank the newer/superseding one higher.",
+    "- In the why field, mention freshness/timeline evidence when it materially affects ranking.",
     "- Do not invent slugs. Return only slugs present in Candidates.",
     "- If nothing is relevant, return [].",
     "",
@@ -351,7 +374,7 @@ function makeStage2Prompt(query: string, candidates: MemoryEntry[], limit: numbe
   ].join("\n");
 }
 
-function resultCard(entry: MemoryEntry, score: number) {
+function resultCard(entry: MemoryEntry, score: number, rankReason?: string) {
   return {
     slug: entry.slug,
     title: entry.title,
@@ -360,7 +383,10 @@ function resultCard(entry: MemoryEntry, score: number) {
     kind: entry.kind,
     status: entry.status,
     confidence: entry.confidence,
-    degraded: false,
+    created: entry.created,
+    updated: entry.updated,
+    ...(rankReason ? { rank_reason: rankReason } : {}),
+    timeline_tail: entry.timeline.slice(-2),
     related_slugs: entry.relatedSlugs.slice(0, 5),
   };
 }
@@ -374,7 +400,7 @@ function rankFromStage2(entriesBySlug: Map<string, MemoryEntry>, picks: FinalPic
         ? pick.score
         : Math.max(0, 10 - i);
       const normalized = rawScore > 1 ? rawScore / 10 : rawScore;
-      return resultCard(entry, normalized);
+      return resultCard(entry, normalized, pick.why);
     })
     .filter((x): x is ReturnType<typeof resultCard> => !!x)
     .sort((a, b) => b.score - a.score);
@@ -416,6 +442,7 @@ export async function llmSearchEntries(
     modelRegistry,
     signal,
     STAGE1_TIMEOUT_MS,
+    settings.search.stage1Thinking,
   );
   const stage1Picks = parseCandidatePicks(stage1.rawText).slice(0, candidateLimit);
   if (stage1Picks.length === 0) return [];
@@ -433,6 +460,7 @@ export async function llmSearchEntries(
     modelRegistry,
     signal,
     STAGE2_TIMEOUT_MS,
+    settings.search.stage2Thinking,
   );
   const stage2Picks = parseFinalPicks(stage2.rawText);
   if (stage2Picks.length === 0) return [];

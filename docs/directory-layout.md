@@ -36,7 +36,7 @@ alfadb/pi-astack/
 │   │   ├── 0012-sediment-pensieve-gbrain-dual-target.md  # superseded by memory-architecture.md
 │   │   ├── 0013-asymmetric-trust-three-lanes.md          # Lane A/B/C/D trust tier (2026-05-08)；Lane B/D 被 ADR 0014 失效
 │   │   ├── 0014-abrain-as-personal-brain.md              # ✅ ~/.abrain 重定位为数字孪生七区结构 (2026-05-09, v1.4)
-│   │   └── 0015-memory-search-llm-driven-retrieval.md    # 🟡 memory_search 双阶段 LLM rerank (2026-05-10, Proposed; 未实施)
+│   │   └── 0015-memory-search-llm-driven-retrieval.md    # ✅ memory_search 双阶段 LLM rerank (2026-05-10, Accepted; Phase 0/1 implemented)
 │   ├── brain-redesign-spec.md         # ✅ ADR 0014 详细规范 (v1.3) — abrain 七区拓扑/vault 双层/Lane G/V
 │   └── migration/
 │       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6（Phase 2 起部分被 ADR 0014 重新规划）
@@ -44,7 +44,7 @@ alfadb/pi-astack/
 │       ├── abrain-pensieve-migration.md  # ✅ .pensieve/ → ~/.abrain/projects/<id>/ 迁移计划 P1-P7 (ADR 0014 §D2)
 │       ├── vault-bootstrap.md         # ✅ vault unlock 平台支持矩阵 v1.4 (portable-identity 优先)
 │       ├── phase-2.3-promotion-gates.md  # promotion gates 1-5 详细设计稿（等 Phase 1.4 burn-in 后实施）
-│       ├── memory-search-llm-upgrade.md  # 🟡 ADR 0015 实施路径 Phase 0/1/2/3（2026-05-10 Proposed）
+│       ├── memory-search-llm-upgrade.md  # 🟡 ADR 0015 实施路径 Phase 0/1 done；Phase 2 semantic dedupe pending
 │       └── open-questions.md          # 适配新架构的待澄清问题
 │
 ├── extensions/                        # ✅ pi 行为扩展（alfadb own）
@@ -133,7 +133,7 @@ v7 markdown+git 记忆架构的只读 Facade。注册 4 个 LLM-facing 工具：
 
 | 工具 | 说明 |
 |------|------|
-| `memory_search(query, filters?)` | grep/tf-idf markdown 搜索；返回 bare slug/title/summary/score/kind/status/confidence，不暴露 backend/source_path |
+| `memory_search(query, filters?)` | ADR 0015 双阶段 LLM retrieval；query 是自然语言检索 prompt；返回 bare slug/title/summary/score/kind/status/confidence/created/updated/rank_reason/timeline_tail，不暴露 backend/source_path/scope，不降级到 grep |
 | `memory_get(slug, options?)` | bare slug 精确读取；返回完整 canonical entry（含 timeline/source_path/scope） |
 | `memory_list(filters?)` | 分页浏览条目 metadata，主要用于人工/debug |
 | `memory_neighbors(slug, options?)` | 只读遍历 frontmatter relations + `[[wikilink]]`，不写关系 |

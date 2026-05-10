@@ -216,11 +216,11 @@ provenance:
 |---|---|---|---|
 | frontmatter | 结构化元数据、关系、当前状态 | 可更新 | 仅字段过滤，不参与语义搜索 |
 | compiled truth | `## Timeline` 之前的正文 | 可被 sidecar 完全重写 | ✅ 主检索区域 |
-| timeline | `## Timeline` 之后的 append-only 日志 | 只能追加 | ❌ 默认不参与 search，仅 audit/memory_get 时返回 |
+| timeline | `## Timeline` 之后的 append-only 日志 | 只能追加 | Stage 1 不入 index；ADR 0015 Stage 2 对候选读取完整 timeline，用于 freshness/supersession 判断 |
 
 **关键规则**：
-- `## Timeline` 是最后一个 H2，之后只允许 `- YYYY-MM-DD | ...` 格式的 bullet 行
-- `updated` 只反映 compiled_truth 编辑时间；timeline 追加不影响 `updated`
+- `## Timeline` 是最后一个 H2，之后只允许 `- <time> | ...` 格式的 bullet 行。`<time>` 兼容旧 `YYYY-MM-DD`，但 sediment 新写入必须使用本地 ISO datetime（如 `2026-05-10T22:41:36+08:00`），因为每天可能产生几十条 entry，date-only 不足以表达同日 supersession。
+- `updated` 只反映 compiled_truth 编辑时间；timeline 追加不影响 `updated`。sediment 新写入的 `created`/`updated` 同样使用本地 ISO datetime；旧 date-only entry 不批量迁移。
 - Timeline 内禁止：heading（`#`/`##`/`###`）、code fence（`` ``` ``）、Markdown table（`|---|` 分隔行）、嵌套 list
 - Timeline bullet 的 `|` 分隔符不属于 table——T9 lint 规则仅检测 table 语法
 - **Timeline action 枚举**：`captured | validated | promoted | deprecated | superseded | applied | merged | migrated | specialized`。T4 lint 不校验 action 值（只校验日期+格式），但非标准 action 会被 doctor 标 warning
@@ -355,7 +355,7 @@ memory_search(query):
   4. 返回 LLM-facing schema（scope/backend/source_path 不暴露）
 ```
 
-**LLM-facing 结果schema**（`memory_search` 返回）：
+**LLM-facing 结果schema**（`memory_search` 返回；ADR 0015 后）：
 
 ```json
 {
@@ -366,10 +366,15 @@ memory_search(query):
   "kind": "pattern",
   "status": "active",
   "confidence": 8,
-  "degraded": false,
+  "created": "2026-05-10T22:41:36+08:00",
+  "updated": "2026-05-10T23:08:12+08:00",
+  "rank_reason": "Directly answers the query; latest timeline confirms it supersedes the older argv note.",
+  "timeline_tail": ["- 2026-05-10T23:08:12+08:00 | ..."],
   "related_slugs": ["use-at-file-input"]
 }
 ```
+
+`degraded` 不再出现在 `memory_search` LLM runtime 结果中：ADR 0015 明确无降级路径。完整 timeline 仍通过 `memory_get(slug)` 获取；search card 只返回最近 1-2 条 `timeline_tail` 作为新鲜度/废止信号。
 
 **内部 schema**（Facade/CLI debug 使用，LLM 不可见）：在上述基础上包含 `scope`、`backend`、`source_path`。`memory_get` 返回完整条目（含 scope，因为 scope 是条目固有属性）。`memory_search` 的 LLM-facing 结果中 slug 为 bare slug（不含 `project:`/`world:` 前缀）。
 
@@ -741,7 +746,7 @@ promotion:
 | T1 `timeline-heading-present` | 条目文件必须包含 `## Timeline` 且为最后一个 H2 | ERROR |
 | T2 `timeline-heading-unique` | 文件中恰好一个 `## Timeline` | ERROR |
 | T3 `no-headings-in-timeline` | Timeline 之后不能有 `#`/`##`/`###` | ERROR |
-| T4 `timeline-bullet-format` | Timeline 每行必须是 `- YYYY-MM-DD \| ...` 格式 | WARNING |
+| T4 `timeline-bullet-format` | Timeline 每行必须是 `- <time> \| ...` 格式；旧 `YYYY-MM-DD` 兼容，新 sediment 写入用 ISO datetime | WARNING |
 | T5 `timeline-chronological` | Timeline 条目按日期升序 | WARNING |
 | T6 `timeline-not-empty` | Timeline 至少一行记录 | WARNING |
 | T7 `frontmatter-required` | 必须有 `kind`/`status`/`confidence`/`created`/`schema_version`/`title`；`scope` recommended 但不必须（新 brain 拓扑下 scope 由目录隐式决定） | ERROR / `scope` 缺失仅 WARNING |

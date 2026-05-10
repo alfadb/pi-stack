@@ -67,7 +67,7 @@
 
 - enhanced `_index.md` 总字节数 < 200KB（粗估 token < 50k）
 - smoke:memory 仍 pass
-- LLM 不可用时 enhanced index 不影响 grep 路径
+- enhanced index 生成不影响 LLM runtime；`memory_search` 无 grep 降级路径
 
 ---
 
@@ -157,21 +157,25 @@ Output (JSON, top {stage2Limit} sorted by score desc):
 export interface SearchSettings {
   stage1Model: string;
   stage1Limit: number;
+  stage1Thinking: "off"|"minimal"|"low"|"medium"|"high"|"xhigh";
   stage2Model: string;
   stage2Limit: number;
+  stage2Thinking: "off"|"minimal"|"low"|"medium"|"high"|"xhigh";
 }
 
 export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage1Model: "deepseek/deepseek-v4-flash",
   stage1Limit: 50,
+  stage1Thinking: "off",   // DeepSeek v4 supports off/high/xhigh; minimal would clamp to high
   stage2Model: "deepseek/deepseek-v4-pro",
   stage2Limit: 10,
+  stage2Thinking: "high",
 };
 ```
 
 #### no grep degradation
 
-`memory_search` 不提供 env/config 降级开关。LLM/modelRegistry/auth/network/JSON 失败时 hard error；修复模型/网络/配置后重试。准确性是契约，不能用 grep 结果静默替代。Stage 1 只要返回任何候选，就必须进入 Stage 2 full-content rerank，不因候选数少而跳过。
+`memory_search` 不提供 env/config 降级开关。LLM/modelRegistry/auth/network/JSON 失败时 hard error；修复模型/网络/配置后重试。准确性是契约，不能用 grep 结果静默替代。Stage 1 只要返回任何候选，就必须进入 Stage 2 full-content rerank，不因候选数少而跳过。请求的 thinking level 若模型不支持则 hard error，不让 pi-ai silently clamp。
 
 #### memory_search 工具描述更新
 
@@ -193,7 +197,7 @@ promptGuidelines:
 
 ### Phase 1 验收
 
-- ✅ `npm run smoke:memory` pass（含新增 LLM 路径 mock 测试）
+- ✅ `npm run smoke:memory` pass（含新增 LLM 路径 mock 测试：stage1 reasoning=off，stage2 reasoning=high；missing modelRegistry hard error；结果含 created/updated/timeline_tail/rank_reason 且不含 degraded）
 - 实测 5 个 query：
   - `vault read path` → 命中 abrain-vault-read-path entry
   - `知识沉淀提示词` → 命中 sediment llm-extractor 相关 entry（中文修复验证）
@@ -201,6 +205,7 @@ promptGuidelines:
   - `跟 dotfiles 自动 push 相关` → 命中 dotfiles-no-auto-push 系列（同义改述 + 中文修复）
   - 无关 query → 返回空或低分
 - LLM 不可用时报 hard error；不提供 grep 降级路径
+- 结果 card 暴露新鲜度信号：`created` / `updated` / `rank_reason` / `timeline_tail`；不暴露 `degraded`（无降级路径），完整 timeline 仍用 `memory_get(slug)`
 
 ### Phase 1 burn-in 观察期
 

@@ -65,26 +65,26 @@ Stage 0 (本地)：
   confidence + updated + summary + trigger_phrases，~150 token/entry，
   全库 ~37k tokens）。Phase 1 实现为从已解析 entries **内存生成**同形态 index，避免物理 `_index.md` 过期；`/memory rebuild --index` 仍生成同形态 `_index.md` 作为人类/LLM 可浏览 artifact。
 
-Stage 1 (粗排，可配模型，默认 deepseek-v4-flash)：
+Stage 1 (粗排，可配模型，默认 deepseek-v4-flash，thinking=off)：
   输入: query + 全库 _index.md
   输出: top-K 候选 slug + 简短理由（K 默认 50）
-  目标: 高召回率。只要有候选，必须进入 Stage 2；不因候选数少而跳过精排
+  目标: 高召回率。只要有候选，必须进入 Stage 2；不因候选数少而跳过精排。Stage 1 是 broad recall/classification，不开推理；DeepSeek v4 的 minimal/low/medium unsupported，会被 pi-ai clamp 到 high，因此默认必须是 off。
 
 Stage 1.5 (本地)：
   memory_get(slug) × K 拿 candidate 完整 entry（compiled_truth + timeline）
 
-Stage 2 (精排，可配模型，默认 deepseek-v4-pro)：
+Stage 2 (精排，可配模型，默认 deepseek-v4-pro，thinking=high)：
   输入: query + K 个完整 entry（~60-150k tokens）
-  输出: top-N 排序 + 每条相关性分析
-  目标: 高精度，跨 entry 推理（"X 比 Y 更相关 because timeline 显示 Z 已废弃"）
+  输出: top-N 排序 + 每条相关性分析（rank_reason）
+  目标: 高精度，跨 entry 推理（"X 比 Y 更相关 because timeline 显示 Z 已废弃"）。Stage 2 必须开推理；请求的 thinking level 若模型不支持则 hard error，不允许 silently clamp。
 ```
 
 ### D3. 默认全 deepseek 家族
 
 | Stage | 默认模型 | 理由 |
 |---|---|---|
-| Stage 1 | `deepseek/deepseek-v4-flash` | 国内访问无跨国延迟（alfadb 首要诉求）；粗排是 high-volume eval 任务，flash 甜区；$0.14/1M in 极便宜 |
-| Stage 2 | `deepseek/deepseek-v4-pro` | 同 family 国内速度；reasoning 强，跨 entry 推理需要；中文理解原生强；与 sediment extractor 共享，模型 cache 命中 |
+| Stage 1 | `deepseek/deepseek-v4-flash` + `thinking=off` | 国内访问无跨国延迟（alfadb 首要诉求）；粗排是 high-volume eval 任务，flash 甜区；不开推理避免过度筛选和 DeepSeek minimal→high clamp |
+| Stage 2 | `deepseek/deepseek-v4-pro` + `thinking=high` | 同 family 国内速度；reasoning 强，跨 entry 推理需要；中文理解原生强；与 sediment extractor 共享，模型 cache 命中 |
 
 **单 family 风险**：sediment extractor 也是 v4-pro，deepseek 服务一挂两个子系统同时失能。可接受理由：
 - sediment 是 fire-and-forget + rolling pass-rate fuse，挂了下轮重试
@@ -100,8 +100,10 @@ Stage 2 (精排，可配模型，默认 deepseek-v4-pro)：
     "search": {
       "stage1Model": "deepseek/deepseek-v4-flash",
       "stage1Limit": 50,
+      "stage1Thinking": "off",
       "stage2Model": "deepseek/deepseek-v4-pro",
-      "stage2Limit": 10
+      "stage2Limit": 10,
+      "stage2Thinking": "high"
     }
   }
 }
@@ -119,13 +121,19 @@ graceful degradation 原则（memory-architecture.md §3 第 8 条）**显式让
 
 同 5 分钟内重复 query 不复用前次结果。理由：sediment 高频写入，cache 反而误（刚写入的 entry 不在 cache 里）。每次重读 `_index.md`（~30k token I/O，ms 级）。
 
+### D8. 新鲜度与时间精度
+
+Stage 2 内部读取完整 timeline，结果 card 只暴露 `created` / `updated` / `rank_reason` / 最近 1-2 条 `timeline_tail`。完整 timeline 仍通过 `memory_get(slug)` 获取，避免 search surface 污染主上下文。
+
+sediment 新写入的 `created` / `updated` / timeline 时间戳改为本地 ISO datetime（如 `2026-05-10T22:41:36+08:00`），不再只写日期。理由：每天可能产生几十条 entry，date-only 无法区分同日 supersession / rapid correction。旧 entry date-only 保持兼容，不批量迁移。
+
 ## 后果
 
 ### 正面
 
 - ✅ **中英混合检索**：LLM 双语原生理解，"沉淀" ≡ "sediment"
 - ✅ **同义改述召回**：跨 entry 推理识别"实质同一洞察"（彻底解决 D6 自重复——见 D7）
-- ✅ **trigger_phrases / timeline 自动入参**：enhanced `_index.md` + stage 2 完整 entry 都包含
+- ✅ **trigger_phrases / timeline 自动入参**：enhanced `_index.md` + stage 2 完整 entry 都包含；结果 card 返回 `rank_reason` + `timeline_tail` + `created/updated` 新鲜度信号
 - ✅ **接口不变**：所有 memory_search caller 零改动
 - ✅ **可配置 + 默认合理**：默认 ds 家族符合 alfadb 主用场景；任何环境可切异构
 

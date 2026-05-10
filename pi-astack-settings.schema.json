@@ -375,6 +375,12 @@
               "minimum": 1,
               "description": "Stage 1 output cap. Wider than stage2Limit so stage 2 has slack to recover from stage 1 misses."
             },
+            "stage1Thinking": {
+              "type": "string",
+              "default": "off",
+              "enum": ["off", "minimal", "low", "medium", "high", "xhigh"],
+              "description": "Reasoning level for Stage 1 candidate selection. Default off because Stage 1 is broad recall/classification, and deepseek-v4 only supports off/high/xhigh — requesting minimal would be clamped to high by pi-ai. Unsupported levels hard-error rather than silently clamping."
+            },
             "stage2Model": {
               "type": "string",
               "default": "deepseek/deepseek-v4-pro",
@@ -386,6 +392,12 @@
               "default": 10,
               "minimum": 1,
               "description": "Final result count returned to caller. Overrides memory.defaultLimit when memory_search uses LLM path. Stage 2 always runs when stage 1 returns any candidate; accuracy is prioritized over latency/cost."
+            },
+            "stage2Thinking": {
+              "type": "string",
+              "default": "high",
+              "enum": ["off", "minimal", "low", "medium", "high", "xhigh"],
+              "description": "Reasoning level for Stage 2 full-content rerank. Default high because Stage 2 compares compiled_truth + timeline, handles freshness/supersession, and produces rank_reason. Unsupported levels hard-error rather than silently clamping."
             }
           }
         }
