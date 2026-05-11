@@ -358,7 +358,3 @@ export function checkpointSummary(window: RunWindow) {
     skipReason: window.skipReason,
   };
 }
-
-export function hasPensieve(projectRoot: string): boolean {
-  return fsSync.existsSync(path.join(projectRoot, ".pensieve"));
-}

@@ -28,7 +28,7 @@
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveSedimentSettings, type SedimentSettings } from "./settings";
-import { buildRunWindow, checkpointSummary, hasPensieve, loadSessionCheckpoint, saveSessionCheckpoint, type RunWindow } from "./checkpoint";
+import { buildRunWindow, checkpointSummary, loadSessionCheckpoint, saveSessionCheckpoint, type RunWindow } from "./checkpoint";
 import { curateProjectDraft, type CuratorAudit } from "./curator";
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
@@ -57,8 +57,9 @@ import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
  * the entire LLM duration if we await here).
  *
  * If a NEW agent_end fires while the previous turn's bg work is
- * still running, we skip the LLM lane for the new turn and audit
- * with reason 'auto_write_inflight_skip'.
+ * still running, we silently do nothing for the new turn: no audit,
+ * no checkpoint advance. The next agent_end after the bg worker drains
+ * starts from the checkpoint advanced by that previous sediment run.
  */
 const autoWriteInFlight = new Map<string, Promise<void>>();
 
@@ -292,7 +293,7 @@ export default function (pi: ExtensionAPI) {
     // throws "Extension error: stale ctx". Capturing values upfront makes
     // the rest of the handler ctx-independent.
     const cwd = path.resolve(ctx.cwd || process.cwd());
-    if (!hasPensieve(cwd) || !ctx.sessionManager?.getBranch) return;
+    if (!ctx.sessionManager?.getBranch) return;
     let branch: unknown[];
     try {
       branch = ctx.sessionManager.getBranch();
@@ -448,24 +449,11 @@ export default function (pi: ExtensionAPI) {
       //   - In pi --print, the process exits after agent_end and bg
       //     work is cancelled. Acceptable: --print is one-shot.
       if (autoWriteInFlight.has(sessionId)) {
-        await saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: window.lastEntryId });
-        await appendAudit(cwd, {
-          operation: "skip",
-          lane: "auto_write",
-          reason: "auto_write_inflight_skip",
-          session_id: sessionId,
-          ...summary,
-          extractor: "llm_extractor",
-          parser_version: PARSER_VERSION,
-          settings_snapshot: settingsSnapshot,
-          entry_breakdown: entryBreakdown,
-          stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: 0, total: Date.now() - tStart },
-          checkpoint_advanced: true,
-        });
-        // Status stays at whatever the previous turn's bg work last
-        // applied (typically still "running"). Don't override here —
-        // the bg work is the authoritative state owner until it
-        // settles.
+        // A previous background sediment run is still authoritative.
+        // Do not advance the checkpoint and do not write audit noise:
+        // the next agent_end after that worker drains will start from
+        // the checkpoint advanced by the previous run and include this
+        // turn's content in the next window.
         return;
       }
 
@@ -919,10 +907,9 @@ const PARSER_VERSION = "fence_aware_v1";
  * fields with throwaway IDs.
  *
  * We treat a session as ephemeral (=> return undefined here) when
- * `getSessionFile()` is unavailable or returns no path. In ephemeral
- * mode the deterministic extractor still runs, but checkpoints are not
- * persisted (see saveSessionCheckpoint no-op) and audit rows record
- * `ephemeral_session: true` for attribution.
+ * `getSessionFile()` is unavailable or returns no path. The agent_end
+ * handler then early-returns before any extractor/writer work and emits
+ * a single `ephemeral_session: true` audit row for attribution.
  */
 function readSessionId(sm: {
   getSessionId?(): string | undefined | null;

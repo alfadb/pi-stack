@@ -441,6 +441,16 @@ Body.
     }, { projectRoot: root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
     assert(write.status === "created", `writer failed: ${write.reason}`);
 
+    const missingPensieveRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-no-pensieve-"));
+    const createdRootWrite = await writeProjectEntry({
+      title: "Writer Creates Pensieve Root",
+      kind: "fact",
+      confidence: 5,
+      compiledTruth: "The sediment writer creates the project .pensieve directory on demand when it is missing.",
+    }, { projectRoot: missingPensieveRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+    assert(createdRootWrite.status === "created", `writer should create missing .pensieve root: ${createdRootWrite.reason}`);
+    assert(fs.existsSync(path.join(missingPensieveRoot, ".pensieve")), "writer did not create .pensieve root on demand");
+
     const duplicate = await detectProjectDuplicate(root, "Writer Fixture");
     assert(duplicate.duplicate, "dedupe failed to detect written entry");
 

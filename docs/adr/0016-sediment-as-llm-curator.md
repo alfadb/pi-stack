@@ -94,6 +94,8 @@ UPDATE / MERGE existing memory
 - `merge` 已有 first-class substrate：更新 target compiled truth + `derives_from`，并 archive 非 target sources；supersede 当前支持 old_slug + optional existing new_slug，不负责自动创建 replacement。
 - 不暴露 auto-write / curator / explicit-extract 的 human dry-run 命令：slash command 不是 LLM-facing tool，主会话 LLM 不会自动调用，用户也不需要手动预览。curator 只作为 live sidecar，诊断/回滚依赖 audit + git。
 - 自动 apply 仍只在 safety/storage gates 通过后执行。
+- `.pensieve/` 不再是运行前置条件；sediment 启用后可以在没有现成 `.pensieve/` 的项目中运行，writer 在首次写入时按需创建项目 `.pensieve/`。
+- 同 session 已有 background auto-write 在飞时，新 agent_end 静默返回，不写 audit、不推进 checkpoint；下一次触发从上一轮 sediment 已推进的 checkpoint 继续，避免把尚未处理的新窗口标记为已处理。
 
 ## Consequences
 

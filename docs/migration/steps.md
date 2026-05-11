@@ -176,7 +176,7 @@ memory_search(query: "dispatch agent prompt")
 - `buildRunWindow(branch, checkpoint)`：从 `ctx.sessionManager.getBranch()` 取 checkpoint 之后的新 entries
 - compaction/branch fallback：checkpoint entry 找不到时只取最新 entry，避免重放全历史
 - window budget：`minWindowChars` / `maxWindowChars` / `maxWindowEntries`
-- agent_end enabled 时：无新窗口/无显式 `MEMORY:` marker → audit skip 并推进 checkpoint；有显式 marker → 走 deterministic extractor + writer；无 marker + auto-write 诺动与 gates 放行 → 调度 bg LLM lane（fire-and-forget，见 A2/A3）
+- agent_end enabled 时：不要求 `.pensieve/` 预先存在；写入时 writer 会按需创建项目 `.pensieve/`。无新窗口/窗口太小 → audit skip（有 last entry 时推进 checkpoint）；有显式 `MEMORY:` marker → 走 deterministic extractor + writer；无 marker 且无在飞后台任务 → 乐观推进 checkpoint 后调度 bg LLM lane（fire-and-forget，见 A2/A3）；若同 session 上一轮 bg sediment 仍在飞 → 静默返回，不写 audit、不推进 checkpoint，下次触发从上一轮 sediment 已推进的 checkpoint 继续。
 
 已完成 writer substrate：
 - validate：runtime 检查 title/kind/status/confidence/compiledTruth
@@ -184,14 +184,14 @@ memory_search(query: "dispatch agent prompt")
 - storage-only dedupe：仅 slug 精确相等无条件 reject，防止同一路径覆盖。旧 word-trigram / G13 rare-token 机械语义 dedupe 已按 ADR 0016 删除；语义重复交给 `memory_search` + curator 决定 update/skip/merge/create。
 - lint：写前调用 T1-T10 lint，error 阻断写入
 - lock：`.pi-astack/sediment/locks/sediment.lock`，超时可配置
-- write：tmp → rename 原子写入 markdown
+- write：缺失 `.pensieve/` 时按需创建；tmp → rename 原子写入 markdown
 - git：best-effort `git add` + `git commit`，失败不回滚 markdown
 - audit：追加 `.pi-astack/sediment/audit.jsonl`（v2 schema：本地 TZ 时间戳 + audit_version + pid + project_root；agent_end 汇总行额外带 lane + settings_snapshot + entry_breakdown + parser_version + stage_ms + candidates/results/curator/llm；从 `.pensieve/.state/sediment-events.jsonl` 在首次 appendAudit 调用时自动迁移）。auto-write / explicit write 不暴露 human dry-run 命令，故障诊断由 LLM 读取 audit + git history 完成。
 
 已完成 deterministic extractor stub：
 - 仅识别显式 block，不从普通对话中猜测
 - 格式：`MEMORY:` header + `---` + compiled truth body + `END_MEMORY`
-- no marker → SKIP 并推进 checkpoint
+- no marker → 显式 lane miss；若 auto-write 开启则进入 LLM curator lane，若 auto-write 不可用则 skip 并推进 checkpoint
 - created / duplicate / validation/lint/credential terminal reject → 推进 checkpoint
 - 新写入的 `created` / `updated` / timeline 首行使用本地 ISO datetime（精确到毫秒 + 时区），避免一天几十条 entry 时 date-only 无法排序
 - transient writer error → 不推进 checkpoint，留待下轮重试
@@ -229,7 +229,7 @@ memory_search(query: "dispatch agent prompt")
 - 首日 6 次 fire 共 14 候选，落盘 12，被新 G13 + 手动 prune 后留存 7。
 - **Slug bug fix**：`writer.ts` + `dedupe.ts` 把 `normalizeBareSlug(title)` 换成 `slugify(title)`，因前者把 `/` 当 path 分隔符（看到 “by extractor/reason Combinations” 把 slug 截成 `reason-combinations`）。`normalizeBareSlug` 仅用于 path/wikilink/id 输入。
 - **Stale-ctx fix**：`agent_end` 在所有 await 之前同步快照 `cwd / branch / sessionId / notify / modelRegistry / signal`；late ctx invalidation 不再触发 “stale-ctx” 假警报。
-- **Fire-and-forget UX**：pi awaits hook handlers synchronously；同步等 LLM (~30s+) 主会话被 “Working” 卡死。改方案：drafts=0 时 optimistic advance checkpoint → 调度 bg promise 入 `autoWriteInFlight` Map → agent_end 立即返回 (<100ms)；bg 内部 try/catch 兜底所有错误（unhandled Promise rejection 在 pi 会 crash session）。
+- **Fire-and-forget UX**：pi awaits hook handlers synchronously；同步等 LLM (~30s+) 主会话被 “Working” 卡死。改方案：drafts=0 且没有同 session 在飞 bg worker 时 optimistic advance checkpoint → 调度 bg promise 入 `autoWriteInFlight` Map → agent_end 立即返回 (<100ms)；bg 内部 try/catch 兜底所有错误（unhandled Promise rejection 在 pi 会 crash session）。若上一轮 bg worker 仍在飞，新 agent_end 静默返回，不推进 checkpoint、不写 audit；worker drain 后下一次 agent_end 从上一轮已推进 checkpoint 继续处理期间累积内容。
 - **Footer status FSM**（4 态：idle / running / completed / failed）：
   - `session_start` 永远 → idle
   - `agent_start` 当上轮终态 (completed/failed) → 重置 idle；当 running/idle 不动

@@ -148,6 +148,12 @@ function projectSlug(projectRoot: string): string {
   return slugify(path.basename(projectRoot) || "project");
 }
 
+async function ensureProjectPensieveRoot(projectRoot: string): Promise<string> {
+  const pensieveRoot = path.join(projectRoot, ".pensieve");
+  await fs.mkdir(pensieveRoot, { recursive: true });
+  return pensieveRoot;
+}
+
 function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: string; markdown: string } {
   const timestamp = nowIso();
   const status = draft.status ?? "provisional";
@@ -483,13 +489,10 @@ export async function deleteProjectEntry(
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
-  const pensieveRoot = path.join(projectRoot, ".pensieve");
+  const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
   const slug = slugify(slugRaw);
   const mode: DeleteMode = opts.mode === "hard" ? "hard" : "soft";
   const reason = opts.reason || "deleted by sediment curator";
-  if (!fsSync.existsSync(pensieveRoot)) {
-    return { slug, path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found", deleteMode: mode };
-  }
 
   const target = await findProjectEntryFile(projectRoot, slug);
   if (!target) {
@@ -560,11 +563,8 @@ export async function updateProjectEntry(
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
-  const pensieveRoot = path.join(projectRoot, ".pensieve");
+  const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
   const slug = slugify(slugRaw);
-  if (!fsSync.existsSync(pensieveRoot)) {
-    return { slug, path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
-  }
 
   const target = await findProjectEntryFile(projectRoot, slug);
   if (!target) {
@@ -675,10 +675,7 @@ export async function writeProjectEntry(
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
-  const pensieveRoot = path.join(projectRoot, ".pensieve");
-  if (!fsSync.existsSync(pensieveRoot)) {
-    return { slug: slugify(draft.title), path: pensieveRoot, status: "rejected", reason: ".pensieve directory not found" };
-  }
+  const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
 
   const validationErrors = validateProjectEntryDraft(draft);
   if (validationErrors.length > 0) {
