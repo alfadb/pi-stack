@@ -430,11 +430,14 @@ export function activate(api: PiExtensionAPI) {
 
 #### (c) Smoke 验证 enforcement——不是靠 documentation、是靠测试
 
-`scripts/smoke-vault-subpi-isolation.mjs`（待写）验证：
-1. 父 pi 启动后 `pi vault status` = unlocked
-2. dispatch_agents 子 pi 进程调用 `pi vault status`返回 locked/disabled
-3. dispatch_agents 子 pi 中调用 `pi vault list` 拒绝（不返回任何 metadata）
-4. 即使用户设 `PI_ABRAIN_DISABLED=0` env，dispatch_agents 子 pi 仍然 disabled（验证 spawn override 顺序正确）
+`scripts/smoke-vault-subpi-isolation.mjs`（已实现，2026-05-09）验证 `dispatch/index.ts:spawn("pi", ...)` 站点：
+1. spawn options 含 `env` 字段
+2. `...process.env` 在 `PI_ABRAIN_DISABLED` 之前，覆盖顺序正确。即使用户设 `PI_ABRAIN_DISABLED=0`，子 pi 仍然 disabled
+3. 子进程用 `PI_ABRAIN_DISABLED="1"` 字串（不是 number）
+4. spawn 传递 childEnv（不是别的 env object）
+5. `extensions/dispatch/index.ts` 只有一处 `spawn("pi", ...)`——检验 smoke 覆盖了所有路径。
+
+补充 enforcement 点：`extensions/abrain/vault-reader.ts:loadMasterKey()` 在 substrate 层再检查一次 `PI_ABRAIN_DISABLED === "1"`（纵深防御）。错过任意一层都不会造成明文泄露。
 
 ## 6. 跨设备导入（手动）
 
@@ -489,7 +492,7 @@ vault-bootstrap 完成后必须验证。**按 backend 分类，只验证该 host
 - [x] **sub-pi extension guard**：`scripts/smoke-abrain-backend-detect.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 abrain extension activate 顶部生效，registerCommand 零次调用）
 - [x] vault git 策略对齐 v1.4.6：`.vault-backend` / `.vault-pubkey` / `.vault-master.age` / encrypted `vault/*.md.age` / `vault/_meta/*.md` 可上 git；lock/tmp/runtime state gitignored
 - [x] P0c.read core substrate：`vault-reader.ts` unlocks `.vault-master.age` via recorded backend, decrypts per-key `.md.age`, cleans temp identity files, and provides literal redaction helper (ssh-key e2e smoke)
-- [x] P0c.read LLM surface：`vault_release` tool registers only in main pi, prompts default-deny TUI authorization (`No` / `Deny + remember` / `Yes once` / `Session`), and supports `scope='global'` plus `scope='project'` (binds to the boot-time active project; refuses with the resolver reason when none is bound). Tool schema declares `key` / `scope` / `reason` flat at the top level; nested `options.{scope,reason}` is accepted as legacy fallback. Prompt text (key, scope, reason, command preview, plaintext caveats) is run through the active session model so the wording matches the language the user is currently speaking; English is the fallback when no user context exists or the LLM call fails. Covered by `npm run smoke:abrain-i18n`.
+- [x] P0c.read LLM surface：`vault_release` tool registers only in main pi, prompts default-deny TUI authorization (`No` / `Deny + remember` / `Yes once` / `Session`), and supports `scope='global'` plus `scope='project'` (binds to the boot-time active project; refuses with the resolver reason when none is bound). Tool schema declares `key` / `scope` / `reason` flat at the top level; nested `options.{scope,reason}` is accepted as legacy fallback. Prompt text (key, scope, reason, command preview, plaintext caveats) is run through the active session model so the wording matches the language the user is currently speaking; English is the fallback when no user context exists or the LLM call fails. i18n translator has a 12-second budget (`TRANSLATE_TIMEOUT_MS=12_000` in `extensions/abrain/i18n.ts`), keeps the most recent 3 user messages in a ring buffer (`RING_MAX=3`, `RING_TEXT_MAX=1200`), and LRU-caches `(en, hint)` translations up to 200 entries (`CACHE_MAX=200`). Technical tokens (scope:key, `$VAULT_*` refs, command previews, base64/hex/xxd/xor warnings) are preserved verbatim across languages. Covered by `npm run smoke:abrain-i18n`.
 - [x] P0c.read bash path (project + global): `$VAULT_<key>` prefers the boot-time active project then falls back to global, `$GVAULT_<key>` is global-only, `$PVAULT_<key>` is project-only (block when no active project is bound). Injection still goes through a 0600 temp env file; stdout/stderr default-withheld from LLM unless user explicitly authorizes once/session, then literal redaction runs before returning output. Authorization menus put deny first so non-interactive/API runners fail closed. Covered by `npm run smoke:abrain-vault-bash`.
 - [x] P0c.read audit closure: `~/.abrain/.state/vault-events.jsonl` now records read-path ops alongside the existing write-path ones — `release` / `release_denied` / `release_blocked` (vault_release lane) and `bash_inject` / `bash_inject_block` / `bash_output_release` / `bash_output_withhold` (bash hook lane). Each row carries scope, key(s), `$VAULT_<name>`→scope:key variables for bash inject, and a truncated command preview (variable refs only — never plaintext). Covered by `npm run smoke:abrain-vault-writer` (`appendVaultReadAudit` row shape) and `npm run smoke:abrain` (read-path callsite wiring).
 - [x] active project resolver: read-only `resolveActiveProject(cwd)` parses `~/.abrain/projects/_bindings.md` via git root → canonical remote → longest cwd prefix and exports `resolveBrainPaths(abrainHome, projectId)` (covered by `npm run smoke:abrain-active-project`)

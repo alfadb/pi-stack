@@ -48,7 +48,9 @@
 
 ## B 类：vendor/gstack — `garrytan/gstack`
 
-### 基线
+> **2026-05-11 状态澄清**：`vendor/gstack/` submodule **未挂载**。下述基线 SHA / 端口层映射 / 上游跟踪流程是设计意图记录；A 类（自有功能）已独立仓库迭代，gstack 端口未来需要时再启动。`docs/directory-layout.md` 中 `vendor/gstack/` 仍标 `[计划]`。下面提到的 `vendor/<x>/` git 操作仅在未来启动 vendor 后适用。
+
+### 基线（设计意图，未挂载）
 - URL: `https://github.com/garrytan/gstack`
 - SHA: `bf65487` (v1.26.0.0, 2026-05-02)
 - 跟进策略: 上游每次 release，看 changelog 决定是否值得移植

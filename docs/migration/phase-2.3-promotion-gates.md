@@ -1,6 +1,8 @@
 # Phase 2.3 — Promotion Gates 设计稿
 
-> **状态**：DRAFT，2026-05-08。等 Phase 1.4 burn-in 数周稳定后再实施。
+> ⚠️ **SUPERSEDED by [ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D3（2026-05-09）**。abrain 七区拓扑下不再有 "project → world promotion" 概念——sediment writer 直接将条目路由到 `identity` / `skills` / `habits` / `workflows` / `projects` / `knowledge` / `vault` 中一个。Lane B（manual promote）与 Lane D（auto-promote）在 ADR 0013 中同期被标记为 "失效"。Promotion gates 1–5 不在路线图上，本文档仅作为设计动机记录保留。
+>
+> **原状态**：DRAFT，2026-05-08。等 Phase 1.4 burn-in 数周稳定后再实施。
 >
 > **范围**：定义 project → world 条目升级的闸门、命令、文件流、回滚。
 > 实施前必须有用户签字。

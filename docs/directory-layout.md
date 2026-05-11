@@ -120,7 +120,7 @@ alfadb/pi-astack/
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
 | `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + migrate-one + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator；writer 按需创建 `.pensieve/`；bg 在飞时不推进 checkpoint/不写 skip audit；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
-| `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + vaultReader core + /vault + /secret + `vault_release` + global `$VAULT_*` bash injection/default-withheld redaction；project vault routing 仍待） | ADR 0014 §D4 (2026-05-09+) |
+| `extensions/abrain/` | ✅ vault P0a-c 完全 ship： backend-detect + master-key bootstrap + vaultWriter + vaultReader + /vault + /secret （default = boot-time active project，--global / --project=<id> opt-out，--all-projects 枚举） + `vault_release(key, scope?, reason?)` （pre-flight + deny-first + i18n + description rendering） + boot-aware `$VAULT_*` / `$PVAULT_*` / `$GVAULT_*` bash injection 与 default-withheld + literal redaction + read-path audit closure（release / release_denied / release_blocked / bash_inject / bash_inject_block / bash_output_release / bash_output_withhold） | ADR 0014 §D4 P0a/P0b/P0c.write/P0c.read + §D4 P1 project routing (2026-05-09 → 2026-05-11) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |
@@ -203,19 +203,25 @@ OpenAI Responses API 生图。复用用户已有的 openai provider 配置（key
 ```
 <projectRoot>/
 ├── .pi-astack/
-│   ├── imagine/                     # 生成的 PNG
+│   ├── imagine/                     # 生成的 PNG（gpt-image-2 输出）
 │   ├── sediment/
 │   │   ├── audit.jsonl              # JSONL；v2 schema：本地 TZ + audit_version + pid + project_root + lane/session_id/correlation_id/candidate_id + settings_snapshot + entry_breakdown + parser_version + stage_ms
 │   │   ├── checkpoint.json          # 上次处理过的 entry_id
 │   │   ├── locks/                   # ephemeral 文件锁
 │   │   └── migration-backups/<ts>/  # /sediment migrate-one --apply 前的备份
-│   └── memory/
-│       └── migration-report.md      # /memory migrate --dry-run --report 输出
+│   ├── memory/
+│   │   └── migration-report.md      # /memory migrate --dry-run --report 输出
+│   ├── compaction-tuner/
+│   │   └── audit.jsonl              # percent-trigger 事件 + hysteresis state
+│   └── model-fallback/
+│       └── canary.log               # provider error / fallback 触发记录
 └── .pensieve/
     ├── decisions/ knowledge/ maxims/ pipelines/  # canonical markdown
     ├── _index.md                                  # auto-generated TOC
     └── .index/graph.json                          # auto-generated graph
 ```
+
+> **2026-05-11 补充**：`imagine/` `compaction-tuner/` `model-fallback/` 三个子树最初漏在上表外，现补全。`~/.pi-extensions/model-fallback.log` 是 pre-pi-astack 时代的旧路径，`scripts/smoke-pi-astack-paths.mjs:legacyModelFallbackCanaryPath` 仍作为迁移 regression 检查点保留。
 
 **迁移**（一次性）：首次 `appendAudit` / `loadCheckpoint` 调用会检测 legacy `.pensieve/.state/sediment-events.jsonl` / `sediment-checkpoint.json`，如存在则 `rename` 到新位置。两边都存在时 audit 按追加合并，checkpoint 保留 canonical。
 
@@ -258,8 +264,9 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 |------|--------|
 | modelCurator | `providers`, `hints`, `imageGen` |
 | modelFallback | `fallbackModels` |
-| memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays` |
+| memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays`, `search.{stage1Model,stage1Limit,stage1Thinking,stage2Model,stage2Limit,stage2Thinking}` |
 | sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries`, `extractorModel`, `extractorTimeoutMs`, `extractorMaxRetries`, `extractorMaxCandidates`, `extractorAuditRawChars`, `autoLlmWriteEnabled`, `autoWriteRawAuditChars` |
+| compactionTuner | `enabled`, `thresholdPercent`, `rearmMarginPercent` |
 | vision | `modelPreferences` |
 
 ## 所有权矩阵

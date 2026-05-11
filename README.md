@@ -50,7 +50,9 @@
 - 无。markdown+git 架构不需要 postgres/pgvector/gbrain CLI。
 - 可选：`qmd` 用于加速全文搜索（Phase 3，详见 memory-architecture.md 附录 C）。
 
-挂为 `~/.pi/agent/skills/pi-astack/` submodule，并在官方 pi settings chain（`~/.pi/agent/settings.json` 或项目 `.pi/settings.json`）里用 local package path 加载。改一行立即生效。
+挂为 `~/.pi/agent/skills/pi-astack/` submodule，并在官方 pi settings chain（`~/.pi/agent/settings.json` 或项目 `.pi/settings.json`）里用 local package path 加载这份扩展本身。改一行立即生效。
+
+> **运行时配置在哪（2026-05-11 澄清）**：pi-astack 各扩展的运行时配置不走 pi 官方 settings chain / 也不包裹在 `piStack` 命名空间下。所有扩展直接 `fs.readFileSync` 读 `~/.pi/agent/pi-astack-settings.json`，顶层 key 就是扩展名（`memory.*` / `sediment.*` / `modelFallback.*` / `compactionTuner.*` / `vision.*` / …）。schema 见 `pi-astack-settings.schema.json`。
 
 ```bash
 # 一次性挂载（在 ~/.pi 仓内执行）
@@ -58,10 +60,11 @@ cd ~/.pi
 git submodule add git@github.com:alfadb/pi-astack.git agent/skills/pi-astack
 git submodule update --init --recursive
 
-# ~/.pi/agent/settings.json 一行 local package path:
+# 1) ~/.pi/agent/settings.json 一行 local package path 加载扩展本身:
 #   "packages": ["~/.pi/agent/skills/pi-astack"]
-# 运行时配置也走官方 settings chain，例如：
-#   "piStack": { "sediment": { "enabled": true } }
+#
+# 2) ~/.pi/agent/pi-astack-settings.json 里顶层 key 调运行时配置（不要包裹在 piStack 下，不是 pi 官方 chain）:
+#   {"sediment": {"enabled": true}, "memory": {"search": {"stage1Model": "deepseek/deepseek-v4-flash"}}, "vision": {"modelPreferences": [...]}}
 
 # 初始化世界级知识库
 mkdir -p ~/.abrain

@@ -1,6 +1,6 @@
 # ADR 0008 - ~/.pi 双重身份与 source 路由
 
-- **状态**: **被 [memory-architecture.md](../memory-architecture.md) 改变前提**（2026-05-07）— `.gbrain-source` dotfile 机制随 gbrain 退场而作废。~/.pi 双重身份（pi-astack 开发环境 + 其他项目的 pi 基础环境）仍然成立，但不再通过 source 路由区分——改为通过项目各自的 `.pensieve/` 目录存在性自然区分。保留本 ADR 作为双重身份设计的历史档案。
+- **状态**: **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）——原描述用 "改变前提"，2026-05-11 统一为 "Superseded"。`.gbrain-source` dotfile 机制随 gbrain 退场而作废。~/.pi 双重身份（pi-astack 开发环境 + 其他项目的 pi 基础环境）仍然成立，但不再通过 source 路由区分——改为通过项目各自的 `.pensieve/` 目录存在性自然区分。保留本 ADR 作为双重身份设计的历史档案。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
 - **依赖**: ADR 0001(pi-astack 定位)/ ADR 0002(superseded by 0012)/ ADR 0004(superseded)/ ADR 0007(offline)

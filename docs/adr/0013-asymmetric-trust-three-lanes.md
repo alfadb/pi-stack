@@ -1,6 +1,9 @@
 # ADR 0013 — Asymmetric Trust 三段式（LLM / explicit / promotion）
 
-- **状态**: Accepted（2026-05-08）。**Lane B / Lane D 被 [ADR 0014](0014-abrain-as-personal-brain.md) §D3 失效**（2026-05-09）——abrain 七区拓扑下不再有「project → world promotion」概念（所有写入直接定位到对应区域）。原 Lane A（explicit MEMORY）/ Lane C（LLM auto-write）**仍然生效**；但 Lane C 的 G2-G13 / readiness / rolling / rate / sampling 机械 gate 被 [ADR 0016](0016-sediment-as-llm-curator.md) 删除，转向 direct LLM curator + sensitive-info/storage gates。ADR 0014 §D3 在之上新增 Lane G（about-me declare）+ Lane V（vault declare，不走 sediment IPC）。Trust tier 概念本身仍然是下面设计的基本盘。
+- **状态**: **Accepted (partially superseded by [ADR 0014](0014-abrain-as-personal-brain.md) §D3 + [ADR 0016](0016-sediment-as-llm-curator.md))**。2026-05-08 原状态 "Accepted"，2026-05-11 反映 supersede 范围明确化。
+  - **Lane B / Lane D 被 ADR 0014 §D3 失效**（2026-05-09）——abrain 七区拓扑下不再有「project → world promotion」概念（所有写入直接定位到对应区域）。
+  - **Lane C 的 G2-G13 / readiness / rolling / rate / sampling 机械 gate 被 ADR 0016 删除**（2026-05-10），转向 direct LLM curator + sensitive-info/storage gates。
+  - **原 Lane A（explicit MEMORY）仍然生效；原 Lane C 名字保留但内部机制重写（LLM curator）**。ADR 0014 §D3 在之上新增 Lane G（about-me declare）+ Lane V（vault declare，不走 sediment IPC）。Trust tier 概念本身仍然是下面设计的基本盘，但具体 Lane B/D/C-gate 描述请参考 supersede source。
 - **日期**: 2026-05-08
 - **决策者**: alfadb
 - **依赖**: [memory-architecture.md](../memory-architecture.md) §8（sediment pipeline）/ §9（promotion）
