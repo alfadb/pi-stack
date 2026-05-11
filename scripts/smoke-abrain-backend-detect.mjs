@@ -457,6 +457,11 @@ fs.writeFileSync(path.join(tmpDir, "vault-bash.cjs"), transpileTsToCjs(vaultBash
 fs.copyFileSync(path.join(tmpDir, "keychain.cjs"), path.join(tmpDir, "keychain.js"));
 fs.copyFileSync(path.join(tmpDir, "vault-writer.cjs"), path.join(tmpDir, "vault-writer.js"));
 fs.copyFileSync(path.join(tmpDir, "vault-reader.cjs"), path.join(tmpDir, "vault-reader.js"));
+// _shared/runtime is required by index.ts via ../_shared/runtime; mirror that layout.
+const sharedTargetDir = path.join(tmpDir, "_shared");
+fs.mkdirSync(sharedTargetDir, { recursive: true });
+fs.writeFileSync(path.join(sharedTargetDir, "runtime.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/_shared/runtime.ts")));
+fs.copyFileSync(path.join(sharedTargetDir, "runtime.cjs"), path.join(sharedTargetDir, "runtime.js"));
 
 const indexSrc = path.join(repoRoot, "extensions/abrain/index.ts");
 let indexCompiled = transpileTsToCjs(indexSrc);
@@ -466,7 +471,8 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/keychain"\)/g, 'require("./keychain.cjs")')
   .replace(/require\("\.\/vault-writer"\)/g, 'require("./vault-writer.cjs")')
   .replace(/require\("\.\/vault-reader"\)/g, 'require("./vault-reader.cjs")')
-  .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")');
+  .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")')
+  .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);
 const indexModule = require(indexFile);

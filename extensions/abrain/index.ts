@@ -51,6 +51,11 @@ import {
   withheldVaultBashContent,
   type VaultBashRunRecord,
 } from "./vault-bash";
+import {
+  resolveActiveProject,
+  validateAbrainProjectId,
+  type ResolveActiveProjectResult,
+} from "../_shared/runtime";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
 
@@ -181,6 +186,103 @@ interface VaultReleaseUi {
 
 export const VAULT_RELEASE_AUTH_CHOICES = ["No", "Deny + remember", "Yes once", "Session"] as const;
 
+// ── /secret scope parsing (ADR 0014 P1 step 2) ──────────────────────────
+
+export type SecretScopeArg = "default" | "global" | { project: string };
+
+export interface ParsedSecretFlags {
+  scope: SecretScopeArg;
+  positional: string[];
+  errors: string[];
+  allProjects: boolean;
+}
+
+export function parseSecretScopeFlags(tokens: ReadonlyArray<string>): ParsedSecretFlags {
+  let global = false;
+  let projectId: string | undefined;
+  let allProjects = false;
+  const positional: string[] = [];
+  const errors: string[] = [];
+  for (const tok of tokens) {
+    if (tok === "--global") { global = true; continue; }
+    if (tok === "--all-projects") { allProjects = true; continue; }
+    const proj = tok.match(/^--project=(.+)$/);
+    if (proj) {
+      const id = proj[1]!;
+      try { validateAbrainProjectId(id); projectId = id; }
+      catch (err: any) { errors.push(`invalid --project=<id>: ${err.message}`); }
+      continue;
+    }
+    if (tok.startsWith("--")) { errors.push(`unknown flag: ${tok}`); continue; }
+    positional.push(tok);
+  }
+  if (global && projectId) errors.push("--global and --project=<id> are mutually exclusive");
+  if (allProjects && (global || projectId)) errors.push("--all-projects cannot combine with --global / --project=<id>");
+  let scope: SecretScopeArg = "default";
+  if (global) scope = "global";
+  else if (projectId) scope = { project: projectId };
+  return { scope, positional, errors, allProjects };
+}
+
+export type ResolveSecretScope =
+  | { ok: true; scope: VaultScope }
+  | { ok: false; reason: string };
+
+export function resolveSecretScope(
+  scopeArg: SecretScopeArg,
+  activeProject: ResolveActiveProjectResult | null,
+): ResolveSecretScope {
+  if (scopeArg === "global") return { ok: true, scope: "global" };
+  if (typeof scopeArg === "object" && scopeArg && "project" in scopeArg) {
+    return { ok: true, scope: { project: scopeArg.project } };
+  }
+  if (!activeProject || activeProject.activeProject === null) {
+    const reason = activeProject?.reason ?? "bindings_missing";
+    return { ok: false, reason: secretDefaultRejection(reason) };
+  }
+  return { ok: true, scope: { project: activeProject.activeProject.projectId } };
+}
+
+export function secretDefaultRejection(reason: string): string {
+  switch (reason) {
+    case "bindings_missing":
+      return "no active project: ~/.abrain/projects/_bindings.md does not exist. Re-run with --global, or bind this cwd first.";
+    case "bindings_empty":
+      return "no active project: ~/.abrain/projects/_bindings.md has no entries. Re-run with --global, or bind this cwd first.";
+    case "unbound":
+      return "no active project: current cwd is not bound to any project. Re-run with --global, --project=<id>, or bind this cwd first.";
+    case "ambiguous_remote":
+      return "active project ambiguous: multiple bindings share this git remote. Pass --project=<id> or --global.";
+    case "ambiguous_prefix":
+      return "active project ambiguous: multiple bindings share this cwd prefix. Pass --project=<id> or --global.";
+    case "invalid_cwd":
+      return "active project unresolved: cwd is invalid. Re-run with --global or --project=<id>.";
+    default:
+      return `no active project (reason=${reason}). Re-run with --global or --project=<id>.`;
+  }
+}
+
+let bootActiveProject: ResolveActiveProjectResult | null = null;
+let bootActiveProjectAt: number | null = null;
+
+function snapshotBootActiveProject(): ResolveActiveProjectResult {
+  return resolveActiveProject(process.cwd(), { abrainHome: ABRAIN_HOME });
+}
+
+export function getBootActiveProject(): ResolveActiveProjectResult | null {
+  return bootActiveProject;
+}
+
+export function getBootActiveProjectSnapshotAt(): number | null {
+  return bootActiveProjectAt;
+}
+
+export function __resetBootActiveProjectForTests(value: ResolveActiveProjectResult | null): void {
+  bootActiveProject = value;
+  bootActiveProjectAt = value ? Date.now() : null;
+}
+
+
 const releaseSessionGrants = new Set<string>();
 const releaseRememberDenies = new Set<string>();
 const bashOutputSessionGrants = new Set<string>();
@@ -261,6 +363,11 @@ export default function activate(pi: ExtensionAPI): void {
   // (extensions/dispatch/index.ts) sets this env var when spawning
   // sub-pi; the `smoke:vault-subpi-isolation` smoke verifies that.
   if (process.env[PI_ABRAIN_DISABLED] === "1") return;
+
+  // Boot-time snapshot per ADR 0014 §5.4: active project must not
+  // dynamically change with bash `cd`. Resolve once at activate.
+  bootActiveProject = snapshotBootActiveProject();
+  bootActiveProjectAt = Date.now();
 
   const registry = pi as unknown as CommandRegistry;
   const toolRegistry = pi as unknown as ToolRegistry;
@@ -364,11 +471,15 @@ export default function activate(pi: ExtensionAPI): void {
   // /secret command — vault write/list/forget (P0c.write).
   // Read paths (release / bash injection) are P0c.read.
   registry.registerCommand("secret", {
-    description: "Vault secrets (write only): /secret set --global <key>=<value> | /secret list --global | /secret forget --global <key>",
+    description: "Vault secrets: /secret set <key>=<value> [--global | --project=<id>] | /secret list [--global | --project=<id> | --all-projects] | /secret forget <key> [--global | --project=<id>]. Default scope is the boot-time active project.",
     getArgumentCompletions(prefix: string) {
       const items = [
+        "set ",
         "set --global ",
+        "list",
         "list --global",
+        "list --all-projects",
+        "forget ",
         "forget --global ",
       ];
       const filtered = items.filter((item) => item.startsWith(prefix));
@@ -568,9 +679,30 @@ const realExec: ExecFn = async (cmd, args, opts) => {
 
 // ── /secret command handler ─────────────────────────────────────
 //
-// MVP P0c.write supports ONLY --global. Project-level vault depends on
-// resolveActiveProject(cwd) (ADR 0014 P1) which is not yet implemented.
-// Without --global the command refuses with an actionable message.
+// ADR 0014 P1 step 2: default scope is the boot-time active project; users
+// opt into global with --global, or into a specific project with
+// --project=<id>. When no active project can be resolved, default-scope
+// operations refuse with an actionable reason instead of guessing.
+
+function scopeReadableLabel(scope: VaultScope): string {
+  return scope === "global" ? "global" : `project:${scope.project}`;
+}
+
+function renderListing(scope: VaultScope): string {
+  const items = listSecrets(ABRAIN_HOME, scope);
+  const label = scopeReadableLabel(scope);
+  if (items.length === 0) return `${label} vault — no secrets yet`;
+  const lines: string[] = [`${label} vault — ${items.length} key(s):`];
+  for (const item of items) {
+    const status = item.forgotten ? "  [forgotten]" : "";
+    const desc = item.description ? `  — ${item.description}` : "";
+    let timeAnnotation = "";
+    if (item.forgotten && item.forgottenAt) timeAnnotation = ` forgotten ${item.forgottenAt}`;
+    else if (item.created) timeAnnotation = ` (since ${item.created})`;
+    lines.push(`  ${item.key}${status}${timeAnnotation}${desc}`);
+  }
+  return lines.join("\n");
+}
 
 async function handleSecret(args: string, ui: { notify(message: string, type?: string): void }): Promise<void> {
   // Pre-flight: vault must be initialized
@@ -580,41 +712,35 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
     return;
   }
 
-  // First token determines the subcommand
   const tokens = args.split(/\s+/).filter(Boolean);
   const sub = tokens[0] || "";
+  const rest = tokens.slice(1);
+  const parsed = parseSecretScopeFlags(rest);
+  if (parsed.errors.length > 0) {
+    ui.notify(`/secret ${sub || "?"}: ${parsed.errors.join("; ")}`, "warning");
+    return;
+  }
 
-  // ── set ───────────────────────────────────────────────────────
   if (sub === "set") {
-    // Parse remaining tokens — must include --global and a `key=value` pair
-    const rest = tokens.slice(1);
-    let globalFlag = false;
-    const positional: string[] = [];
-    for (const t of rest) {
-      if (t === "--global") globalFlag = true;
-      else positional.push(t);
-    }
-    if (!globalFlag) {
-      ui.notify(
-        "/secret set: P0c.write MVP requires explicit --global flag. " +
-        "Project-level scope needs resolveActiveProject (ADR 0014 P1, not implemented yet).",
-        "warning",
-      );
+    if (parsed.allProjects) {
+      ui.notify("/secret set: --all-projects is not a valid target for writes", "warning");
       return;
     }
-    // join positional back into the value spec — value may contain spaces
-    // e.g. `/secret set --global token=abc def ghi` → key=token, value="abc def ghi"
-    const valueSpec = positional.join(" ");
+    const resolved = resolveSecretScope(parsed.scope, bootActiveProject);
+    if (!resolved.ok) {
+      ui.notify(`/secret set: ${resolved.reason}`, "warning");
+      return;
+    }
+    const valueSpec = parsed.positional.join(" ");
     const eqIdx = valueSpec.indexOf("=");
     if (eqIdx <= 0) {
-      ui.notify("/secret set: expected `<key>=<value>` after --global", "warning");
+      ui.notify("/secret set: expected `<key>=<value>` (use --global or --project=<id> for non-default scope)", "warning");
       return;
     }
     const key = valueSpec.slice(0, eqIdx).trim();
     let value: string | null = valueSpec.slice(eqIdx + 1);
-    try {
-      validateKey(key);
-    } catch (err: any) {
+    try { validateKey(key); }
+    catch (err: any) {
       ui.notify(`/secret set: invalid key: ${err.message}`, "warning");
       value = null;
       return;
@@ -623,96 +749,83 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
       ui.notify("/secret set: value cannot be empty", "warning");
       return;
     }
-
     try {
       const result = await writeSecret({
         abrainHome: ABRAIN_HOME,
-        scope: "global",
+        scope: resolved.scope,
         key,
         value,
       });
-      // best-effort: clear the local reference (V8 may still have copies)
       value = null;
-      ui.notify(`/secret set: wrote global:${key} → ${path.relative(ABRAIN_HOME, result.encryptedPath)}`, "info");
+      ui.notify(
+        `/secret set: wrote ${scopeReadableLabel(resolved.scope)}:${key} → ${path.relative(ABRAIN_HOME, result.encryptedPath)}`,
+        "info",
+      );
     } catch (err: any) {
-      value = null; // clear before reporting error
+      value = null;
       ui.notify(`/secret set failed: ${err.message}`, "warning");
     }
     return;
   }
 
-  // ── list ──────────────────────────────────────────────────────
   if (sub === "list") {
-    const rest = tokens.slice(1);
-    let globalFlag = false;
-    for (const t of rest) {
-      if (t === "--global") globalFlag = true;
-    }
-    if (!globalFlag) {
+    if (parsed.allProjects) {
       ui.notify(
-        "/secret list: P0c.write MVP requires explicit --global flag. " +
-        "Project-level listing needs resolveActiveProject (ADR 0014 P1).",
+        "/secret list --all-projects: not yet implemented (ADR 0014 P1 step 2). Pass --project=<id> or --global, or inspect ~/.abrain/projects/*/vault/_meta/ manually.",
         "warning",
       );
       return;
     }
-    const items = listSecrets(ABRAIN_HOME, "global");
-    if (items.length === 0) {
-      ui.notify("/secret list (global): no secrets yet", "info");
+    if (parsed.positional.length > 0) {
+      ui.notify(`/secret list: unexpected positional arg(s): ${parsed.positional.join(" ")}`, "warning");
       return;
     }
-    const lines: string[] = [`global vault — ${items.length} key(s):`];
-    for (const item of items) {
-      const status = item.forgotten ? "  [forgotten]" : "";
-      const desc = item.description ? `  — ${item.description}` : "";
-      // v1.4.4 dogfood: when forgotten, show `forgotten <ts>` not `since <created>`.
-      // The latter was confusing — user expects to see when the key was forgotten,
-      // not when it was originally created.
-      let timeAnnotation = "";
-      if (item.forgotten && item.forgottenAt) {
-        timeAnnotation = ` forgotten ${item.forgottenAt}`;
-      } else if (item.created) {
-        timeAnnotation = ` (since ${item.created})`;
-      }
-      lines.push(`  ${item.key}${status}${timeAnnotation}${desc}`);
+    if (parsed.scope !== "default") {
+      const resolved = resolveSecretScope(parsed.scope, bootActiveProject);
+      if (!resolved.ok) { ui.notify(`/secret list: ${resolved.reason}`, "warning"); return; }
+      ui.notify(renderListing(resolved.scope), "info");
+      return;
     }
-    ui.notify(lines.join("\n"), "info");
+    // Default: list global PLUS active project (if any).
+    const sections: string[] = [renderListing("global")];
+    if (bootActiveProject && bootActiveProject.activeProject) {
+      sections.push(renderListing({ project: bootActiveProject.activeProject.projectId }));
+    } else if (bootActiveProject?.reason) {
+      sections.push(`(no active project: ${secretDefaultRejection(bootActiveProject.reason)})`);
+    }
+    ui.notify(sections.join("\n\n"), "info");
     return;
   }
 
-  // ── forget ────────────────────────────────────────────────────
   if (sub === "forget") {
-    const rest = tokens.slice(1);
-    let globalFlag = false;
-    let key: string | null = null;
-    for (const t of rest) {
-      if (t === "--global") globalFlag = true;
-      else if (!key) key = t;
-    }
-    if (!globalFlag) {
-      ui.notify(
-        "/secret forget: P0c.write MVP requires explicit --global flag.",
-        "warning",
-      );
+    if (parsed.allProjects) {
+      ui.notify("/secret forget: --all-projects is not a valid target", "warning");
       return;
     }
+    const resolved = resolveSecretScope(parsed.scope, bootActiveProject);
+    if (!resolved.ok) {
+      ui.notify(`/secret forget: ${resolved.reason}`, "warning");
+      return;
+    }
+    const key = parsed.positional[0];
     if (!key) {
-      ui.notify("/secret forget --global <key>: missing key", "warning");
+      ui.notify("/secret forget <key>: missing key", "warning");
       return;
     }
-    try {
-      validateKey(key);
-    } catch (err: any) {
+    if (parsed.positional.length > 1) {
+      ui.notify(`/secret forget: unexpected extra args: ${parsed.positional.slice(1).join(" ")}`, "warning");
+      return;
+    }
+    try { validateKey(key); }
+    catch (err: any) {
       ui.notify(`/secret forget: invalid key: ${err.message}`, "warning");
       return;
     }
     try {
-      const result = await forgetSecret(ABRAIN_HOME, "global", key);
-      if (result.removed) {
-        ui.notify(`/secret forget: removed global:${key}`, "info");
-      } else {
-        ui.notify(`/secret forget: global:${key} was not present (no-op, audit row recorded)`, "info");
-      }
+      const result = await forgetSecret(ABRAIN_HOME, resolved.scope, key);
+      const label = scopeReadableLabel(resolved.scope);
+      if (result.removed) ui.notify(`/secret forget: removed ${label}:${key}`, "info");
+      else ui.notify(`/secret forget: ${label}:${key} was not present (no-op, audit row recorded)`, "info");
     } catch (err: any) {
       ui.notify(`/secret forget failed: ${err.message}`, "warning");
     }
@@ -720,8 +833,7 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
   }
 
   ui.notify(
-    `/secret: unknown subcommand '${sub}'. ` +
-    `available: set / list / forget (all require --global in P0c.write MVP)`,
+    `/secret: unknown subcommand '${sub}'. available: set / list / forget. Default scope is the boot-time active project; pass --global or --project=<id> to override.`,
     "warning",
   );
 }
