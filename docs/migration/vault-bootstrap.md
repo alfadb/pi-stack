@@ -491,7 +491,9 @@ vault-bootstrap 完成后必须验证。**按 backend 分类，只验证该 host
 - [x] P0c.read core substrate：`vault-reader.ts` unlocks `.vault-master.age` via recorded backend, decrypts per-key `.md.age`, cleans temp identity files, and provides literal redaction helper (ssh-key e2e smoke)
 - [x] P0c.read LLM surface：`vault_release` tool registers only in main pi, prompts default-deny TUI authorization (`No` / `Deny + remember` / `Yes once` / `Session`), and currently supports global vault keys
 - [x] P0c.read bash path (global scope): `$VAULT_<key>` / `$GVAULT_<key>` injection via temporary 0600 env file; stdout/stderr default-withheld from LLM unless user explicitly authorizes once/session, then literal redaction runs before returning output. Authorization menus put deny first so non-interactive/API runners fail closed. Covered by `npm run smoke:abrain-vault-bash` plus live dummy-key e2e.
-- [ ] P0c.read project routing: `$PVAULT_<key>` and active project vault resolution
+- [x] active project resolver: read-only `resolveActiveProject(cwd)` parses `~/.abrain/projects/_bindings.md` via git root → canonical remote → longest cwd prefix and exports `resolveBrainPaths(abrainHome, projectId)` (covered by `npm run smoke:abrain-active-project`)
+- [ ] project-scoped `/secret`: default project scope with explicit `--global` opt-out
+- [ ] P0c.read project routing: `$PVAULT_<key>` injection + `$VAULT_<key>` project→global fallback + `vault_release(scope="project")`
 
 ### Tier 2 optimization 验收（仅在该 backend 上 host 实际可用时走）
 

@@ -13,6 +13,8 @@
  *
  * This file deliberately has zero imports from sibling extensions.
  */
+import * as fs from "node:fs";
+import { execFileSync as nodeExecFileSync } from "node:child_process";
 import * as path from "node:path";
 
 /**
@@ -134,6 +136,288 @@ export function legacySedimentMigrationBackupsDir(projectRoot: string): string {
 }
 export function legacyMemoryMigrationReportPath(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), ".pensieve", ".state", "migration-report.md");
+}
+
+/* -------- abrain project identity ------------------------------------- *
+ * ADR 0014 active project is a boot-time snapshot: callers should resolve
+ * once from pi's startup cwd and keep that project id stable for the session.
+ * Bash `cd` must not dynamically switch active project / vault visibility. */
+
+export interface AbrainProjectBinding {
+  cwd: string;
+  project: string;
+  boundAt?: string;
+  boundVia?: string;
+  gitRemote?: string;
+  raw: Record<string, string>;
+}
+
+export type ActiveProjectMatchKind = "git_root_exact" | "git_remote" | "cwd_prefix";
+
+export interface ActiveProjectResolution {
+  projectId: string;
+  binding: AbrainProjectBinding;
+  matchedBy: ActiveProjectMatchKind;
+  cwd: string;
+  lookupCwd: string;
+  bindingsPath: string;
+  gitRoot?: string;
+  gitRemote?: string;
+}
+
+export type ResolveActiveProjectResult =
+  | { activeProject: ActiveProjectResolution; reason?: undefined }
+  | {
+      activeProject: null;
+      reason: "bindings_missing" | "bindings_empty" | "unbound" | "ambiguous_remote" | "ambiguous_prefix" | "invalid_cwd";
+      cwd: string;
+      bindingsPath: string;
+      gitRoot?: string;
+      gitRemote?: string;
+    };
+
+export interface ResolveActiveProjectOptions {
+  abrainHome: string;
+  bindingsPath?: string;
+  existsSync?: (file: string) => boolean;
+  readFileSync?: (file: string, encoding: BufferEncoding) => string;
+  execFileSync?: (file: string, args: string[], options: { cwd?: string; encoding: BufferEncoding; stdio?: Array<"ignore" | "pipe">; timeout?: number }) => string;
+}
+
+export interface BrainPaths {
+  abrainHome: string;
+  projectsDir: string;
+  bindingsPath: string;
+  projectDir: string;
+  projectVaultDir: string;
+}
+
+export function abrainProjectsDir(abrainHome: string): string {
+  return path.join(path.resolve(abrainHome), "projects");
+}
+export function abrainProjectBindingsPath(abrainHome: string): string {
+  return path.join(abrainProjectsDir(abrainHome), "_bindings.md");
+}
+export function abrainProjectDir(abrainHome: string, projectId: string): string {
+  validateAbrainProjectId(projectId);
+  return path.join(abrainProjectsDir(abrainHome), projectId);
+}
+export function abrainProjectVaultDir(abrainHome: string, projectId: string): string {
+  return path.join(abrainProjectDir(abrainHome, projectId), "vault");
+}
+export function resolveBrainPaths(abrainHome: string, projectId: string): BrainPaths {
+  const root = path.resolve(abrainHome);
+  return {
+    abrainHome: root,
+    projectsDir: abrainProjectsDir(root),
+    bindingsPath: abrainProjectBindingsPath(root),
+    projectDir: abrainProjectDir(root, projectId),
+    projectVaultDir: abrainProjectVaultDir(root, projectId),
+  };
+}
+
+export function validateAbrainProjectId(projectId: string): void {
+  if (!projectId) throw new Error("project id cannot be empty");
+  if (projectId.length > 128) throw new Error(`project id too long (${projectId.length} > 128)`);
+  if (projectId.startsWith(".")) throw new Error(`project id cannot start with '.': ${projectId}`);
+  if (projectId.includes("/") || projectId.includes("\\")) throw new Error(`project id cannot contain path separators: ${projectId}`);
+  if (projectId.includes("..")) throw new Error(`project id cannot contain '..': ${projectId}`);
+  if (!/^[a-zA-Z0-9_.-]+$/.test(projectId)) throw new Error(`project id must match [a-zA-Z0-9_.-]+: ${projectId}`);
+}
+
+function unquoteYamlScalar(raw: string): string {
+  let value = raw.trim().replace(/\s+#.*$/, "");
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+    value = value.slice(1, -1);
+  }
+  return value.trim();
+}
+
+function parseBindingKeyValue(line: string): [string, string] | null {
+  const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+  if (!match) return null;
+  return [match[1]!, unquoteYamlScalar(match[2] ?? "")];
+}
+
+function bindingFromRaw(raw: Record<string, string>): AbrainProjectBinding | null {
+  const cwd = raw.cwd?.trim();
+  const project = raw.project?.trim();
+  if (!cwd || !project) return null;
+  try { validateAbrainProjectId(project); } catch { return null; }
+  return {
+    cwd,
+    project,
+    boundAt: raw.bound_at,
+    boundVia: raw.bound_via,
+    gitRemote: raw.git_remote,
+    raw: { ...raw },
+  };
+}
+
+export function parseProjectBindingsMarkdown(markdown: string): AbrainProjectBinding[] {
+  const bindings: AbrainProjectBinding[] = [];
+  let current: Record<string, string> | null = null;
+
+  const flush = () => {
+    if (!current) return;
+    const binding = bindingFromRaw(current);
+    if (binding) bindings.push(binding);
+    current = null;
+  };
+
+  for (const line of markdown.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("- ")) {
+      flush();
+      current = {};
+      const rest = trimmed.slice(2).trim();
+      if (rest) {
+        const kv = parseBindingKeyValue(rest);
+        if (kv) current[kv[0]] = kv[1];
+      }
+      continue;
+    }
+    if (!current) continue;
+    const kv = parseBindingKeyValue(trimmed);
+    if (kv) current[kv[0]] = kv[1];
+  }
+  flush();
+  return bindings;
+}
+
+export function canonicalizeGitRemote(remote: string | undefined | null): string | null {
+  if (!remote) return null;
+  let value = unquoteYamlScalar(remote);
+  if (!value) return null;
+  value = value.replace(/^git\+/, "").replace(/\/$/, "");
+  const scpLike = value.match(/^([^/@:]+)@([^:]+):(.+)$/);
+  if (scpLike) value = `ssh://${scpLike[1]}@${scpLike[2]}/${scpLike[3]}`;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    let pathname = url.pathname.replace(/^\/+/, "").replace(/\/$/, "");
+    pathname = pathname.replace(/\.git$/i, "");
+    return `${host}/${pathname}`.toLowerCase();
+  } catch {
+    return value.replace(/\.git$/i, "").toLowerCase();
+  }
+}
+
+function normalizeBindingCwd(cwd: string): string {
+  const expanded = cwd.startsWith("~/") ? path.join(process.env.HOME ?? "", cwd.slice(2)) : cwd;
+  return path.resolve(expanded);
+}
+
+function isPathPrefix(prefix: string, target: string): boolean {
+  const rel = path.relative(prefix, target);
+  return rel === "" || (!!rel && !rel.startsWith("..") && rel !== ".." && !path.isAbsolute(rel));
+}
+
+function findGitRoot(cwd: string, opts: ResolveActiveProjectOptions): string | undefined {
+  const exec = opts.execFileSync ?? nodeExecFileSync;
+  try {
+    return path.resolve(exec("git", ["rev-parse", "--show-toplevel"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2000,
+    }).trim());
+  } catch {
+    return undefined;
+  }
+}
+
+function findGitRemote(gitRoot: string | undefined, opts: ResolveActiveProjectOptions): string | undefined {
+  if (!gitRoot) return undefined;
+  const exec = opts.execFileSync ?? nodeExecFileSync;
+  try {
+    const out = exec("git", ["config", "--get", "remote.origin.url"], {
+      cwd: gitRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2000,
+    }).trim();
+    return out || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function uniqueProjectIds(bindings: AbrainProjectBinding[]): string[] {
+  return Array.from(new Set(bindings.map((b) => b.project)));
+}
+
+function activeProjectResult(
+  binding: AbrainProjectBinding,
+  matchedBy: ActiveProjectMatchKind,
+  cwd: string,
+  lookupCwd: string,
+  bindingsPath: string,
+  gitRoot: string | undefined,
+  gitRemote: string | undefined,
+): ResolveActiveProjectResult {
+  return {
+    activeProject: {
+      projectId: binding.project,
+      binding,
+      matchedBy,
+      cwd,
+      lookupCwd,
+      bindingsPath,
+      gitRoot,
+      gitRemote,
+    },
+  };
+}
+
+export function resolveActiveProject(cwd: string, opts: ResolveActiveProjectOptions): ResolveActiveProjectResult {
+  let normalizedCwd: string;
+  try { normalizedCwd = path.resolve(cwd); }
+  catch {
+    const bindingsPath = opts.bindingsPath ?? abrainProjectBindingsPath(opts.abrainHome);
+    return { activeProject: null, reason: "invalid_cwd", cwd, bindingsPath };
+  }
+
+  const bindingsPath = opts.bindingsPath ?? abrainProjectBindingsPath(opts.abrainHome);
+  const exists = opts.existsSync ?? fs.existsSync;
+  const read = opts.readFileSync ?? fs.readFileSync;
+  const gitRoot = findGitRoot(normalizedCwd, opts);
+  const gitRemote = findGitRemote(gitRoot, opts);
+  if (!exists(bindingsPath)) return { activeProject: null, reason: "bindings_missing", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
+
+  const bindings = parseProjectBindingsMarkdown(read(bindingsPath, "utf8"));
+  if (bindings.length === 0) return { activeProject: null, reason: "bindings_empty", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
+  const lookupCwd = gitRoot ?? normalizedCwd;
+
+  if (gitRoot) {
+    const exact = bindings.filter((b) => normalizeBindingCwd(b.cwd) === gitRoot);
+    const projects = uniqueProjectIds(exact);
+    if (projects.length > 1) return { activeProject: null, reason: "ambiguous_prefix", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
+    if (exact[0]) return activeProjectResult(exact[0], "git_root_exact", normalizedCwd, lookupCwd, bindingsPath, gitRoot, gitRemote);
+  }
+
+  const currentRemote = canonicalizeGitRemote(gitRemote);
+  if (currentRemote) {
+    const remoteMatches = bindings.filter((b) => canonicalizeGitRemote(b.gitRemote) === currentRemote);
+    const projects = uniqueProjectIds(remoteMatches);
+    if (projects.length > 1) return { activeProject: null, reason: "ambiguous_remote", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
+    if (remoteMatches[0]) return activeProjectResult(remoteMatches[0], "git_remote", normalizedCwd, lookupCwd, bindingsPath, gitRoot, gitRemote);
+  }
+
+  const prefixMatches = bindings
+    .map((binding) => ({ binding, cwd: normalizeBindingCwd(binding.cwd) }))
+    .filter((b) => isPathPrefix(b.cwd, normalizedCwd))
+    .sort((a, b) => b.cwd.length - a.cwd.length);
+  if (prefixMatches.length > 0) {
+    const bestLen = prefixMatches[0]!.cwd.length;
+    const best = prefixMatches.filter((b) => b.cwd.length === bestLen).map((b) => b.binding);
+    const projects = uniqueProjectIds(best);
+    if (projects.length > 1) return { activeProject: null, reason: "ambiguous_prefix", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
+    return activeProjectResult(best[0]!, "cwd_prefix", normalizedCwd, lookupCwd, bindingsPath, gitRoot, gitRemote);
+  }
+
+  return { activeProject: null, reason: "unbound", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
 }
 
 /* -------- one-shot legacy data migration ------------------------------ *

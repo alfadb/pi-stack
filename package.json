@@ -29,7 +29,8 @@
     "smoke:abrain-bootstrap": "node scripts/smoke-abrain-bootstrap.mjs",
     "smoke:abrain-vault-writer": "node scripts/smoke-abrain-vault-writer.mjs",
     "smoke:abrain-vault-reader": "node scripts/smoke-abrain-vault-reader.mjs",
-    "smoke:abrain-vault-bash": "node scripts/smoke-abrain-vault-bash.mjs"
+    "smoke:abrain-vault-bash": "node scripts/smoke-abrain-vault-bash.mjs",
+    "smoke:abrain-active-project": "node scripts/smoke-abrain-active-project.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],
