@@ -301,7 +301,7 @@ export function formatStatus(
       lines.push(`   master stored in: ${describeKeychainLocation(initialized.backend)}`);
     }
 
-    lines.push("   note: P0c.write implemented: /secret set/list/forget --global are available; P0c.read core + vault_release are implemented; $VAULT_* bash injection/redaction wrapper is still pending.");
+    lines.push("   note: P0c.write implemented: /secret set/list/forget --global are available; P0c.read core + vault_release + $VAULT_* bash injection are implemented; project vault routing remains pending.");
     return lines.join("\n");
   }
 

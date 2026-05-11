@@ -418,16 +418,17 @@ check("formatStatus A with keychain backend: shows 'master stored in: macOS Keyc
   if (!out.includes("macOS Keychain")) throw new Error("missing 'macOS Keychain' description");
 });
 
-check("formatStatus A distinguishes shipped P0c read/write from pending bash injection", () => {
-  // Verify status text does not mislead users: /secret write/list/forget and
-  // vault_release are shipped, while bash injection/redaction remains pending.
+check("formatStatus A distinguishes shipped P0c read/write from pending project routing", () => {
+  // Verify status text does not mislead users: /secret write/list/forget,
+  // vault_release, and global $VAULT_* bash injection are shipped; project
+  // vault routing remains pending.
   const info = detectBackend(deps({}));
   const out = formatStatus(info, false, {
     backend: "ssh-key", identity: "/x", vaultMasterPresent: true, vaultMasterMode: 0o600,
   });
   if (!out.includes("P0c.write implemented")) throw new Error("missing shipped P0c.write note");
-  if (!out.includes("vault_release are implemented")) throw new Error("missing shipped vault_release note");
-  if (!out.includes("$VAULT_* bash injection/redaction wrapper is still pending")) throw new Error("missing pending bash injection note");
+  if (!out.includes("vault_release + $VAULT_* bash injection are implemented")) throw new Error("missing shipped P0c.read note");
+  if (!out.includes("project vault routing remains pending")) throw new Error("missing pending project routing note");
   if (out.includes("cannot write")) throw new Error("stale cannot-write wording leaked");
 });
 
@@ -477,24 +478,28 @@ check("PI_ABRAIN_DISABLED=1 → activate registers ZERO commands (sub-pi guard)"
   try {
     let registerCalls = 0;
     let toolCalls = 0;
-    activate({ registerCommand: () => { registerCalls += 1; }, registerTool: () => { toolCalls += 1; } });
+    let eventCalls = 0;
+    activate({ registerCommand: () => { registerCalls += 1; }, registerTool: () => { toolCalls += 1; }, on: () => { eventCalls += 1; } });
     if (registerCalls !== 0) throw new Error(`sub-pi guard breached: registerCommand called ${registerCalls} time(s)`);
     if (toolCalls !== 0) throw new Error(`sub-pi guard breached: registerTool called ${toolCalls} time(s)`);
+    if (eventCalls !== 0) throw new Error(`sub-pi guard breached: event handler registered ${eventCalls} time(s)`);
   } finally {
     if (prev === undefined) delete process.env.PI_ABRAIN_DISABLED;
     else process.env.PI_ABRAIN_DISABLED = prev;
   }
 });
 
-check("PI_ABRAIN_DISABLED unset → activate registers /vault and vault_release", () => {
+check("PI_ABRAIN_DISABLED unset → activate registers /vault, vault_release, and bash vault hooks", () => {
   const prev = process.env.PI_ABRAIN_DISABLED;
   delete process.env.PI_ABRAIN_DISABLED;
   try {
     const registered = [];
     const tools = [];
-    activate({ registerCommand: (name) => registered.push(name), registerTool: (tool) => tools.push(tool.name) });
+    const events = [];
+    activate({ registerCommand: (name) => registered.push(name), registerTool: (tool) => tools.push(tool.name), on: (event) => events.push(event) });
     if (!registered.includes("vault")) throw new Error(`expected /vault, got: ${registered.join(", ")}`);
     if (!tools.includes("vault_release")) throw new Error(`expected vault_release tool, got: ${tools.join(", ")}`);
+    if (!events.includes("tool_call") || !events.includes("tool_result")) throw new Error(`expected bash vault hooks, got: ${events.join(", ")}`);
   } finally {
     if (prev !== undefined) process.env.PI_ABRAIN_DISABLED = prev;
   }

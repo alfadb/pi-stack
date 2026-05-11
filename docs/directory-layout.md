@@ -120,7 +120,7 @@ alfadb/pi-astack/
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
 | `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + migrate-one + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator；writer 按需创建 `.pensieve/`；bg 在飞时不推进 checkpoint/不写 skip audit；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
-| `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + vaultReader core + /vault + /secret + `vault_release`；bash injection/redaction wrapper 仍待） | ADR 0014 §D4 (2026-05-09+) |
+| `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + vaultReader core + /vault + /secret + `vault_release` + global `$VAULT_*` bash injection/default-withheld redaction；project vault routing 仍待） | ADR 0014 §D4 (2026-05-09+) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |
