@@ -107,13 +107,13 @@ const sedimentStatusBySession = new Map<string, SedimentStatus>();
 export function renderSedimentStatus(state: SedimentStatus, detail?: string): string {
   const prefix = (() => {
     switch (state) {
-      case "idle":      return "💤 sediment idle";
-      case "running":   return "📝 sediment running";
-      case "completed": return "✅ sediment completed";
-      case "failed":    return "⚠️  sediment failed";
+      case "idle":      return "💤 sediment";
+      case "running":   return "📝 sediment";
+      case "completed": return "✅ sediment";
+      case "failed":    return "⚠️  sediment";
     }
   })();
-  return detail ? `${prefix}: ${detail}` : prefix;
+  return detail ? `${prefix} ${detail}` : prefix;
 }
 
 /**
@@ -136,7 +136,21 @@ function applySedimentStatus(
   } catch { /* stale ctx late fire is best-effort */ }
 }
 
-function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean {
+/** Format write results compactly: e.g. "+3 ~1 ·2" instead of
+ *  "3 created, 1 updated, 2 skipped". Zero-count statuses omitted. */
+function compactResultSummary(results: WriteProjectEntryResult[]): string {
+  const c: Record<string, number> = {};
+  for (const r of results) c[r.status] = (c[r.status] || 0) + 1;
+  const sym: Record<string, string> = {
+    created: "+", updated: "~", merged: "⊕", archived: "∅",
+    superseded: "^", skipped: "·", deleted: "-", rejected: "✗",
+  };
+  const parts: string[] = [];
+  for (const [st, ch] of Object.entries(sym)) {
+    if (c[st]) parts.push(`${ch}${c[st]}`);
+  }
+  return parts.join(" ") || "0";
+}
   const terminalReasons = new Set([
     "duplicate_slug", "validation_error", "lint_error",
   ]);
@@ -515,7 +529,7 @@ export default function (pi: ExtensionAPI) {
 
           // Save checkpoint and launch another cycle
           saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: win.lastEntryId }).then(() => {
-            applySedimentStatus(setStatus, sessionId, "running", `auto-write drain (model=${settings.extractorModel})`);
+            applySedimentStatus(setStatus, sessionId, "running", "drain");
             const corrId = makeCorrelationId("auto_write", sessionId, win);
             const bg = (async () => {
               try {
@@ -538,13 +552,13 @@ export default function (pi: ExtensionAPI) {
                     raw_text_truncated: auto.rawTextTruncated,
                     checkpoint_advanced: true, background_async: true,
                   });
-                  const ok = auto.results.filter(r => r.status !== "rejected" && r.status !== "skipped").length;
-                  applySedimentStatus(setStatus, sessionId, "completed", `drain: ${ok} written`);
+                  const compact = compactResultSummary(auto.results);
+                  applySedimentStatus(setStatus, sessionId, "completed", compact);
                 } else {
-                  applySedimentStatus(setStatus, sessionId, "completed", `drain: ${auto.kind}`);
+                  applySedimentStatus(setStatus, sessionId, "completed", `skip: ${auto.kind}`);
                 }
               } catch (err: any) {
-                applySedimentStatus(setStatus, sessionId, "failed", `drain error: ${err?.message ?? String(err)}`);
+                applySedimentStatus(setStatus, sessionId, "failed", `err: ${err?.message?.slice(0, 40) ?? String(err).slice(0, 40)}`);
               } finally {
                 if (autoWriteInFlight.get(sessionId) === bg) autoWriteInFlight.delete(sessionId);
                 scheduleDrainIfBacklog(); // recurse
@@ -570,7 +584,7 @@ export default function (pi: ExtensionAPI) {
       // Mark running BEFORE scheduling the bg promise so the footer
       // updates synchronously with agent_end. The bg promise will
       // transition to completed/failed in its finally block.
-      applySedimentStatus(setStatus, sessionId, "running", `auto-write (model=${settings.extractorModel})`);
+      applySedimentStatus(setStatus, sessionId, "running", "auto-write");
       const autoCorrelationId = makeCorrelationId("auto_write", sessionId, window);
 
       let bgPromise: Promise<void>;
@@ -625,11 +639,11 @@ export default function (pi: ExtensionAPI) {
             const skippedCount = auto.results.filter(r => r.status === "skipped").length;
             const deletedCount = auto.results.filter(r => r.status === "deleted").length;
             const rejectedCount = auto.results.filter(r => r.status === "rejected").length;
-            const okSummary = `${createdCount} created, ${updatedCount} updated, ${mergedCount} merged, ${archivedCount} archived, ${supersededCount} superseded, ${deletedCount} deleted, ${skippedCount} skipped`;
+            const compact = compactResultSummary(auto.results);
             if (rejectedCount > 0) {
-              applySedimentStatus(setStatus, sessionId, "failed", `auto-write: ${okSummary}, ${rejectedCount} rejected`);
+              applySedimentStatus(setStatus, sessionId, "failed", compact);
             } else {
-              applySedimentStatus(setStatus, sessionId, "completed", `auto-write: ${okSummary}`);
+              applySedimentStatus(setStatus, sessionId, "completed", compact);
             }
             return;
           }
@@ -659,11 +673,11 @@ export default function (pi: ExtensionAPI) {
           // ineligible / llm_skip = healthy completion;
           // llm_error = failed (LLM call broke; user should know).
           if (auto.kind === "llm_error") {
-            applySedimentStatus(setStatus, sessionId, "failed", `LLM error: ${auto.llmAuditSummary.error ?? "unknown"}`);
+            applySedimentStatus(setStatus, sessionId, "failed", `LLM err: ${(auto.llmAuditSummary.error ?? "unknown").slice(0, 40)}`);
           } else if (auto.kind === "ineligible") {
-            applySedimentStatus(setStatus, sessionId, "completed", auto.eligibility.reason ?? "ineligible");
+            applySedimentStatus(setStatus, sessionId, "completed", (auto.eligibility.reason ?? "ineligible").slice(0, 40));
           } else {
-            applySedimentStatus(setStatus, sessionId, "completed", "LLM returned skip");
+            applySedimentStatus(setStatus, sessionId, "completed", "LLM skip");
           }
         } catch (err: any) {
           // Last-resort failure path. Never let bg work throw out of
@@ -686,7 +700,7 @@ export default function (pi: ExtensionAPI) {
               background_async: true,
             });
           } catch {}
-          applySedimentStatus(setStatus, sessionId, "failed", `bg error: ${err?.message ?? String(err)}`);
+          applySedimentStatus(setStatus, sessionId, "failed", `bg err: ${(err?.message ?? String(err)).slice(0, 40)}`);
         } finally {
           // Status is already transitioned to completed/failed above.
           // Do NOT clear with setStatus(undefined) — user wants the
@@ -715,7 +729,7 @@ export default function (pi: ExtensionAPI) {
     // Synchronous explicit lane: status visible briefly during the
     // write loop (each writeProjectEntry typically < 200ms). Lands at
     // completed/failed when agent_end returns.
-    applySedimentStatus(setStatus, sessionId, "running", `explicit (${drafts.length} candidate${drafts.length === 1 ? "" : "s"})`);
+    applySedimentStatus(setStatus, sessionId, "running", `explicit x${drafts.length}`);
 
     const tWriteStart = Date.now();
     const explicitCorrelationId = makeCorrelationId("explicit", sessionId, window);
@@ -770,9 +784,9 @@ export default function (pi: ExtensionAPI) {
     const createdCount = results.filter(r => r.status === "created").length;
     const rejectedCount = results.filter(r => r.status === "rejected").length;
     if (rejectedCount > 0 || !shouldAdvance) {
-      applySedimentStatus(setStatus, sessionId, "failed", `explicit: ${createdCount} created, ${rejectedCount} rejected`);
+      applySedimentStatus(setStatus, sessionId, "failed", compactResultSummary(results));
     } else {
-      applySedimentStatus(setStatus, sessionId, "completed", `explicit: ${createdCount} ${createdCount === 1 ? "entry" : "entries"}`);
+      applySedimentStatus(setStatus, sessionId, "completed", compactResultSummary(results));
     }
   });
 }
