@@ -125,14 +125,16 @@ async function callSearchModel(
   if (!rawText) throw new Error(`memory.search ${modelRef} returned empty text`);
 
   // Capture cache + usage metrics from provider response.
-  // pi-ai surfaces these as usage.input / usage.output / usage.cacheReadInputTokens / usage.cacheCreationInputTokens.
-  // Field names vary by provider; we normalize to a flat object.
+  // pi-ai normalizes across providers:
+  //   - Anthropic: cacheRead = cache_read_input_tokens, cacheWrite = cache_creation_input_tokens
+  //   - OpenAI:    cacheRead = input_tokens_details.cached_tokens, cacheWrite = 0 (never reports writes)
+  //   - input is non-cached prompt tokens (OpenAI subtracts cached from total)
   const usageRaw = (finalMsg as any).usage;
   const usage: ModelCallResult["usage"] = usageRaw ? {
-    input: usageRaw.input ?? usageRaw.promptTokens ?? usageRaw.inputTokens ?? 0,
-    output: usageRaw.output ?? usageRaw.completionTokens ?? usageRaw.outputTokens ?? 0,
-    ...(typeof usageRaw.cacheReadInputTokens === "number" ? { cacheHit: usageRaw.cacheReadInputTokens } : {}),
-    ...(typeof usageRaw.cacheCreationInputTokens === "number" ? { cacheWrite: usageRaw.cacheCreationInputTokens } : {}),
+    input: usageRaw.input ?? 0,
+    output: usageRaw.output ?? 0,
+    ...(typeof usageRaw.cacheRead === "number" ? { cacheHit: usageRaw.cacheRead } : {}),
+    ...(typeof usageRaw.cacheWrite === "number" ? { cacheWrite: usageRaw.cacheWrite } : {}),
   } : undefined;
 
   return { rawText, stopReason: finalMsg.stopReason, usage };
