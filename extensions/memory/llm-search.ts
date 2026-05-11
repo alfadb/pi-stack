@@ -288,6 +288,12 @@ function parseFinalPicks(rawText: string): FinalPick[] {
 }
 
 function makeStage1Prompt(query: string, indexText: string, limit: number): string {
+  // Index-first ordering for LLM prompt caching (2026-05-11):
+  // the index (~tens of KB) rarely changes, so putting it before the
+  // query lets provider-side caching (DeepSeek context cache, Anthropic
+  // prompt cache) reuse the KV prefix across calls. Only the query
+  // suffix is processed fresh each time. Previously query was before
+  // index → cache never hit.
   return [
     "You are pi-astack memory search candidate selector.",
     "",
@@ -348,6 +354,10 @@ function entryForStage2(entry: MemoryEntry): string {
 }
 
 function makeStage2Prompt(query: string, candidates: MemoryEntry[], limit: number): string {
+  // Instructions-first ordering for provider prompt caching (2026-05-11).
+  // The instructions block is fixed across all Stage 2 calls (~1K tokens).
+  // Candidates and query are variable, but the instruction prefix can still
+  // be cached by providers that support prefix-level caching.
   return [
     "You are pi-astack memory search final ranker.",
     "",
@@ -365,12 +375,12 @@ function makeStage2Prompt(query: string, candidates: MemoryEntry[], limit: numbe
     "- Do not invent slugs. Return only slugs present in Candidates.",
     "- If nothing is relevant, return [].",
     "",
-    `Query: ${query}`,
-    "",
     "Candidates:",
     "<<<MEMORY_SEARCH_CANDIDATES",
     candidates.map(entryForStage2).join("\n\n---\n\n"),
     "MEMORY_SEARCH_CANDIDATES>>>",
+    "",
+    `Query: ${query}`,
   ].join("\n");
 }
 
