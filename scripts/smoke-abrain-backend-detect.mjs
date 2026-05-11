@@ -452,6 +452,7 @@ fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc
 fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-reader.cjs"), transpileTsToCjs(vaultReaderSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-bash.cjs"), transpileTsToCjs(vaultBashSrc));
+fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts")));
 // vault-reader.cjs keeps its own relative imports (./keychain, ./vault-writer),
 // so provide extensionless .js companions in the tmp dir as well.
 fs.copyFileSync(path.join(tmpDir, "keychain.cjs"), path.join(tmpDir, "keychain.js"));
@@ -472,6 +473,7 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/vault-writer"\)/g, 'require("./vault-writer.cjs")')
   .replace(/require\("\.\/vault-reader"\)/g, 'require("./vault-reader.cjs")')
   .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")')
+  .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);
@@ -511,6 +513,7 @@ check("PI_ABRAIN_DISABLED unset → activate registers /vault, vault_release, an
     if (!registered.includes("vault")) throw new Error(`expected /vault, got: ${registered.join(", ")}`);
     if (!tools.includes("vault_release")) throw new Error(`expected vault_release tool, got: ${tools.join(", ")}`);
     if (!events.includes("tool_call") || !events.includes("tool_result")) throw new Error(`expected bash vault hooks, got: ${events.join(", ")}`);
+    if (!events.includes("message_start")) throw new Error(`expected message_start hook for i18n language tracking, got: ${events.join(", ")}`);
     const release = toolDefs.find((t) => t.name === "vault_release");
     if (!release || !release.parameters || !release.parameters.properties) throw new Error("vault_release tool definition missing parameters.properties");
     if (!release.parameters.properties.scope) throw new Error("vault_release schema must declare top-level scope (LLMs cannot reliably emit nested options object)");

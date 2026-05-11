@@ -31,7 +31,8 @@
     "smoke:abrain-vault-reader": "node scripts/smoke-abrain-vault-reader.mjs",
     "smoke:abrain-vault-bash": "node scripts/smoke-abrain-vault-bash.mjs",
     "smoke:abrain-active-project": "node scripts/smoke-abrain-active-project.mjs",
-    "smoke:abrain-secret-scope": "node scripts/smoke-abrain-secret-scope.mjs"
+    "smoke:abrain-secret-scope": "node scripts/smoke-abrain-secret-scope.mjs",
+    "smoke:abrain-i18n": "node scripts/smoke-abrain-i18n.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],

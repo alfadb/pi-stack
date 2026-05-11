@@ -57,6 +57,7 @@ import {
   validateAbrainProjectId,
   type ResolveActiveProjectResult,
 } from "../_shared/runtime";
+import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
 
@@ -333,11 +334,13 @@ export function formatReleaseAuthorizationTitle(scope: VaultScope, key: string, 
 async function authorizeVaultBashOutput(
   ui: VaultReleaseUi | undefined,
   record: VaultBashRunRecord,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  hostCtx: unknown,
 ): Promise<"release" | "withhold"> {
   if (bashOutputSessionGrants.has(record.grantKey)) return "release";
   if (!ui?.select) return "withhold";
-  const title = formatBashAuthorizationTitle(record);
+  const englishTitle = formatBashAuthorizationTitle(record);
+  const title = await localizePrompt(englishTitle, hostCtx);
   // Also push the full context into the message stream so it survives any TUI
   // truncation of the select title.
   ui.notify?.(title, "warning");
@@ -355,13 +358,21 @@ async function authorizeVaultBashOutput(
   return "withhold";
 }
 
-async function authorizeVaultRelease(ui: VaultReleaseUi | undefined, scope: VaultScope, key: string, reason: string | undefined, signal?: AbortSignal): Promise<{ ok: true } | { ok: false; reason: string }> {
+async function authorizeVaultRelease(
+  ui: VaultReleaseUi | undefined,
+  scope: VaultScope,
+  key: string,
+  reason: string | undefined,
+  signal: AbortSignal | undefined,
+  hostCtx: unknown,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
   const gate = authKey(scope, key);
   if (releaseRememberDenies.has(gate)) return { ok: false, reason: "denied_remembered" };
   if (releaseSessionGrants.has(gate)) return { ok: true };
   if (!ui) return { ok: false, reason: "ui_unavailable" };
 
-  const title = formatReleaseAuthorizationTitle(scope, key, reason);
+  const englishTitle = formatReleaseAuthorizationTitle(scope, key, reason);
+  const title = await localizePrompt(englishTitle, hostCtx);
   // Mirror the full context into the message stream so the user always sees
   // what is about to be released, even if the TUI select clips long titles.
   ui.notify?.(title, "warning");
@@ -407,6 +418,15 @@ export default function activate(pi: ExtensionAPI): void {
   const eventRegistry = pi as unknown as EventRegistry;
 
   if (typeof eventRegistry.on === "function") {
+    // Track the user's current conversation language by sampling recent user
+    // messages. Used by i18n.localizePrompt to translate vault authorization
+    // prompts into the language the user is speaking.
+    eventRegistry.on("message_start", async (event) => {
+      const message = (event as { message?: unknown })?.message;
+      const text = extractUserMessageText(message);
+      if (text) recordUserMessage(text);
+    });
+
     eventRegistry.on("tool_call", async (event, ctx) => {
       if (event.toolName !== "bash") return;
       const command = String(event.input?.command ?? "");
@@ -428,7 +448,7 @@ export default function activate(pi: ExtensionAPI): void {
       vaultBashRuns.delete(event.toolCallId);
       try { fs.rmSync(record.envFile, { force: true }); } catch {}
 
-      const decision = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal);
+      const decision = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal, ctx);
       if (decision !== "release") {
         return {
           content: withheldVaultBashContent(record),
@@ -514,7 +534,7 @@ export default function activate(pi: ExtensionAPI): void {
           return toolJson({ ok: false, key, scope, error: `vault key pre-flight failed: ${err?.message ?? String(err)}` });
         }
 
-        const auth = await authorizeVaultRelease(ctx.ui, scope, key, reason, signal);
+        const auth = await authorizeVaultRelease(ctx.ui, scope, key, reason, signal, ctx);
         if (!auth.ok) return toolJson({ ok: false, key, scope, denied: true, reason: auth.reason });
 
         try {
