@@ -52,6 +52,7 @@ import {
   type VaultBashRunRecord,
 } from "./vault-bash";
 import {
+  listAbrainProjects,
   resolveActiveProject,
   validateAbrainProjectId,
   type ResolveActiveProjectResult,
@@ -802,10 +803,18 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
 
   if (sub === "list") {
     if (parsed.allProjects) {
-      ui.notify(
-        "/secret list --all-projects: not yet implemented (ADR 0014 P1 step 2). Pass --project=<id> or --global, or inspect ~/.abrain/projects/*/vault/_meta/ manually.",
-        "warning",
-      );
+      if (parsed.positional.length > 0) {
+        ui.notify(`/secret list: unexpected positional arg(s): ${parsed.positional.join(" ")}`, "warning");
+        return;
+      }
+      const sections: string[] = [renderListing("global")];
+      const projectIds = listAbrainProjects(ABRAIN_HOME);
+      if (projectIds.length === 0) {
+        sections.push("(no project vaults under ~/.abrain/projects/)");
+      } else {
+        for (const projectId of projectIds) sections.push(renderListing({ project: projectId }));
+      }
+      ui.notify(sections.join("\n\n"), "info");
       return;
     }
     if (parsed.positional.length > 0) {

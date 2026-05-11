@@ -88,6 +88,23 @@ check("resolveBrainPaths returns project + vault paths", () => {
   if (!paths.projectVaultDir.endsWith(path.join("projects", "pi-astack", "vault"))) throw new Error(`bad vault dir: ${paths.projectVaultDir}`);
 });
 
+check("listAbrainProjects returns sorted ids and skips unsafe entries", () => {
+  const home = fs.mkdtempSync(path.join(tmpDir, "list-projects-"));
+  // empty / missing projects/ dir -> []
+  if (runtime.listAbrainProjects(home).length !== 0) throw new Error("missing projects/ should yield []");
+  const projectsRoot = path.join(home, "projects");
+  fs.mkdirSync(projectsRoot, { recursive: true });
+  // create good + bad entries
+  fs.mkdirSync(path.join(projectsRoot, "zebra"));
+  fs.mkdirSync(path.join(projectsRoot, "alpha"));
+  fs.mkdirSync(path.join(projectsRoot, ".hidden")); // should be skipped (starts with .)
+  fs.writeFileSync(path.join(projectsRoot, "_bindings.md"), "# not a project dir");
+  const got = runtime.listAbrainProjects(home);
+  if (JSON.stringify(got) !== JSON.stringify(["alpha", "zebra"])) {
+    throw new Error(`expected [alpha, zebra], got ${JSON.stringify(got)}`);
+  }
+});
+
 check("validateAbrainProjectId rejects unsafe ids", () => {
   for (const bad of ["", "..", "../escape", ".hidden", "with/slash", "with\\slash", "spaces here", "weird*"]) {
     let threw = false;

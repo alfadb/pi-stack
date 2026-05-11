@@ -205,6 +205,26 @@ export function abrainProjectDir(abrainHome: string, projectId: string): string 
 export function abrainProjectVaultDir(abrainHome: string, projectId: string): string {
   return path.join(abrainProjectDir(abrainHome, projectId), "vault");
 }
+/**
+ * List every project id that has a directory under ~/.abrain/projects/.
+ * Skips entries that fail validateAbrainProjectId (defense against
+ * traversal / leading-dot files / files mistakenly placed in projects/).
+ * Read-only: does not create or migrate anything.
+ */
+export function listAbrainProjects(abrainHome: string): string[] {
+  const root = abrainProjectsDir(abrainHome);
+  if (!fs.existsSync(root)) return [];
+  const ids: string[] = [];
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const id = entry.name;
+    try { validateAbrainProjectId(id); } catch { continue; }
+    ids.push(id);
+  }
+  ids.sort();
+  return ids;
+}
+
 export function resolveBrainPaths(abrainHome: string, projectId: string): BrainPaths {
   const root = path.resolve(abrainHome);
   return {
