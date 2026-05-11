@@ -27,7 +27,8 @@
     "smoke:vault-subpi-isolation": "node scripts/smoke-vault-subpi-isolation.mjs",
     "smoke:abrain": "node scripts/smoke-abrain-backend-detect.mjs",
     "smoke:abrain-bootstrap": "node scripts/smoke-abrain-bootstrap.mjs",
-    "smoke:abrain-vault-writer": "node scripts/smoke-abrain-vault-writer.mjs"
+    "smoke:abrain-vault-writer": "node scripts/smoke-abrain-vault-writer.mjs",
+    "smoke:abrain-vault-reader": "node scripts/smoke-abrain-vault-reader.mjs"
   },
   "pi": {
     "extensions": ["./extensions"],

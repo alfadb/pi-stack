@@ -93,7 +93,8 @@ alfadb/pi-astack/
 │   │   ├── backend-detect.ts          # ssh-key/gpg-file/macos/secret-service/pass/passphrase-only/disabled 优先级探测（vault-bootstrap §1.4）
 │   │   ├── bootstrap.ts               # master key 生成 + install tmp + cleanup（inv1-inv6 事务安全）
 │   │   ├── keychain.ts                # macOS Keychain / secret-service / pass dispatch（Tier 2 optimization）
-│   │   └── vault-writer.ts            # writeSecret/listSecrets/forgetSecret/reconcile；transactional + age 公钥加密（不接触 master key 明文）
+│   │   ├── vault-writer.ts            # writeSecret/listSecrets/forgetSecret/reconcile；transactional + age 公钥加密（不接触 master key 明文）
+│   │   └── vault-reader.ts            # P0c.read core substrate：unlock master identity + decrypt per-key secret + literal redaction helper（不注册 LLM tool）
 │   ├── _shared/                       # ✅ 跨扩展 helpers
 │   │   ├── footer-status.ts           # 统一 footer status keys（ordered, dispatch state machine, model-curator total count）
 │   │   └── runtime.ts                 # local-tz timestamp / .pi-astack/<module>/ path / appendAudit
@@ -119,7 +120,7 @@ alfadb/pi-astack/
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
 | `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + migrate-one + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator；writer 按需创建 `.pensieve/`；bg 在飞时不推进 checkpoint/不写 skip audit；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
-| `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + /vault + /secret 命令） | ADR 0014 §D4 (2026-05-09) |
+| `extensions/abrain/` | ✅ vault P0a-c（backend-detect + master-key bootstrap + vaultWriter + vaultReader core + /vault + /secret 命令；`vault_release`/bash injection/TUI auth 仍待） | ADR 0014 §D4 (2026-05-09+) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |
