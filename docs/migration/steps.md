@@ -281,12 +281,12 @@ memory_search(query: "dispatch agent prompt")
 - [x] Memory Facade 跨 store dispatch + graceful degradation【`resolveStores` 在 world 不存在时仅返回 project store，不报错；scope 是 internal routing concern，对 LLM 不暴露（§5.4 Facade）】
 - [x] `memory_search` 同时检索 project + world【smoke 覆盖 `ABRAIN_ROOT` 路径】
 - [x] **Parser frontmatter requirement**【`parseEntry` 在 `frontmatterText.trim() === ""` 时返回 null；通过 ~/.abrain/ 初始化时发现 README.md 被当 degraded entry 索引；2026-05-08 修复（`a49aed4`）】
-- [ ] Sediment world lane（world 写入路径，决策树 logic）【依赖 Phase 1.4 burn-in 数周稳定后开】
+- [ ] Sediment world lane（world 写入路径，决策树 logic）【ADR 0016 后不再依赖 burn-in；待 world write substrate 设计】
 - [ ] World scope 的 file lock【同上，sediment 写入路径依赖】
-- [ ] Promotion gate 1-5 基础版（keyword-based）【同上】
+- [ ] Promotion gate 1-5 基础版（keyword-based）【待 Phase 1.4+ 路线规划】
 - [ ] 跨机器同步脚本【运维脚本，路线漏洞，未设计】
 
-**状态（2026-05-08）**：读侧（resolve / search / get / list / neighbors）全部落地，且被 smoke 覆盖。`~/.abrain/` 已初始化（独立 git repo，empty），`memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 自动合并 project + world 层结果——但 scope 字段不返回给 LLM（per memory-architecture.md §5.4 Facade 模式：scope/backend 是 internal routing concern）。写侧（sediment world lane / promotion gate / sync）依然挡在 Phase 1.4 burn-in 之后，本 phase 不推进。
+**状态（2026-05-11）**：读侧全部落地且被 smoke 覆盖。写侧（sediment world lane / promotion gate / sync）待 world write substrate 设计，不再依赖 burn-in（ADR 0016 已删除机械门控）。
 
 ### Phase 2.1 — ~/.abrain 初始化
 
@@ -322,7 +322,7 @@ echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
 - Gate 4: 冷却期（≥3 天）
 - Gate 5: 冲突检查（trigram Jaccard ≥0.7）
 
-**状态（2026-05-08）**：详细设计稿落在 [`phase-2.3-promotion-gates.md`](./phase-2.3-promotion-gates.md)，含 5 gate 算法 / 命令 surface / 文件流 / frontmatter / audit schema / 锁 / 工作量 / 10 个开放问题 + 顺序建议。等 Phase 1.4 burn-in 数周稳定后 + Q1-Q10 用户拍板后实施。
+**状态（2026-05-11）**：详细设计稿落在 [`phase-2.3-promotion-gates.md`](./phase-2.3-promotion-gates.md)。待 Phase 1.4+ 路线规划后实施（ADR 0016 已删除 burn-in 门控，不再阻塞此 phase）。
 
 ---
 

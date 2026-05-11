@@ -1,8 +1,8 @@
 # Brain Redesign Spec
 
-> **状态**：v1.3 — incorporate Round 5 复核 P0 修订（2026-05-09）。
+> **状态**：v1.4.6 — current as of 2026-05-11（abrain vault P0a-c shipped + PI_ABRAIN_DISABLED sub-pi enforcement + vault git policy unified + SECRETS_BACKEND override）。
 >
-> Baseline v1.0 accepted alongside [ADR 0014](adr/0014-abrain-as-personal-brain.md)；v1.1 完成 Round 3 P0 闭合；v1.2 完成 Round 4 P0 闭合。
+> Baseline v1.0 accepted alongside [ADR 0014](adr/0014-abrain-as-personal-brain.md)；v1.1 完成 Round 3 P0 闭合；v1.2 完成 Round 4 P0 闭合；v1.3 完成 Round 5 P0 闭合。
 >
 > **v1.3 变更点**（三家 Round 5 复核 → 1 PASS after fixing P0 / 2 CONDITIONAL，5 个新 P0）：
 > - **真代码修订**：`extensions/dispatch/index.ts` 的 `runSubprocess()` 加 `env: { ...process.env, PI_ABRAIN_DISABLED: "1" }` env override（v1.2 文档写了但代码未实施——GPT P0-1）；加 `smoke:vault-subpi-isolation` 验证 5 项不变量

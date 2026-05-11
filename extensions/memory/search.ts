@@ -62,6 +62,8 @@ function finalRankScore(entry: MemoryEntry, normalizedTextScore: number, setting
   return normalizedTextScore * confidenceFactor * projectBoost;
 }
 
+/** @deprecated BM25 search — dead code kept for potential offline diagnostics CLI.
+ *  No caller in extensions/. ADR 0015 LLM retrieval fully replaces this path. */
 export function searchEntries(entries: MemoryEntry[], params: SearchParams, settings: MemorySettings) {
   const query = String(params.query ?? "").trim();
   const filters = params.filters ?? {};
@@ -163,6 +165,7 @@ export function findEntry(entries: MemoryEntry[], slugRaw: string): { entry?: Me
   return { entry: matches[0], alternatives: matches.slice(1) };
 }
 
+/** Lightweight meta projection for neighbor/related lists — no scope/source_path leak. */
 function entryMeta(entry: MemoryEntry) {
   return {
     slug: entry.slug,
@@ -170,7 +173,6 @@ function entryMeta(entry: MemoryEntry) {
     kind: entry.kind,
     status: entry.status,
     confidence: entry.confidence,
-    scope: entry.scope,
     summary: entry.summary,
   };
 }

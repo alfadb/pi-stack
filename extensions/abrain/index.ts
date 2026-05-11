@@ -61,8 +61,11 @@ import {
 import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
+// Priority: ABRAIN_ROOT env var > default ~/.abrain (aligned with memory/parser.ts)
 
-const ABRAIN_HOME = path.join(os.homedir(), ".abrain");
+const ABRAIN_HOME = process.env.ABRAIN_ROOT
+  ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+  : path.join(os.homedir(), ".abrain");
 const STATE_DIR = path.join(ABRAIN_HOME, ".state");
 const VAULT_DISABLED_FLAG = path.join(STATE_DIR, "vault-disabled");
 

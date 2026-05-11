@@ -40,7 +40,7 @@
 | `extensions/dispatch/` | `alfadb/pi-dispatch` | subtree merge，原仓 archive，README 指向 pi-astack |
 | `extensions/sediment/` | `alfadb/pi-sediment` | subtree merge，原仓 archive，README 指向 pi-astack |
 | `extensions/model-curator/` | `~/.pi/agent/skills/pi-model-curator/`（in-tree） | cp 迁入 |
-| `skills/{19 个}/` + `extensions/browse/` + `prompts/ship.md` | `alfadb/pi-gstack` | cp 迁入，原仓 archive |
+| `skills/{19 个}/` + `extensions/browse/` + `prompts/ship.md` | `alfadb/pi-gstack` | 尚未迁入当前 pi-astack 仓库（原 pi-gstack 已 archive，文件待恢复） |
 | `extensions/gbrain/` | `~/.pi/agent/extensions/gbrain/` | cp 迁入 |
 | `extensions/retry-stream-eof/` | `~/.pi/agent/extensions/retry-stream-eof.ts` | cp 迁入（同时升级为 A 类自有功能） |
 
@@ -55,7 +55,9 @@
 - SHA: `bf65487` (v1.26.0.0, 2026-05-02)
 - 跟进策略: 上游每次 release，看 changelog 决定是否值得移植
 
-### 端口层映射
+### 端口层映射 `[设计意图，当前仓库未包含这些路径]`
+
+> **物理状态（2026-05-11）**：下表列出的 `skills/...`、`prompts/ship.md`、`extensions/browse/` 路径在当前 pi-astack 仓库中**均不存在**。此表记录的是首次从 pi-gstack 提取到 pi-astack 的设计意图和时间点；文件恢复将在启动 vendor 端口工作时执行。
 
 | pi-astack 路径 | 上游来源 | 形式 | 首次移植日期 |
 |---|---|---|---|

@@ -20,7 +20,7 @@
 - pi 技能（skills/）
 - pi 提示模板（prompts/）
 - 记忆基础设施（markdown+git 唯一 source of truth + sediment 单写）
-- 上游 vendor 引用（vendor/）
+- 上游 vendor 引用（vendor/）`[计划]`
 
 参考心智模型：**gstack 之于 claude-code 的关系，pi-astack 之于 pi 的关系一样**。作者为自己常用的 harness agent 打造一整套工作流，集成自己认同的 review/qa/security/multi-agent/memory 等能力，不断演进。不是发行版（不为不同环境打包同一软件），不是仓库集合（不是谁都可以拿出一个独立包），是**作者自用 + 作者认可的完整工作流**。
 
@@ -49,6 +49,7 @@
 **前置依赖**（零外部服务依赖）：
 - 无。markdown+git 架构不需要 postgres/pgvector/gbrain CLI。
 - 可选：`qmd` 用于加速全文搜索（Phase 3，详见 memory-architecture.md 附录 C）。
+- vault backend 可通过 `SECRETS_BACKEND` 环境变量手动覆盖自动检测（可选值：`ssh-key` / `gpg-file` / `macos` / `secret-service` / `pass` / `passphrase-only` / `disabled`）。
 
 挂为 `~/.pi/agent/skills/pi-astack/` submodule，并在官方 pi settings chain（`~/.pi/agent/settings.json` 或项目 `.pi/settings.json`）里用 local package path 加载这份扩展本身。改一行立即生效。
 
@@ -104,18 +105,22 @@ pi install git:github.com/alfadb/pi-astack
 - `dispatch/` — subprocess-based `dispatch_agent` / `dispatch_agents`（主会话自由组合）；每个子 agent 是独立 pi 进程，OS 级隔离（ADR 0009）。子进程 env 强制注入 `PI_ABRAIN_DISABLED=1` 让 abrain extension 在 sub-pi 中 register nothing（brain-redesign-spec v1.3 P0-1）
 - `memory/` — ✅ 主会话记忆 read tool（`memory_search/get/list/neighbors`），Facade 模式封装；`memory_search` 走 ADR 0015 双阶段 LLM retrieval（stage1候选 + stage2精排，stage1 thinking=off / stage2 thinking=high），失败 hard error，不降级到 grep；结果带 created/updated/rank_reason/timeline_tail 新鲜度信号；只读扫描 `.pensieve/` + 可选 `~/.abrain/`；另含 human slash commands `/memory doctor-lite`、`/memory lint`、`/memory migrate --dry-run [--report]`、`/memory check-backlinks`、`/memory rebuild --graph`、`/memory rebuild --index`
 - `abrain/` — ✅ vault P0a-c 子集（ADR 0014 §D4）：`/vault status` / `/vault init [--backend=X]` + `/secret set/list/forget --global <key>=<value>`。Backend detection 优先级 ssh-key → gpg-file → macos → secret-service → pass → passphrase-only → disabled（[vault-bootstrap.md](./docs/migration/vault-bootstrap.md) v1.4 portable-identity 矩阵；容器场景头号 first-class）。Master key（`~/.abrain/.vault-master.age`）用 portable identity 加密；vault writer 不接触明文 master key，全部加密走 `~/.abrain/.vault-pubkey`。P0c.read core substrate、`vault_release` LLM tool 与 bash 注入已落地（unlock master + default-deny TUI 授权 + decrypt per-key secret + literal redaction / default-withheld bash output）。`/secret` 已默认 boot-time active project，`$VAULT_<key>` project→global fallback、`$GVAULT_<key>` global-only、`$PVAULT_<key>` project-only；`vault_release(key, scope?, reason?)` 可选 `'global'` / `'project'`；`/secret list --all-projects` 扫描全部 `projects/<id>/vault` 的 metadata，不解密。详 [brain-redesign-spec.md §6](./docs/brain-redesign-spec.md)
-- `imagine/` — ✅ `imagine(prompt, size?, quality?, style?)` tool，OpenAI Responses API 生图（`gpt-image-2`）；PNG 落 `.pi-astack/imagine/`，调用方支持图片输入则 inline 返回
+- `imagine/` — ✅ `imagine(prompt, size?, quality?, style?, model?)` tool，OpenAI Responses API 生图（默认 `gpt-image-2`，可通过 `model?` 覆盖）；PNG 落 `.pi-astack/imagine/`，调用方支持图片输入则 inline 返回
 - `vision/` — ✅ `vision(imageBase64? | path?, prompt)` tool，自动从可用 provider 选最佳 vision-capable 模型；用于当前模型不支持图片输入时降级
 - `sediment/` — ✅ Phase 1.4 + ADR 0016：checkpoint/run-window（per-session + RMW 锁）+ deterministic explicit `MEMORY:` extractor（fence-aware）+ `agent_end` 上的 LLM auto-write lane；无 `.pensieve/` 时 writer 按需创建；同 session bg 在飞时不推进 checkpoint、不写 skip audit，下次从上一轮已推进 checkpoint 继续；已删除 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控，直接调用 LLM extractor + ADR 0015 `memory_search` 找近邻，再由 curator LLM 输出 create/update/merge/archive/supersede/delete/skip；project-only writer substrate 只保留 sensitive-info sanitizer（JWT/PEM/AWS/connection URL 等）+ storage integrity（schema/lint/slug collision/lock/atomic write/audit/git best-effort）+ `updateProjectEntry` / `mergeProjectEntries` / `archiveProjectEntry` / `supersedeProjectEntry` / `deleteProjectEntry` 更新/归档/取代/删除基座；audit summary 与 writer rows 共享 `correlation_id` / `candidate_id`；另含 `/sediment migration-backups` + `/sediment migrate-one --plan/--apply --yes/--restore --yes` 单文件迁移与恢复。操作手册见 [docs/migration/apply-checklist.md](./docs/migration/apply-checklist.md)
 - `model-curator/` — 模型能力快照与选择建议
 - `model-fallback/` — 非对称多模型 fallback：初始模型走 pi 内建指数退避重试，耗尽后按 `modelFallback.fallbackModels` 切下一个。alfadb 当前 pi 配置：claude-code parity，1+9=10 次尝试。（旧名 retry-stream-eof → retry-all-errors；**自有功能，不向上游 PR**）
 - `compaction-tuner/` — 按百分比阈值触发 pi compaction。解决 pi 内建 `reserveTokens` 是绝对数值、跨 200k–1M+ contextWindow 模型无法表达统一百分比的问题。Hook `agent_end` 读 `ctx.getContextUsage()`，`percent >= thresholdPercent` 时 `ctx.compact()`。Hysteresis (`rearmMarginPercent`) 防重复触发。Pi 默认 reserveTokens=16384 仍作底线 safety net。Slash command `/compaction-tuner [status|trigger]`。Audit 在 `<projectRoot>/.pi-astack/compaction-tuner/audit.jsonl`。默认 opt-out；详见 `pi-astack-settings.schema.json#compactionTuner`。
 
-### Skills（pi 技能）
+### Skills（pi 技能）`[计划]`
+> **状态（2026-05-11）**：以下 skills 尚未迁入本仓。原 `alfadb/pi-gstack` 中对应文件仍存在但未 cp 到当前仓库。计划在 Slice F 补齐。
+
 - `memory-wand/` — 记忆库查询助手（`memory_*` tool 包装）
 - 19 个来自 garrytan/gstack 的 skills：autoplan, review, qa, qa-only, cso, investigate, retro, plan-ceo-review, plan-eng-review, plan-design-review, plan-devex-review, office-hours, document-release, land-and-deploy, setup-deploy, canary, scrape, health, benchmark
 
-### Prompts
+### Prompts `[计划]`
+> **状态（2026-05-11）**：以下 prompts 尚未迁入本仓。
+
 - `commit.md` / `plan.md` / `review.md` / `sync-to-main.md`（4 pipelines，从 pensieve 提取）
 - `ship.md`（来自 garrytan/gstack）
 - `dispatch-*.md`（pi-astack 自己）

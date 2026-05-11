@@ -621,7 +621,7 @@ export default function (pi: ExtensionAPI) {
       "Spawn multiple sub-agents in parallel with different models. " +
       "Each is an independent pi process. Mutating tools blocked by default. " +
       `Up to ${MAX_PARALLEL} tasks per call; up to ${MAX_CONCURRENCY} run concurrently in the in-process worker pool (excess tasks are queued and started as workers free up).`,
-    promptSnippet: "dispatch_agents(tasks[{model, thinking, prompt}], timeoutMs?)",
+    promptSnippet: "dispatch_agents(tasks[{model, thinking, prompt, timeoutMs?}], timeoutMs?)",
     promptGuidelines: [
       "Use dispatch_agents for parallel multi-model analysis, review, or voting.",
       "Each task uses a different model. Results collected when all complete.",

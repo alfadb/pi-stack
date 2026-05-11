@@ -1,7 +1,7 @@
 # pi-astack 目录布局与所有权
 
 > **v7 更新提示**（[memory-architecture.md](./memory-architecture.md)）：记忆基础设施从 gbrain (postgres+pgvector) 整
-> 体替换为纯 markdown+git。本文件反映 **当前实际实现状态**（2026-05-08）。标注 `[计划]` 的目录尚未实现。
+> 体替换为纯 markdown+git。本文件反映 **当前实际实现状态**（2026-05-11）。标注 `[计划]` 的目录尚未实现。
 
 ## 实际文件树
 
@@ -266,7 +266,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | modelFallback | `fallbackModels` |
 | memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays`, `search.{stage1Model,stage1Limit,stage1Thinking,stage2Model,stage2Limit,stage2Thinking}` |
 | sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries`, `extractorModel`, `extractorTimeoutMs`, `extractorMaxRetries`, `extractorMaxCandidates`, `extractorAuditRawChars`, `autoLlmWriteEnabled`, `autoWriteRawAuditChars` |
-| compactionTuner | `enabled`, `thresholdPercent`, `rearmMarginPercent` |
+| compactionTuner | `enabled`, `thresholdPercent`, `rearmMarginPercent`, `notifyOnTrigger`, `customInstructions` |
 | vision | `modelPreferences` |
 
 ## 所有权矩阵
