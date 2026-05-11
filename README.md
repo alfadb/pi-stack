@@ -5,8 +5,8 @@
 > **v7 update (2026-05-07):** 记忆基础设施从 gbrain (postgres+pgvector) 整体替换为**纯 markdown+git** 架构（
 > [memory-architecture.md](./docs/memory-architecture.md)）。项目级知识走 `<project>/.pensieve/`，世界级知识走
 > `~/.abrain/`（独立 git repo）。主会话通过 `memory_search/get/list/neighbors` 只读，sediment sidecar
-> 通过 `memory_write/update/deprecate/promote/relate` 单写。gbrain 被完全去除；其 timeline/图谱方法论
-> 被借鉴到 markdown 条目格式中（Compiled Truth + `## Timeline` + `graph.json`）。
+> 通过内部 writer substrate 单写（create/update/merge/archive/supersede/delete/skip），不暴露 LLM-facing 写工具。
+> gbrain 被完全去除；其 timeline/图谱方法论被借鉴到 markdown 条目格式中（Compiled Truth + `## Timeline` + `graph.json`）。
 >
 > **v7.1 update (2026-05-09, [ADR 0014](./docs/adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](./docs/brain-redesign-spec.md)):** `~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑——七区结构（identity / skills / habits / workflows / projects / knowledge / vault）。`.pensieve/` 物理位置废止，项目知识 Phase 2 起将迁入 `~/.abrain/projects/<id>/`（迁移计划见 [migration/abrain-pensieve-migration.md](./docs/migration/abrain-pensieve-migration.md)）。新增 Lane G（about-me）+ Lane V（vault declare）；`extensions/abrain/` 已落地 vault P0a-c 子集（`/secret` + `/vault` 命令，age 加密 + portable identity backend）。
 >
@@ -144,7 +144,7 @@ pi install git:github.com/alfadb/pi-astack
 - 项目记忆 → `<project>/.pensieve/{maxims,decisions,knowledge,staging,archive}/`（md + git）
 - 跨项目准则 → `~/.abrain/{maxims,patterns,anti-patterns,facts,staging,archive}/`（独立 git repo）
 - 条目格式：frontmatter v1 + compiled truth + `## Timeline`
-- 主会话只读（`memory_search/get/list/neighbors`），sediment 单写（writer substrate 已实现；`memory_write/update/deprecate/promote/relate` 自动写接口仍计划中）
+- 主会话只读（`memory_search/get/list/neighbors`），sediment 单写（内部 writer substrate 已实现：create/update/merge/archive/supersede/delete/skip；不计划暴露 LLM-facing 写工具）
 - 派生索引（`graph.json`）gitignored，可从 markdown 重建
 
 ## 设计原则

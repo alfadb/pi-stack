@@ -109,7 +109,7 @@
           "type": "number",
           "default": 5000,
           "minimum": 100,
-          "description": "Maximum time to wait for .pensieve/.state/locks/sediment.lock."
+          "description": "Maximum time to wait for .pi-astack/sediment/locks/sediment.lock."
         },
 
         "defaultConfidence": {

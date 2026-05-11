@@ -43,7 +43,7 @@ ADR 0013 的 Lane B（manual promote project→world）和 Lane D（auto-promote
 | `workflows/` | 我的常用 pipeline | 用户主动声明 + sediment 补完 |
 | `projects/<id>/` | 项目工作记忆（吃掉 .pensieve/） | sediment / 用户 |
 | `knowledge/` | 跨项目通用 fact（旧 world scope） | sediment |
-| `vault/` + `projects/<id>/vault/` | 双层秘密 | 用户主动（Lane V），不进 git |
+| `vault/` + `projects/<id>/vault/` | 双层秘密 | 用户主动（Lane V）；encrypted artifacts / metadata 可进 git，plaintext / lock / tmp 不进 git |
 
 详细 schema、子目录、读写规则见 [brain-redesign-spec.md](../brain-redesign-spec.md)。
 
@@ -74,7 +74,7 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 - **明文不进 LLM context**（默认）：需 `vault_release` 工具调用 + TUI 授权（once/session/no/deny+remember 四档）
 - **bash 注入**：`$VAULT_<key>` 解析顺序为 active project's vault → global vault；项目级覆盖全局
 - **stdout/stderr redaction**：主进程在 bash 结果回流前做 best-effort 字面 match 替换为 `<vault:<scope>:<key>>`
-- **不进 git**：`vault/*` 与 `projects/*/vault/*` 全部 .gitignore；`vault forget` 直接 rm 加密文件，无 history 残留。**例外**（v1.4）：ssh-key/gpg-file backend 下 `~/.abrain/.vault-master.age` 本身是已加密文件，**可以**随 abrain 一起 git push 备份——作为跨设备同步手段。ssh/gpg secret key 本身不上 git（由用户本身管理）。
+- **git 策略（v1.4.6 dogfood 修订）**：明文 value、lock、tmp、runtime state 不进 git；`.vault-backend` / `.vault-pubkey` / `.vault-master.age` / encrypted `vault/*.md.age` / `vault/_meta/*.md` / `projects/*/vault/...` 可以随 abrain private repo 一起 git push，作为跨设备同步手段。ssh/gpg secret key 本身不上 git（由用户本身管理）。`vault forget` 删除 working tree 中的加密文件并追加 metadata timeline；若密文曾提交，git history 可能仍保留 ciphertext，但不含 plaintext。
 
 ### D5. 多 pi 进程共享 brain（无主体 / 无分身 / 无队列）
 
@@ -103,13 +103,13 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
    - **层 1 mechanic 不变量**：LLM 可调用的 tool 集中**没有** `vault_write` / `vault_put` / `secret_*` / `brain_write` 这类专门的 brain mutation 入口。sediment 仍为异步记忆写入唯一 dedicated writer（Lane A/C/G）；vaultWriter library **仅在 abrain extension activate 期间被 TUI command handler 同进程调用**（不在 module-level export 中公开、`require()` 取不到 `writeSecret`——详 spec §6.4.0）。
    - **层 2 best-effort residual surface**（已知 trade-off）：LLM 仍可通过通用 tool（bash / edit / write / dispatch_agents）间接写 brain SOT——例如 bash `secret-tool lookup` + `age -e` 手写加密文件、bash `pi /secret` spawn 子 pi（不走 dispatch_agents 路径）。防御手段：§6.5.1 stdout 默认不回流 + §6.6 redaction + sediment audit 后置检测三者叠加，但**不是机制保证**。详 §坟处 #10。
    - **Lane V 同步路径**（v1.2 引入）：user slash command `/secret`（用户物理键入）触发 main pi 进程内 vaultWriter 同步调用。user typing 是面向 TUI 的独立路径，不进 LLM tool surface，**由层 1 不变量保护**。Lane G `/about-me` 仍走 sediment 异步 agent_end 路径。
-2. **Markdown + git 是 source of truth**（vault 例外，加密 + 不进 git）：索引/derived view 可重建。
+2. **Markdown + git 是 source of truth**（vault 例外：plaintext 永不进 git；encrypted artifacts + metadata 可作为 SOT 进 private git）：索引/derived view 可重建。
 3. **Facade 不暴露 scope/backend/source_path** 给 LLM ranking surface：`memory_search(query)` 签名无多余形参（`scope` 不存在于 schema）。例外：`memory_get(slug)` 是 exact lookup/debug view，可返回 scope/source_path 供调试——不是 LLM 选后端的机制。
 4. **跨 project vault 不互见**：active project（**boot-time snapshot**，详 spec §5.4）的 vault + 全局 vault 进 LLM context；其他 project 的 vault 连元数据都不暴露。会话中 bash `cd` 不改变 active project。
 5. **vault 明文进 LLM context 必须 user-explicit 授权**：`vault_release` 工具调用 + TUI 弹框确认；best-effort redaction（不是绝对保证）但默认排除是硬不变量。**补充**：引用了 `$VAULT_*` env 的 bash 命令 stdout/stderr **默认不回流 LLM**，需用户 once-授权（详 spec §6.5.1）——这是 LLM 主动 exfiltration 的机制性防御，不仅依赖 redaction 过滤器。
 6. **sub-pi 默认看不到任何 vault**：父 pi 已有授权不传给子 pi。**三层机制性 enforcement**（v1.2 强化，Round 4 GPT P0-N2）：(a) `dispatch_agents` 的 spawn 调用强制 `env: { ...process.env, PI_ABRAIN_DISABLED: "1" }`，顺序保证不能被上层 `export PI_ABRAIN_DISABLED=0` 覆盖；(b) abrain extension 启动第一行 `if (process.env.PI_ABRAIN_DISABLED === "1") return;`，不注册 tool / 不订阅事件 / 不加载 vault metadata；(c) `smoke:vault-subpi-isolation` 验证父 vault unlocked 时子 pi `vault status` 返回 locked。详 [vault-bootstrap.md §5](../migration/vault-bootstrap.md#5-每个-pi-进程启动时的-unlock-check)。
 7. **七区目录互斥**：identity/habits/skills/workflows/projects/knowledge/vault **七个目录**互斥（单条 entry 物理上只在一处），**但** habits/skills 等概念在全局与项目级有镜像目录（`habits/` 与 `projects/<id>/habits/` 并存），由 sediment 按 scope of generalization 决定写哪层。边界路由由 deterministic router 规范（§审计扩展 + spec §3.5）决定，不是 LLM-facing 选择。
-8. **"删除我所有秘密" = `rm -rf ~/.abrain/vault ~/.abrain/projects/*/vault`**：因 vault 不进 git，**git history 无残留**。补充：filesystem 层面的残留（swap / journal / undelete recovery）属 OS-level，超出本 spec 范围。
+8. **"删除我所有秘密" = `rm -rf ~/.abrain/vault ~/.abrain/projects/*/vault`**：清除 working tree 中的 encrypted vault artifacts 与 metadata；如果这些密文已提交到 private git，history 可能仍保留 ciphertext，需要按用户选择另行处理 git history/remote。plaintext 不进 git。补充：filesystem 层面的残留（swap / journal / undelete recovery）属 OS-level，超出本 spec 范围。
 
 ## 后果
 
@@ -117,7 +117,7 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 
 1. **认知模型清晰**：~/.abrain 不再是"知识仓库"而是"我的孪生"——所有关于 alfadb 的事实在一个地方，结构对应"我是谁/我会什么/我怎么工作/我在做什么/我的秘密"。
 2. **跨项目原生支持**：portfolio view、cross-project pattern 召回、跨项目 habit 学习全部内生，不需要单独 sidecar。
-3. **隐私撤销简单**：vault 不进 git → `rm -rf` 即清零。`/habit forget` / `vault forget` 都是单文件操作，无 git history 残留。
+3. **隐私撤销边界清晰**：`/secret forget` 删除 working tree 中的 encrypted file 并保留 metadata timeline；`rm -rf ~/.abrain/vault ~/.abrain/projects/*/vault` 可清空本机 vault artifacts。若密文曾提交到 private git，history/remote 上仍可能保留 ciphertext，需要用户按需另行清理；plaintext 不进 git。
 4. **工程量可控**：本质是"数据层重构 + sediment writer 路径切换"，pi 内核完全不动。失败回滚 = revert sediment 改动 + mv abrain/projects/* 回各项目 .pensieve/。
 5. **未来不锁死**：spawn-and-queue / thread / 主体进程 都是可以以后加的"协调层"——共享 brain 是它们的前置基础设施，不会冲突。
 6. **架构辩论复杂度大幅降低**：之前两轮 R1+R2 讨论的"observation 该放哪个 store"、"habit 该不该持久化"等问题，在新架构下要么自动解决要么变成局部决策。
@@ -202,7 +202,7 @@ ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "au
 | Q2 | workflows MVP 写入策略（Q-B） | 保留目录占位，MVP 不主动 sediment 写；等用户主动声明再开始填 |
 | Q3 | 团队协作 fallback（Q-C） | MVP 不实现 export 命令；等真有协作需求再加 `pi project export` |
 | Q4 | vault key 命名规范（Q-D） | 自由形式，推荐 `<env>-<service>-<purpose>`，不强制 |
-| Q5 | 多设备同步 vault（Q-E） | 手动（rsync/syncthing/iCloud）；vault 自带 export/import 是过度工程 |
+| Q5 | 多设备同步 vault（Q-E） | P0c.write 推荐 encrypted artifacts + metadata 随 abrain private git 同步；ssh/gpg secret key 不进 git、由用户自管。macOS/secret-service/pass 等非文件 backend 仍可能需要用户用 rsync/syncthing/iCloud 等方式同步或重建 unlock 条件；vault 自带 export/import 暂属过度工程 |
 | Q6 | 跑通 2 个月后是否需要主体/分身？ | 不预设。基于真实 pain point 在另开 ADR 015+ 评估 |
 | Q7 | OpenClaw 借鉴边界 | 个别工程模式可参考（sandbox 白名单、JSON Schema、device pairing）；架构理念不照搬（OpenClaw 是 short-task lifestyle，alfadb 是 long-haul cognitive） |
 

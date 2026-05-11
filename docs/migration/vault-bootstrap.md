@@ -464,10 +464,10 @@ rsync -av --delete ~/.abrain/ user@deviceB:.abrain/
 
 详见 [brain-redesign-spec.md §6.4.0](../brain-redesign-spec.md#640-vault-写入的执行者与同步语义)。简言之（v1.2 修正，Round 4 N1）：
 
-- `/secret` 命令由 **main pi 进程内同步调用 vaultWriter library** 处理（不走 sediment IPC / 不走 agent_end 异步）。vaultWriter 是 `extensions/abrain/vault-writer.ts`，复用 sediment 的 validation/audit substrate 但代码共享不是进程共享。避免 daemon / socket / peer credential 三层新工程面
-- 落盘步骤：flock(vault 目录) → age encrypt(plaintext, `~/.abrain/.vault-pubkey`) → 先 append `vault-events.jsonl` + fsync → atomic rename 到 `vault/<key>.md.age` → append `_meta/<key>.md` → unflock
-- 同步等待用户 TUI 输入完毕后立即返回——`$VAULT_<key>` 在下一条 bash 命令里立即可用
-- 写入失败（keychain unlock 失败 / vault-events append 失败 / 加密失败）TUI 立刻报错，不进入 partial state
+- `/secret` 命令由 **main pi 进程内同步调用 vaultWriter library** 处理（不走 sediment IPC / 不走 agent_end 异步）。vaultWriter 是 `extensions/abrain/vault-writer.ts`，复用 sediment 的 validation/audit substrate 思路但代码共享不是进程共享。避免 daemon / socket / peer credential 三层新工程面
+- 当前 P0c.write 落盘步骤：flock(vault 目录) → age encrypt(plaintext, `~/.abrain/.vault-pubkey`) → atomic rename 到 `vault/<key>.md.age` → append `_meta/<key>.md` + fsync → append `vault-events.jsonl` + fsync → unflock
+- P0c.write 同步等待加密文件与元数据落盘后返回；下一条命令可以看到 encrypted vault artifact。`$VAULT_<key>` bash 注入属于 P0c.read，尚未实现。
+- 写入失败（未 init/缺 `.vault-pubkey` / 加密失败 / metadata 或 audit append 失败）TUI 立刻报错；若 crash 发生在 rename 后 audit 前，`reconcile()` 在下次初始化时补 `recovered_missing_audit`。
 
 ## 8. 验收 checklist（v1.4 重写）
 
@@ -482,11 +482,13 @@ vault-bootstrap 完成后必须验证。**按 backend 分类，只验证该 host
 
 ### 公共验收（与 backend 无关，必须走）
 
-- [ ] `/secret test-key test-value` 落盘成功 + 立刻 `bash -c 'echo $VAULT_test_key'` 解密注入正确
-- [ ] `vault forget test-key` rm 加密文件 + 后续 `$VAULT_test_key` 报 not-found
-- [ ] **sub-pi 隔离**：`scripts/smoke-vault-subpi-isolation.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 dispatch spawn 生效）
-- [ ] **sub-pi extension guard**：`scripts/smoke-abrain-backend-detect.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 abrain extension activate 顶部生效，registerCommand 零次调用）
-- [ ] vault 文件全部 .gitignored（`git status` 干净）——`.vault-master.age` 除外（v1.4）：ssh-key/gpg-file 路径下此文件是加密的，**可以**随 abrain 一起 git push 备份（ssh/gpg key 本身不上 git）
+- [x] `/secret set --global test-key=test-value` 落盘成功：生成 `vault/test-key.md.age` + `_meta/test-key.md` + `vault-events.jsonl`，且 plaintext 不出现在 metadata/audit
+- [x] `/secret list --global` 只读 metadata，不解密 value
+- [x] `/secret forget --global test-key` rm/shred 加密文件，保留 `_meta/test-key.md` 并追加 `forgotten` timeline；后续 list 显示 forgotten
+- [x] **sub-pi 隔离**：`scripts/smoke-vault-subpi-isolation.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 dispatch spawn 生效）
+- [x] **sub-pi extension guard**：`scripts/smoke-abrain-backend-detect.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 abrain extension activate 顶部生效，registerCommand 零次调用）
+- [x] vault git 策略对齐 v1.4.6：`.vault-backend` / `.vault-pubkey` / `.vault-master.age` / encrypted `vault/*.md.age` / `vault/_meta/*.md` 可上 git；lock/tmp/runtime state gitignored
+- [ ] P0c.read：`$VAULT_<key>` bash 注入、`vault_release` LLM tool、stdout/stderr redaction
 
 ### Tier 2 optimization 验收（仅在该 backend 上 host 实际可用时走）
 
