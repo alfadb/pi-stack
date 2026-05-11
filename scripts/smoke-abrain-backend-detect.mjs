@@ -418,15 +418,16 @@ check("formatStatus A with keychain backend: shows 'master stored in: macOS Keyc
   if (!out.includes("macOS Keychain")) throw new Error("missing 'macOS Keychain' description");
 });
 
-check("formatStatus A distinguishes shipped P0c.write from pending P0c.read", () => {
-  // Verify status text does not mislead users: /secret write/list/forget are
-  // shipped, while release / bash injection / redaction remain pending.
+check("formatStatus A distinguishes shipped P0c read/write from pending bash injection", () => {
+  // Verify status text does not mislead users: /secret write/list/forget and
+  // vault_release are shipped, while bash injection/redaction remains pending.
   const info = detectBackend(deps({}));
   const out = formatStatus(info, false, {
     backend: "ssh-key", identity: "/x", vaultMasterPresent: true, vaultMasterMode: 0o600,
   });
   if (!out.includes("P0c.write implemented")) throw new Error("missing shipped P0c.write note");
-  if (!out.includes("P0c.read")) throw new Error("missing pending P0c.read note");
+  if (!out.includes("vault_release are implemented")) throw new Error("missing shipped vault_release note");
+  if (!out.includes("$VAULT_* bash injection/redaction wrapper is still pending")) throw new Error("missing pending bash injection note");
   if (out.includes("cannot write")) throw new Error("stale cannot-write wording leaked");
 });
 
@@ -437,15 +438,21 @@ check("formatStatus A distinguishes shipped P0c.write from pending P0c.read", ()
 const detectFile = path.join(tmpDir, "backend-detect.cjs");
 fs.writeFileSync(detectFile, detectCompiled);
 
-// index.ts imports ./bootstrap, ./keychain, ./vault-writer (P0b + P0c.write).
-// All four relative imports must be rewritten to .cjs paths so the
-// transpiled CJS module can resolve them in the smoke tmp dir.
+// index.ts imports ./bootstrap, ./keychain, ./vault-writer, ./vault-reader.
+// Relative imports must be rewritten to .cjs paths so the transpiled CJS
+// module can resolve them in the smoke tmp dir.
 const bootstrapSrc = path.join(repoRoot, "extensions/abrain/bootstrap.ts");
 const keychainSrc = path.join(repoRoot, "extensions/abrain/keychain.ts");
 const vaultWriterSrc = path.join(repoRoot, "extensions/abrain/vault-writer.ts");
+const vaultReaderSrc = path.join(repoRoot, "extensions/abrain/vault-reader.ts");
 fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), transpileTsToCjs(bootstrapSrc));
 fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
+fs.writeFileSync(path.join(tmpDir, "vault-reader.cjs"), transpileTsToCjs(vaultReaderSrc));
+// vault-reader.cjs keeps its own relative imports (./keychain, ./vault-writer),
+// so provide extensionless .js companions in the tmp dir as well.
+fs.copyFileSync(path.join(tmpDir, "keychain.cjs"), path.join(tmpDir, "keychain.js"));
+fs.copyFileSync(path.join(tmpDir, "vault-writer.cjs"), path.join(tmpDir, "vault-writer.js"));
 
 const indexSrc = path.join(repoRoot, "extensions/abrain/index.ts");
 let indexCompiled = transpileTsToCjs(indexSrc);
@@ -453,7 +460,8 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/backend-detect"\)/g, 'require("./backend-detect.cjs")')
   .replace(/require\("\.\/bootstrap"\)/g, 'require("./bootstrap.cjs")')
   .replace(/require\("\.\/keychain"\)/g, 'require("./keychain.cjs")')
-  .replace(/require\("\.\/vault-writer"\)/g, 'require("./vault-writer.cjs")');
+  .replace(/require\("\.\/vault-writer"\)/g, 'require("./vault-writer.cjs")')
+  .replace(/require\("\.\/vault-reader"\)/g, 'require("./vault-reader.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);
 const indexModule = require(indexFile);
@@ -468,21 +476,25 @@ check("PI_ABRAIN_DISABLED=1 → activate registers ZERO commands (sub-pi guard)"
   process.env.PI_ABRAIN_DISABLED = "1";
   try {
     let registerCalls = 0;
-    activate({ registerCommand: () => { registerCalls += 1; } });
+    let toolCalls = 0;
+    activate({ registerCommand: () => { registerCalls += 1; }, registerTool: () => { toolCalls += 1; } });
     if (registerCalls !== 0) throw new Error(`sub-pi guard breached: registerCommand called ${registerCalls} time(s)`);
+    if (toolCalls !== 0) throw new Error(`sub-pi guard breached: registerTool called ${toolCalls} time(s)`);
   } finally {
     if (prev === undefined) delete process.env.PI_ABRAIN_DISABLED;
     else process.env.PI_ABRAIN_DISABLED = prev;
   }
 });
 
-check("PI_ABRAIN_DISABLED unset → activate registers /vault", () => {
+check("PI_ABRAIN_DISABLED unset → activate registers /vault and vault_release", () => {
   const prev = process.env.PI_ABRAIN_DISABLED;
   delete process.env.PI_ABRAIN_DISABLED;
   try {
     const registered = [];
-    activate({ registerCommand: (name) => registered.push(name) });
+    const tools = [];
+    activate({ registerCommand: (name) => registered.push(name), registerTool: (tool) => tools.push(tool.name) });
     if (!registered.includes("vault")) throw new Error(`expected /vault, got: ${registered.join(", ")}`);
+    if (!tools.includes("vault_release")) throw new Error(`expected vault_release tool, got: ${tools.join(", ")}`);
   } finally {
     if (prev !== undefined) process.env.PI_ABRAIN_DISABLED = prev;
   }

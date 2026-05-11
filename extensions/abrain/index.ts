@@ -41,6 +41,7 @@ import {
   writeSecret, listSecrets, forgetSecret, validateKey,
   type VaultScope,
 } from "./vault-writer";
+import { releaseSecret } from "./vault-reader";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
 
@@ -147,6 +148,74 @@ interface CommandRegistry {
   }) => void;
 }
 
+interface ToolRegistry {
+  registerTool?: (tool: {
+    name: string;
+    label?: string;
+    description?: string;
+    promptSnippet?: string;
+    promptGuidelines?: string[];
+    parameters?: unknown;
+    execute: (toolCallId: string, params: Record<string, unknown>, signal: AbortSignal, onUpdate: unknown, ctx: { ui?: VaultReleaseUi }) => Promise<unknown> | unknown;
+  }) => void;
+}
+
+interface VaultReleaseUi {
+  notify?(message: string, type?: string): void;
+  select?(title: string, items: string[], opts?: { timeout?: number; signal?: AbortSignal }): Promise<string | undefined>;
+  confirm?(title: string, message: string, opts?: { timeout?: number; signal?: AbortSignal }): Promise<boolean>;
+}
+
+const releaseSessionGrants = new Set<string>();
+const releaseRememberDenies = new Set<string>();
+
+function scopeLabel(scope: VaultScope): string {
+  return scope === "global" ? "global" : `project:${scope.project}`;
+}
+
+function authKey(scope: VaultScope, key: string): string {
+  return `${scopeLabel(scope)}:${key}`;
+}
+
+function toolJson(payload: unknown) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    details: payload,
+  };
+}
+
+async function authorizeVaultRelease(ui: VaultReleaseUi | undefined, scope: VaultScope, key: string, reason: string | undefined, signal?: AbortSignal): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const gate = authKey(scope, key);
+  if (releaseRememberDenies.has(gate)) return { ok: false, reason: "denied_remembered" };
+  if (releaseSessionGrants.has(gate)) return { ok: true };
+  if (!ui) return { ok: false, reason: "ui_unavailable" };
+
+  const warning = [
+    `Release vault secret ${gate} to the LLM?`,
+    reason ? `Reason: ${reason}` : undefined,
+    "⚠ Plaintext will enter this model context. Redaction is best-effort and does not cover base64/hex/xxd/xor transformations.",
+  ].filter(Boolean).join("\n");
+
+  if (typeof ui.select === "function") {
+    const choice = await ui.select("Vault release authorization", ["Yes once", "Session", "No", "Deny + remember"], { signal });
+    if (choice === "Yes once") return { ok: true };
+    if (choice === "Session") {
+      releaseSessionGrants.add(gate);
+      return { ok: true };
+    }
+    if (choice === "Deny + remember") releaseRememberDenies.add(gate);
+    return { ok: false, reason: choice ? choice.toLowerCase().replace(/\s+/g, "_") : "cancelled" };
+  }
+
+  if (typeof ui.confirm === "function") {
+    const ok = await ui.confirm("Vault release authorization", warning, { signal });
+    return ok ? { ok: true } : { ok: false, reason: "denied" };
+  }
+
+  ui.notify?.("vault_release denied: no UI authorization method available", "warning");
+  return { ok: false, reason: "ui_authorization_unavailable" };
+}
+
 export default function activate(pi: ExtensionAPI): void {
   // ── Sub-pi enforce: vault-bootstrap.md §5 layer (b) ───────────────────
   // If PI_ABRAIN_DISABLED=1, register nothing. Sub-pi sees no /vault
@@ -157,6 +226,69 @@ export default function activate(pi: ExtensionAPI): void {
   if (process.env[PI_ABRAIN_DISABLED] === "1") return;
 
   const registry = pi as unknown as CommandRegistry;
+  const toolRegistry = pi as unknown as ToolRegistry;
+
+  if (typeof toolRegistry.registerTool === "function") {
+    toolRegistry.registerTool({
+      name: "vault_release",
+      label: "Release Vault Secret",
+      description:
+        "Request user-authorized release of a global vault secret into the LLM context. " +
+        "This is the P0c.read LLM-facing path: it prompts the user (Yes once / Session / No / Deny+remember) before decrypting. " +
+        "Only global scope is implemented until ADR 0014 active-project routing lands; sub-pi processes register no vault tools.",
+      promptSnippet: "vault_release(key, options?: { scope?: 'global', reason?: string })",
+      promptGuidelines: [
+        "Use vault_release only when plaintext is strictly necessary for the current task.",
+        "Always provide a concise reason explaining why the secret must enter model context.",
+        "Do not use vault_release for bash commands; future $VAULT_<key> injection is the safer execution path.",
+        "Never ask for project scope yet; current P0c.read only supports global vault secrets.",
+      ],
+      parameters: {
+        type: "object",
+        properties: {
+          key: { type: "string", description: "Vault key name to release, e.g. github-token." },
+          options: {
+            type: "object",
+            properties: {
+              scope: { type: "string", enum: ["global"], description: "Only 'global' is implemented in P0c.read." },
+              reason: { type: "string", description: "Why plaintext must be released into the LLM context." },
+            },
+          },
+        },
+        required: ["key"],
+      },
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        const key = String(params.key ?? "").trim();
+        const options = (params.options && typeof params.options === "object") ? params.options as Record<string, unknown> : params;
+        const scopeRaw = String(options.scope ?? "global");
+        const reason = typeof options.reason === "string" ? options.reason : undefined;
+        if (scopeRaw !== "global") {
+          return toolJson({ ok: false, error: "vault_release currently supports only scope='global'; project vault routing is ADR 0014 P1." });
+        }
+        try { validateKey(key); }
+        catch (err: any) { return toolJson({ ok: false, error: `invalid vault key: ${err.message}` }); }
+
+        const scope: VaultScope = "global";
+        const auth = await authorizeVaultRelease(ctx.ui, scope, key, reason, signal);
+        if (!auth.ok) return toolJson({ ok: false, key, scope, denied: true, reason: auth.reason });
+
+        try {
+          const released = await releaseSecret({ abrainHome: ABRAIN_HOME, scope, key });
+          return toolJson({
+            ok: true,
+            key,
+            scope,
+            value: released.value,
+            placeholder: released.placeholder,
+            warning: "Plaintext is now in model context. Redaction is best-effort and does not cover encoded/transformed values.",
+          });
+        } catch (err: any) {
+          return toolJson({ ok: false, key, scope, error: err?.message ?? String(err) });
+        }
+      },
+    });
+  }
+
   if (typeof registry.registerCommand !== "function") return;
 
   // /secret command — vault write/list/forget (P0c.write).
