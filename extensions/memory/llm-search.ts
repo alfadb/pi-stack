@@ -94,7 +94,6 @@ async function callSearchModel(
       messages: [{
         role: "user",
         content: [{ type: "text", text: prompt }],
-        timestamp: Date.now(),
       }],
     },
     {
@@ -306,7 +305,6 @@ function makeStage1Prompt(query: string, indexText: string, limit: number): stri
     "- Prefer entries whose title, summary, trigger_phrases, or related slugs match query intent.",
     "- Prefer recent and high-confidence entries over stale/low-confidence ones, all else equal.",
     "- Do not invent slugs. Return only slugs present in the index.",
-    `- Return at most ${limit} items. If nothing is relevant, return [].`,
     "",
     "Index:",
     "<<<MEMORY_SEARCH_INDEX",
@@ -314,6 +312,8 @@ function makeStage1Prompt(query: string, indexText: string, limit: number): stri
     "MEMORY_SEARCH_INDEX>>>",
     "",
     `Query: ${query}`,
+    "",
+    `Return at most ${limit} items. If nothing is relevant, return [].`,
   ].join("\n");
 }
 

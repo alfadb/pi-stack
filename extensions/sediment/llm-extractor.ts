@@ -198,7 +198,6 @@ export async function runLlmExtractor(
       messages: [{
         role: "user",
         content: [{ type: "text", text: prompt }],
-        timestamp: Date.now(),
       }],
     },
     {

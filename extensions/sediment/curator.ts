@@ -257,7 +257,7 @@ async function callCuratorModel(
 
   const stream = piAi.streamSimple(
     model,
-    { messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }] },
+    { messages: [{ role: "user", content: [{ type: "text", text: prompt }] }] },
     { apiKey: auth.apiKey, headers: auth.headers, signal, timeoutMs: settings.curatorTimeoutMs, maxRetries: settings.curatorMaxRetries },
   );
   const finalMsg = await stream.result();
