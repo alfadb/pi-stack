@@ -495,27 +495,18 @@ export async function llmSearchEntries(
   const stage2Picks = parseFinalPicks(stage2.rawText);
 
   // ── Cache metrics log ─────────────────────────────────────────
-  // One-line summary per search to stderr so it appears regardless
-  // of pi output mode. Cache hit/write fields may be undefined when
-  // the provider doesn't surface them or when the cache was cold.
+  // Write to process.stderr.write (bypasses console buffering that
+  // pi captures internally). JSONL format for easy grep + analysis.
   const s1 = stage1.usage;
   const s2 = stage2.usage;
-  const s1Cache = s1?.cacheHit != null
-    ? ` hit=${s1.cacheHit}`
-    : s1?.cacheWrite != null
-      ? ` write=${s1.cacheWrite}`
-      : "";
-  const s2Cache = s2?.cacheHit != null
-    ? ` hit=${s2.cacheHit}`
-    : s2?.cacheWrite != null
-      ? ` write=${s2.cacheWrite}`
-      : "";
-  console.error(
-    `[memory_search] ` +
-    `s1:↑${s1?.input ?? "?"}↓${s1?.output ?? "?"}${s1Cache} ` +
-    `s2:↑${s2?.input ?? "?"}↓${s2?.output ?? "?"}${s2Cache} ` +
-    `→ ${stage2Picks.length} results`,
-  );
+  const entry = {
+    ts: new Date().toISOString(),
+    query: query.slice(0, 80),
+    s1: s1 ? { in: s1.input, out: s1.output, ...(s1.cacheHit != null ? { hit: s1.cacheHit } : {}), ...(s1.cacheWrite != null ? { write: s1.cacheWrite } : {}) } : null,
+    s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
+    results: stage2Picks.length,
+  };
+  process.stderr.write(`[memory_search] ${JSON.stringify(entry)}\n`);
 
   if (stage2Picks.length === 0) return [];
   return rankFromStage2(entriesBySlug, stage2Picks, finalLimit);
