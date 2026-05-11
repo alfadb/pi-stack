@@ -103,7 +103,7 @@
 # → 返回 backup_path/source_path/target_path/state/restore_command
 
 # 从 apply 产生的 backup 恢复原 source；仅在 target 未被手改时自动删除 target
-/sediment migrate-one --restore .pensieve/.state/migration-backups/<timestamp>/short-term/maxims/example.md --yes
+/sediment migrate-one --restore .pi-astack/sediment/migration-backups/<timestamp>/short-term/maxims/example.md --yes
 # → 恢复原 legacy source，删除可验证的迁移 target，并重建 graph/index；若 target 已被手改则拒绝 target_modified
 ```
 
@@ -202,7 +202,7 @@ memory_search(query: "dispatch agent prompt")
 已完成 migration apply 安全入口：
 - `/sediment migrate-one --plan <file>`：只预览单文件迁移结果，不写入、不 audit、不重建 derived artifacts
 - `/sediment migrate-one --apply --yes <file>`：只允许单文件迁移
-- `/sediment migrate-one --restore <backup> --yes`：只允许从 `.pensieve/.state/migration-backups/` 恢复单文件；若 target 已被手改则拒绝 `target_modified`，不恢复 source、不删除 target
+- `/sediment migrate-one --restore <backup> --yes`：只允许从 `.pi-astack/sediment/migration-backups/` 恢复单文件；若 target 已被手改则拒绝 `target_modified`，不恢复 source、不删除 target
 - `/sediment migration-backups [--limit N]`：只读列出最近 backup、restore command 与当前 state（restorable / target_modified / already_restored 等）
 - source 必须位于 `.pensieve/` 内且不是 `.state/.index/pipelines`
 - target 已存在则拒绝
@@ -259,7 +259,7 @@ memory_search(query: "dispatch agent prompt")
 /sediment migration-backups --limit 20
 # → 列出最近 backup、当前 state 与可复制 restore_command
 
-/sediment migrate-one --restore .pensieve/.state/migration-backups/<timestamp>/short-term/maxims/example.md --yes
+/sediment migrate-one --restore .pi-astack/sediment/migration-backups/<timestamp>/short-term/maxims/example.md --yes
 # → 从 backup 恢复原 source；若 target 与迁移生成内容一致则删除 target，并重建 graph/index
 ```
 

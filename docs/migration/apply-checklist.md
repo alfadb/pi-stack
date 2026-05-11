@@ -88,8 +88,8 @@ Expected success fields:
 ```json
 {
   "status": "applied",
-  "backup_path": ".pensieve/.state/migration-backups/.../short-term/maxims/example.md",
-  "restore_command": "/sediment migrate-one --restore .pensieve/.state/migration-backups/.../short-term/maxims/example.md --yes",
+  "backup_path": ".pi-astack/sediment/migration-backups/.../short-term/maxims/example.md",
+  "restore_command": "/sediment migrate-one --restore .pi-astack/sediment/migration-backups/.../short-term/maxims/example.md --yes",
   "derived": {
     "graph": { "path": ".pensieve/.index/graph.json" },
     "index": { "path": ".pensieve/_index.md" }
@@ -128,7 +128,7 @@ The migrated file should disappear from `Migration Items` or become `already sch
 If apply was wrong and the migrated target has not been manually edited, run the returned restore command:
 
 ```text
-/sediment migrate-one --restore .pensieve/.state/migration-backups/<timestamp>/short-term/maxims/example.md --yes
+/sediment migrate-one --restore .pi-astack/sediment/migration-backups/<timestamp>/short-term/maxims/example.md --yes
 ```
 
 If the restore command was lost, list backups:

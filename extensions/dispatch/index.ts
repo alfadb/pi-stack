@@ -552,7 +552,7 @@ export default function (pi: ExtensionAPI) {
       model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
-      tools: Type.Optional(Type.String({ description: "Ignored in subprocess mode — sub-pi uses built-in tools" })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated tool names hint. Sub-pi runs with its own built-in tool set; this field is still validated for safety (mutating tools like bash/edit/write require PI_MULTI_AGENT_ALLOW_MUTATING=1, and nested dispatch_agent/dispatch_agents is always rejected)." })),
       timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
     }),
 
@@ -619,11 +619,13 @@ export default function (pi: ExtensionAPI) {
     label: "Dispatch Agents",
     description:
       "Spawn multiple sub-agents in parallel with different models. " +
-      "Each is an independent pi process. Mutating tools blocked by default.",
+      "Each is an independent pi process. Mutating tools blocked by default. " +
+      `Up to ${MAX_PARALLEL} tasks per call; up to ${MAX_CONCURRENCY} run concurrently in the in-process worker pool (excess tasks are queued and started as workers free up).`,
     promptSnippet: "dispatch_agents(tasks[{model, thinking, prompt}], timeoutMs?)",
     promptGuidelines: [
       "Use dispatch_agents for parallel multi-model analysis, review, or voting.",
       "Each task uses a different model. Results collected when all complete.",
+      `Concurrency: up to ${MAX_PARALLEL} task specs are accepted; the in-process worker pool size is ${MAX_CONCURRENCY}, so extra tasks queue rather than fan out. Plan voter quorum / debate width accordingly.`,
       "For reasoning-only tasks, omit tools (sub-pi uses built-in read/grep/find/ls).",
     ],
     parameters: Type.Object({

@@ -35,9 +35,7 @@
     "smoke:abrain-i18n": "node scripts/smoke-abrain-i18n.mjs"
   },
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts", "./extensions/dispatch/prompts"]
+    "extensions": ["./extensions"]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

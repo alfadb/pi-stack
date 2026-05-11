@@ -325,7 +325,11 @@ world/                                    ├── locks/
 
 ### 5.3 `memory_search` 算法规格
 
-> ⚠️ **Superseded by ADR 0015（2026-05-10）**：默认实现已从 hybrid keyword/qmd 规划改为双阶段 LLM retrieval（stage1 enhanced index candidate selection + stage2 full-content rerank）。下方 hybrid/grep/qmd 规格保留为历史背景与 fallback/qmd-future 参考。
+> ⚠️ **Superseded by ADR 0015（2026-05-10）——以下全文为历史设计记录，不是当前 shipped runtime。**
+>
+> 当前 shipped 算法是 `extensions/memory/llm-search.ts` 中的双阶段 LLM retrieval：Stage 1 (deepseek-v4-flash、thinking=off、内存生成 enhanced index text、出 top-K 候选类型指引) → Stage 2 (全 entry compiled_truth+timeline_tail、thinking=high、输出 final rank + rank_reason)。结果卡含 `created` / `updated` / `rank_reason` / `timeline_tail`。无 grep fallback，Stage 2 不跳过，LLM 失败 hard error——准确性优先是硬契约。
+>
+> **下方原 hybrid/grep/qmd 规格只作为历史 baseline + 未来 qmd 设计参考保留**。体现 ADR 0015 设计意图：`memory_search` 允许未来加 cache / qmd 加速层，但**从不**推荐回退到 tf-idf / RRF 的准确性降级路径。
 
 **historical/future hybrid = 关键词搜索（rg + tf-idf）+ (可选) qmd 向量语义，RRF 融合。** 当前 `memory_search` runtime 不使用该路径降级；它只作为历史 baseline 与未来 qmd 设计参考。
 
@@ -478,13 +482,14 @@ sediment 启动时自动注册当前 project（upsert by project_id）。Gate 2 
 
 **增量更新**：sediment 写入单条目后，仅更新该条目的 node + 出入边，不重建全量 graph。增量更新异常（如边冲突）→ 设置 `stale: true`，下次读触发全量 rebuild。
 
-CLI 命令（全部只读，写操作由 sediment 代理）：
+CLI 命令（全部只读，写操作由 sediment 代理）——2026-05-11 修订：pi-astack 里这些是 pi 内部的 slash 命令（`/memory ...`），不是 shell binary；实际注册在 `extensions/memory/index.ts` 的是 `/memory` 下的 `lint` / `migrate` / `doctor-lite` / `check-backlinks` / `rebuild --graph|--index`。原列表中 `graph` / `neighbors` / `doctor` 三个子命令未落地（`graph` 被 `rebuild --graph` 合并；`neighbors` 同 memory_neighbors 工具重复；`doctor` 被轻量 `doctor-lite` 取代）：
 
-```bash
-pi memory check-backlinks       # 反向链接完整性（仅 symmetric 类型），只报告不修改
-pi memory graph <slug> -d 2     # 图遍历（返回缩进边树）
-pi memory neighbors <slug>      # 1 跳邻居，供 memory_get include_related 使用
-pi memory doctor                # 健康评分
+```text
+/memory lint                # frontmatter 与结构 lint
+/memory migrate [--dry-run] # 旧格式迁移
+/memory doctor-lite         # 快速健康报告
+/memory check-backlinks     # 反向链接完整性检查
+/memory rebuild --graph|--index   # 重建派生索引 artifact
 ```
 
 ---
@@ -511,7 +516,8 @@ memory_list(filters: { kind?, status?, limit?, cursor? })
   //  不变量。当前实现静默忽略 LLM 传入的 `scope` key。
 
 memory_neighbors(slug: string, options?: { hop?: number, max?: number })
-  → { slug, title, kind, edge_type }[]
+  → { slug, neighbors: Array<{ slug, title, kind, status, confidence, direction, edge_type, distance }> }
+  // 返回 envelope，不是 bare array——便于未来加话题 / cursor。选项 hop 默认 1 (clamp 1..3)，max 默认 20 (clamp 1..100)。
   // 只读图遍历，不写任何关系（替代原名 memory_relate 的读语义）
 ```
 
@@ -827,6 +833,15 @@ pi memory migrate [--dry-run]
 ---
 
 ## 11. 实现路线图
+
+> ⚠️ **2026-05-11 修订**：下述 Phase 1/2/3 路线图已被 ADR 0014（abrain 重定位）+ ADR 0015（LLM retrieval）+ ADR 0016（sediment LLM curator）绿色路径越过。
+>
+> **实际 shipped 状态**：
+> - Phase 1 及 Phase 2 中的“grep-based memory_search” / “trigram dedupe” / “keyword promotion gates” **未落地也不会落地**。`memory_search` 直接上 LLM retrieval（ADR 0015）；sediment 机械 G2–G13 / readiness / rolling / rate / sampling gates 已删除（ADR 0016）；Lane B/D promotion 本身在 abrain 下失去意义（ADR 0014 §D3）。
+> - Phase 3 qmd 集成仍是可选未来 baseline，**不是**`memory_search` 的 fallback path（ADR 0015 D5 明确拒绝 grep degradation）。
+> - 项目层 SOT 从 `<project>/.pensieve/` 迁入 `~/.abrain/projects/<id>/`（ADR 0014 §D2）。下文在路径上请按此设口设。
+>
+> **以下 checklist 保留作为历史设计记录。**
 
 ### Phase 1：Project 层 + 格式标准化（MVP）
 

@@ -71,7 +71,7 @@ const EXT_MIME: Record<string, string> = {
  * Models not matching any preference still participate, ordered by
  * cost.input descending as a rough capability proxy.
  *
- * Override via piStack.vision.modelPreferences in settings chain.
+ * Override via top-level `vision.modelPreferences` in `~/.pi/agent/pi-astack-settings.json`.
  */
 const DEFAULT_VISION_PREFS = [
   "openai/gpt-5.5",
@@ -397,7 +397,7 @@ export default function (pi: ExtensionAPI) {
     promptGuidelines: [
       "Use vision when the user provides an image (screenshot, photo, diagram) and your current model cannot process images.",
       "Prefer imageBase64 for images already in context. Use path for local image files within the project.",
-      "The tool auto-selects the best vision model per your piStack.vision.modelPreferences setting.",
+      "The tool auto-selects the best vision model per your `vision.modelPreferences` setting in pi-astack-settings.json (top-level, no piStack wrapper).",
       "Returns the text analysis from the vision model, along with model info and token usage.",
       "For path-based loads: only .png/.jpg/.jpeg/.webp/.gif extensions are allowed, and paths are confined to the project root.",
     ],

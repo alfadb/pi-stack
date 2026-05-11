@@ -173,7 +173,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "imagine(prompt, size?, quality?, style?, model?)",
     promptGuidelines: [
       "Use imagine when the user asks for image generation, illustration, or visual creation.",
-      "Model is always gpt-image-2. Default quality is hd. Default size is 1024x1024.",
+      "Model defaults to gpt-image-2 (override via `model` param if you really need a different OpenAI image model). size / quality default to whatever the OpenAI Responses API picks unless you explicitly pass them; common values are size: 1024x1024 | 1792x1024 | 1024x1792, quality: standard | hd.",
       "Uses your existing openai provider API key — no additional configuration needed.",
       "The tool saves the PNG to .pi-astack/imagine/ and returns it inline when the caller supports images.",
     ],
@@ -182,7 +182,7 @@ export default function (pi: ExtensionAPI) {
         description: "Image description/prompt — be detailed and specific",
       }),
       model: Type.Optional(Type.String({
-        description: "Image model (always gpt-image-2)",
+        description: "OpenAI image model id (defaults to gpt-image-2; pass another model id only if you need a non-default OpenAI image model)",
       })),
       size: Type.Optional(Type.String({
         description: "Image dimensions: 1024x1024, 1792x1024, or 1024x1792",
