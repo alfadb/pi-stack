@@ -45,7 +45,7 @@ alfadb/pi-astack/
 │       ├── abrain-pensieve-migration.md  # ✅ .pensieve/ → ~/.abrain/projects/<id>/ 迁移计划 P1-P7 (ADR 0014 §D2)
 │       ├── vault-bootstrap.md         # ✅ vault unlock 平台支持矩阵 v1.4 (portable-identity 优先)
 │       ├── phase-2.3-promotion-gates.md  # promotion gates 1-5 详细设计稿（等 Phase 1.4 burn-in 后实施）
-│       ├── memory-search-llm-upgrade.md  # 🟡 ADR 0015 实施路径 Phase 0/1 done；Phase 2 semantic dedupe pending
+│       ├── memory-search-llm-upgrade.md  # ✅ ADR 0015 Phase 0/1 done；Phase 2 被 ADR 0016 改为 curator lifecycle loop 并已落地
 │       └── open-questions.md          # 适配新架构的待澄清问题
 │
 ├── extensions/                        # ✅ pi 行为扩展（alfadb own）
@@ -139,11 +139,11 @@ v7 markdown+git 记忆架构的只读 Facade。注册 4 个 LLM-facing 工具：
 | `memory_list(filters?)` | 分页浏览条目 metadata，主要用于人工/debug |
 | `memory_neighbors(slug, options?)` | 只读遍历 frontmatter relations + `[[wikilink]]`，不写关系 |
 
-读取范围：当前项目 `.pensieve/` + 可选 `ABRAIN_ROOT`（默认 `~/.abrain`，存在才扫描）。写入仍由计划中的 `extensions/sediment/` 独占。
+读取范围：当前项目 `.pensieve/` + 可选 `ABRAIN_ROOT`（默认 `~/.abrain`，存在才扫描）。写入由 `extensions/sediment/` 独占；主会话不暴露写工具。
 
 Human-facing 命令：
 - `/memory lint [path]`：执行 T1-T10 Timeline/frontmatter lint，不注册为 LLM tool
-- `/memory doctor-lite [path]`：汇总 lint / graph / index / migration / sediment dry-run 状态
+- `/memory doctor-lite [path]`：汇总 lint / graph / index / migration / sediment auto-write audit 状态
 - `/memory migrate --dry-run [--report] [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划；`--report` 写 `.pi-astack/memory/migration-report.md`
 - `/memory check-backlinks [path]`：in-memory 构建 graph snapshot，报告 dead links 与缺失 symmetric backlinks
 - `/memory rebuild --graph [path]`：写入 derived graph index（project: `.index/graph.json`；world: `.state/index/graph.json`）

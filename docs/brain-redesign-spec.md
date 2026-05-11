@@ -371,7 +371,7 @@ P3 实施阶段必须交付一组路由 fixture（正反例各 5-10 条）覆盖
 memory_search(query)
 ```
 
-**签名无 `scope` 形参**。三个 surface 的混合排序完全在 facade 内决定（§4.1 boost 系数）。ADR 0015 之后，`query` 语义扩展为自然语言 prompt 或关键词，内部由 LLM 跨中英文/同义改述做语义匹配；schema 仍不暴露 scope/backend/source_path。
+**签名无 `scope` 形参**。三个 surface 的混合排序完全在 facade 内决定（§4.1 boost 系数）。ADR 0015 之后，`query` 语义是 natural-language retrieval prompt，内部由 LLM 跨中英文/同义改述做语义匹配；schema 仍不暴露 scope/backend/source_path。
 
 > **为什么不暴露 scope**：Round 3 复核 Opus P0-3 指出——只要 `scope` 出现在 schema 里，LLM 在召回压力下必会传（“为了准确你只看当前项目吧”），facade 的 ranking 控制权悸然外迁。不变量 #3 为此出在每个 ranking surface 升级为硬约束。
 

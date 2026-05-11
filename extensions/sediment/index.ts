@@ -32,7 +32,7 @@ import { buildRunWindow, checkpointSummary, loadSessionCheckpoint, saveSessionCh
 import { curateProjectDraft, type CuratorAudit } from "./curator";
 import { detectProjectDuplicate } from "./dedupe";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
-import { runLlmExtractorDryRun, summarizeLlmExtractorDryRun, type LlmExtractorDryRunResult } from "./llm-extractor";
+import { runLlmExtractor, summarizeLlmExtractorResult, type LlmExtractorResult } from "./llm-extractor";
 import { listMigrationBackups, migrateOne, restoreMigrationBackup } from "./migration";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 
@@ -658,9 +658,9 @@ interface ModelRegistryLike {
 
 type AutoWriteLaneOutcome =
   | { kind: "ineligible"; eligibility: { eligible: false; reason: string; detail?: Record<string, unknown> } }
-  | { kind: "llm_skip"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
-  | { kind: "llm_error"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
-  | { kind: "wrote"; drafts: ProjectEntryDraft[]; results: WriteProjectEntryResult[]; curatorAudits?: CuratorAudit[]; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorDryRun>; llmDurationMs: number; writeStart: number; rawTextStored?: string; rawTextTruncated?: boolean };
+  | { kind: "llm_skip"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorResult>; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
+  | { kind: "llm_error"; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorResult>; llmDurationMs: number; rawTextStored?: string; rawTextTruncated?: boolean }
+  | { kind: "wrote"; drafts: ProjectEntryDraft[]; results: WriteProjectEntryResult[]; curatorAudits?: CuratorAudit[]; llmAuditSummary: ReturnType<typeof summarizeLlmExtractorResult>; llmDurationMs: number; writeStart: number; rawTextStored?: string; rawTextTruncated?: boolean };
 
 function truncateRawForAudit(raw: string | undefined, cap: number): { text?: string; truncated?: boolean } {
   if (!raw || cap <= 0) return {};
@@ -697,15 +697,15 @@ async function tryAutoWriteLane(args: {
     };
   }
 
-  // 1. Run extractor. runLlmExtractorDryRun is misnamed historically —
-  //    it does not write or commit; it just runs the model + parses.
-  //    We use it directly as the live auto-write extractor.
+  // 1. Run extractor. It does not write or commit; it only runs the
+  //    model and parses the MEMORY/SKIP response. The curator/writer
+  //    stages below decide and persist lifecycle operations.
   const llmStart = Date.now();
-  let llmResult: LlmExtractorDryRunResult;
+  let llmResult: LlmExtractorResult;
   try {
-    llmResult = await runLlmExtractorDryRun(window.text, {
+    llmResult = await runLlmExtractor(window.text, {
       settings,
-      modelRegistry: modelRegistry as Parameters<typeof runLlmExtractorDryRun>[1]["modelRegistry"],
+      modelRegistry: modelRegistry as Parameters<typeof runLlmExtractor>[1]["modelRegistry"],
       signal: args.signal,
     });
   } catch (e: any) {
@@ -713,7 +713,7 @@ async function tryAutoWriteLane(args: {
   }
   const llmDurationMs = Date.now() - llmStart;
 
-  const llmAuditSummary = summarizeLlmExtractorDryRun(llmResult, {
+  const llmAuditSummary = summarizeLlmExtractorResult(llmResult, {
     maxCandidates: settings.extractorMaxCandidates,
     rawPreviewChars: settings.extractorAuditRawChars,
   });

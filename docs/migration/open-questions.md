@@ -11,7 +11,7 @@
 - **知识模型**: 7 种 kind + confidence 0-10 + lifetime 正交（§4）
 - **读写分离**: sediment 单写，主会话只读（§8）
 - **读工具**: `memory_search/get/list/neighbors`（§6.1）
-- **写工具**: `memory_write/update/deprecate/promote/relate`（仅 sediment，§6.2）
+- **写入 substrate**: 不暴露 LLM-facing 写工具；sediment 内部调用 writer substrate（create/update/merge/archive/supersede/delete/skip，§6.2 + ADR 0016）
 - **Facade 模式**: LLM 只看到统一读接口，scope/backend 仅内部可见（§5.4）
 - **Sediment pipeline**: extract → sanitize → classify → dedupe → lint → lock → write md → git commit → audit（§8.2）
 - **实施路线**: 6 个 Phase（§11）

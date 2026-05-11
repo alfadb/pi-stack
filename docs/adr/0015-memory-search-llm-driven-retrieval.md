@@ -51,7 +51,7 @@ rg --files → parseEntry → tokenize(title + slug + compiled_truth)
 ### D1. 接口不变，内部走 LLM
 
 ```
-memory_search(query: string /* 自然语言 prompt 或关键词 */, filters?)
+memory_search(query: string /* natural-language retrieval prompt */, filters?)
   → SearchResult[]  // schema 保持不变
 ```
 
@@ -87,7 +87,7 @@ Stage 2 (精排，可配模型，默认 deepseek-v4-pro，thinking=high)：
 | Stage 2 | `deepseek/deepseek-v4-pro` + `thinking=high` | 同 family 国内速度；reasoning 强，跨 entry 推理需要；中文理解原生强；与 sediment extractor 共享，模型 cache 命中 |
 
 **单 family 风险**：sediment extractor 也是 v4-pro，deepseek 服务一挂两个子系统同时失能。可接受理由：
-- sediment 是 fire-and-forget + rolling pass-rate fuse，挂了下轮重试
+- sediment 是 fire-and-forget；ADR 0016 已删除 rolling pass-rate fuse，失败通过 audit/git 诊断，auto-write 不把低准确度 fallback 结果写入知识库
 - search 用 hard error（不 fallback grep），用户能立即感知模型/网络问题并修复，不拿低准确度结果继续工作
 - 单 family 风险换国内速度 + reasoning + 中文质量，对 alfadb 主用场景是合理 trade-off
 - **任何用户/任何环境随时可通过 settings 切异构**（D4）

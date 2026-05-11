@@ -418,14 +418,16 @@ check("formatStatus A with keychain backend: shows 'master stored in: macOS Keyc
   if (!out.includes("macOS Keychain")) throw new Error("missing 'macOS Keychain' description");
 });
 
-check("formatStatus A says 'P0c (vaultWriter + /secret) not yet implemented'", () => {
-  // Verify the new note wording — directs user to the actually-pending milestone.
+check("formatStatus A distinguishes shipped P0c.write from pending P0c.read", () => {
+  // Verify status text does not mislead users: /secret write/list/forget are
+  // shipped, while release / bash injection / redaction remain pending.
   const info = detectBackend(deps({}));
   const out = formatStatus(info, false, {
     backend: "ssh-key", identity: "/x", vaultMasterPresent: true, vaultMasterMode: 0o600,
   });
-  if (!out.includes("P0c")) throw new Error("missing 'P0c' note");
-  if (!out.includes("not yet implemented")) throw new Error("missing 'not yet implemented'");
+  if (!out.includes("P0c.write implemented")) throw new Error("missing shipped P0c.write note");
+  if (!out.includes("P0c.read")) throw new Error("missing pending P0c.read note");
+  if (out.includes("cannot write")) throw new Error("stale cannot-write wording leaked");
 });
 
 // ── 9. activate() respects PI_ABRAIN_DISABLED=1 ─────────────────

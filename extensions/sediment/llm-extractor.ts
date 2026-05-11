@@ -7,7 +7,7 @@ interface ModelRegistryLike {
   getApiKeyAndHeaders(model: unknown): Promise<{ ok: boolean; apiKey?: string; headers?: Record<string, string>; error?: string }>;
 }
 
-export interface LlmExtractorDryRunResult {
+export interface LlmExtractorResult {
   ok: boolean;
   model: string;
   stopReason?: string;
@@ -118,8 +118,8 @@ function hashRaw(raw: string): string {
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
-export function summarizeLlmExtractorDryRun(
-  result: LlmExtractorDryRunResult,
+export function summarizeLlmExtractorResult(
+  result: LlmExtractorResult,
   opts: { maxCandidates: number; rawPreviewChars: number },
 ): LlmExtractorAuditSummary {
   const raw = result.rawText ?? "";
@@ -160,14 +160,14 @@ export function summarizeLlmExtractorDryRun(
   };
 }
 
-export async function runLlmExtractorDryRun(
+export async function runLlmExtractor(
   windowText: string,
   deps: {
     settings: SedimentSettings;
     modelRegistry: ModelRegistryLike;
     signal?: AbortSignal;
   },
-): Promise<LlmExtractorDryRunResult> {
+): Promise<LlmExtractorResult> {
   const parsed = parseModelRef(deps.settings.extractorModel);
   if (!parsed) {
     return { ok: false, model: deps.settings.extractorModel, error: "invalid extractorModel; expected provider/model" };

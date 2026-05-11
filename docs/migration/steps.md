@@ -28,15 +28,15 @@
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
 - [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`；`/sediment migrate-one` 成功后自动重建）
 - [x] graph 派生索引：已实现 `buildGraphSnapshot` + `/memory check-backlinks [path]` + `/memory rebuild --graph [path]`；`/sediment migrate-one` 成功后自动重建 `.pensieve/.index/graph.json`
-- [ ] Sediment project-only pipeline：writer substrate 已实现（validate → sanitize → deterministic dedupe → lint → lock → atomic write md → git best-effort → audit）；extract/classify/agent_end 自动写仍待实现
+- [x] Sediment project-only pipeline：writer substrate 已实现（validate → sanitize → deterministic dedupe → lint → lock → atomic write md → git best-effort → audit）；explicit `MEMORY:` lane 与 agent_end LLM auto-write curator lane 均已实现
 - [x] Project scope 的 file lock + 错误恢复（writer substrate）
 - [x] 最小脱敏：credential pattern → 写入拒绝（fail-closed）；$HOME 路径替换
 
-**不包含**：World 层、向量搜索、promotion gates、passive nudge、语义 dedupe
+**不包含**：World 层物理迁移、向量搜索、promotion gates、passive nudge；ADR 0016 已明确不做 semantic-dedupe hard gate，语义判断交给 curator
 
 ### Phase 1.0 — doctor-lite aggregate status
 
-**实现状态（2026-05-08）**：`extensions/memory/doctor.ts` 已实现 `/memory doctor-lite [path]`，聚合 Phase 1 关键状态，便于判断 legacy migration / graph / lint / sediment dry-run 是否就绪。
+**实现状态（2026-05-08；2026-05-11 同步）**：`extensions/memory/doctor.ts` 已实现 `/memory doctor-lite [path]`，聚合 Phase 1 关键状态，便于判断 legacy migration / graph / lint / sediment auto-write audit 是否就绪。
 
 汇总范围：
 - lint error/warning
@@ -214,12 +214,12 @@ memory_search(query: "dispatch agent prompt")
 - 成功后自动重建 `.pensieve/.index/graph.json` 与 `.pensieve/_index.md`；derived rebuild 失败不会回滚已完成迁移/恢复，但会写入返回值/audit
 
 已完成 LLM auto-write lane（A1 + A2 + A3，2026-05-08）：
-- A1（安全前置 G2-G8）：`writeProjectEntry.opts.policy` + `forceProvisional`；`validateProjectEntryDraft(draft, policy)` overlay（`disallowMaxim` / `disallowArchived` / `maxConfidence`）；sanitizer 扩 4 pattern（JWT / PEM / AWS / connection URL）；`normalizeCompiledTruth` 对 `^---$` body 行退转；triggerPhrases 过 sanitizer；extractor prompt 加 Trust Boundary 指令。
+- A1（历史实现）：早期曾用 `writeProjectEntry.opts.policy`、`forceProvisional`、`disallowMaxim`、`maxConfidence`、G13 near-duplicate 等机械 gates 保护 LLM auto-write。
   - **ADR 0016 更新（2026-05-10）**：G2-G13 / readiness / rolling / rate / sampling 机械门控已删除；不再强制 provisional、不禁 maxim、不 cap confidence、不用 G13 hard reject 代替语义判断。hard gate 收敛为敏感信息 + 存储完整性。
-  - 新增 `updateProjectEntry(slug, patch, ...)` writer substrate；`extensions/sediment/curator.ts` 已接入 `memory_search` lookup loop，当前支持 create/update/merge/archive/supersede/delete/skip，避免 append-only 新增。
+  - 当前实现新增 `updateProjectEntry(slug, patch, ...)` / `mergeProjectEntries()` / `archiveProjectEntry()` / `supersedeProjectEntry()` / `deleteProjectEntry()` writer substrate；`extensions/sediment/curator.ts` 已接入 `memory_search` lookup loop，当前支持 create/update/merge/archive/supersede/delete/skip，避免 append-only 新增。
 - A2（接入 + G9-G12）：`agent_end` 在 `parseExplicitMemoryBlocks(window) === []` 之后调用 `tryAutoWriteLane`。闸门顺序：
   1. modelRegistry 存在 + `autoLlmWriteEnabled=true`
-  2. `runLlmExtractorDryRun()` → `parseExplicitMemoryBlocks(rawText)` → `previewExtraction(drafts)` schema-only 过滤
+  2. `runLlmExtractor()` → `parseExplicitMemoryBlocks(rawText)` → `previewExtraction(drafts)` schema-only 过滤
   3. `curateProjectDraft()` 调 `memory_search` 找近邻 → curator LLM 输出 create/update/merge/archive/supersede/delete/skip
   4. `writeProjectEntry()` / `updateProjectEntry()` / `mergeProjectEntries()` / `archiveProjectEntry()` / `supersedeProjectEntry()` / `deleteProjectEntry()` 写盘；git/audit 负责回滚与追踪。
 - audit：`operation: "auto_write"` 含 candidate_count / candidates / results / curator decisions / **raw_text 全文** (cap `autoWriteRawAuditChars` 默认 8000) / stage_ms.llm_total。如果 LLM 打一鱼三天这些都够复现。
@@ -312,7 +312,7 @@ echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
 - 并发查询 ProjectStore + WorldStore
 - project boost：scope=project 且属于当前 project → ×1.5
 - 混合排序后截断 top-20
-- WorldStore 不存在 → degraded 标注，不报错
+- WorldStore 不存在 → 空结果并继续；ADR 0015 `memory_search` result card 不暴露 degraded 字段，LLM/model/auth/network/JSON 失败 hard error
 
 ### Phase 2.3 — Promotion gates 基础版
 
@@ -381,8 +381,8 @@ npm run smoke:memory
 覆盖 memory + sediment 的关键路径：tool/command 注册、frontmatter EOF parsing、lint、search、graph/index rebuild、migration dry-run report、doctor-lite、sanitize、writer create/update、storage-only dedupe、checkpoint window、explicit extractor、LLM extractor summary、world `ABRAIN_ROOT` generated paths。
 
 ### 安全测试
-- memory_write/update/deprecate 工具仅 sediment 可见
-- 主会话调 memory_write → 工具不存在
+- 主会话只注册 `memory_search/get/list/neighbors` 读工具；不注册 LLM-facing `memory_write/update/deprecate/promote/relate`
+- sediment 写入能力仅作为 sidecar 内部 writer substrate 暴露（`writeProjectEntry` / update / merge / archive / supersede / delete）
 - credential pattern 命中 → 写入拒绝
 - $HOME 路径被替换为 `$HOME/...`
 - 脱敏规则误伤 → fail-closed

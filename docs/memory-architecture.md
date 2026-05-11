@@ -333,7 +333,7 @@ world/                                    ├── locks/
 > qmd 作为 Facade 的 QmdBackend 接入。完整集成方案见附录 C。
 
 ```
-memory_search(query):
+historical/future hybrid baseline（not current ADR 0015 runtime）:
   1. 并发查询 ProjectStore + WorldStore
   2. 每个 store:
      a. 如果向量索引可用 → 向量语义搜索（top-50）
@@ -387,7 +387,7 @@ memory_search(query):
                   memory_search | memory_get | memory_list | memory_neighbors
                               │
                         Memory Facade
-                    (路由、归并、RRF 融合、排序、degrade)
+                    (解析 markdown stores；ADR 0015 search 走双阶段 LLM rerank，无 grep/degrade fallback)
                      /                    \
             ProjectStore               WorldStore
     (rg + optional qmd/vector)    (rg + optional qmd/vector)
@@ -406,8 +406,8 @@ interface MemoryBackend {
 }
 ```
 - Project/World store 的行为模式对称（都是 markdown 后端），同一接口减少实现分支
-- Facade 负责超时（单 store 3s timeout）、partial result（一个 store 超时另一个仍返回，标注 degraded）
-- ABRAIN_ROOT 未设置或 ~/.abrain 不存在时 → WorldStore 空结果，degraded 标注，不报错
+- Facade 负责合并当前项目 `.pensieve/` 与可用的 `~/.abrain/` entries；ADR 0015 `memory_search` runtime 不返回 `degraded`，LLM/model/auth/network/JSON 失败 hard error。
+- ABRAIN_ROOT 未设置或 `~/.abrain` 不存在时 → WorldStore 空结果，不向 LLM-facing search card 暴露 backend/scope/degraded。
 
 ### 5.5 ~/.abrain 设计（决策 3）
 
@@ -494,10 +494,10 @@ pi memory doctor                # 健康评分
 ### 6.1 读工具（主 session + dispatch 子进程可调用）
 
 ```
-memory_search(query: string, filters?: { kinds?, status?, limit? })
-  → SearchResult[] { slug, title, summary, score, kind, status, confidence, degraded?, related_slugs }
-  // slug 为 bare slug（不含 scope 前缀），scope 不暴露给 LLM
-  // 默认搜索当前 project + world；混合排序，LLM 不区分来源
+memory_search(query: natural-language retrieval prompt, filters?: { kinds?, status?, limit? })
+  → SearchResult[] { slug, title, summary, score, kind, status, confidence, created, updated, rank_reason?, timeline_tail, related_slugs }
+  // slug 为 bare slug（不含 scope 前缀），scope/backend/source_path 不暴露给 LLM
+  // ADR 0015 双阶段 LLM retrieval；无 grep fallback，无 degraded 字段；默认搜索当前 project + world，LLM 不区分来源
 
 memory_get(slug: string, options?: { include_related?: boolean })
   → KnowledgeEntry { ...full entry including timeline, scope, source_path }
@@ -515,28 +515,20 @@ memory_neighbors(slug: string, options?: { hop?: number, max?: number })
   // 只读图遍历，不写任何关系（替代原名 memory_relate 的读语义）
 ```
 
-### 6.2 写工具（仅 sediment sidecar 可见）
+### 6.2 写入 substrate（仅 sediment sidecar 内部可见）
+
+主会话 **不注册** LLM-facing `memory_write/update/delete/promote/relate` 工具。ADR 0016 后，写入能力是 sediment 内部 writer substrate：
 
 ```
-memory_write(entry, destination: 'project' | 'world')
-  → { slug, status: 'created' | 'merged' | 'rejected', reason? }
-
-memory_update(slug, patch: { compiled_truth?, status?, confidence?, lifetime?, trigger_phrases?, relations? })
-  → void
-  // 受限 patch：仅允许更新 frontmatter 字段 + compiled truth 正文
-  // 不允许修改 id / scope / kind / created / schema_version
-  // timeline 不能通过 update 修改——仅通过 sediment 追加
-
-memory_deprecate(slug, reason, superseded_by?)
-  → void
-
-memory_promote(slug, target_scope: 'world')
-  → { slug, promoted: boolean, gates_passed: string[] }
-
-memory_relate(from_slug: string, to_slug: string, relation: string)
-  → void
-  // 声明关系并写入 frontmatter（写操作，仅 sediment）
+writeProjectEntry(draft)
+updateProjectEntry(slug, patch)
+mergeProjectEntries(target, sources, patch)
+archiveProjectEntry(slug)
+supersedeProjectEntry(oldSlug, newSlug?)
+deleteProjectEntry(slug, mode = "soft")
 ```
+
+这些内部操作由 Lane A explicit `MEMORY:` 或 Lane C auto-write curator 调用；主会话仍只有 `memory_search/get/list/neighbors` 只读工具。`memory_neighbors` 是只读图遍历，不是旧 `memory_relate` 写语义。
 
 ---
 
@@ -591,7 +583,7 @@ dedupe: 查询已有条目。Phase 1 使用确定性 dedupe（slug 精确相等 
   ↓
 lint: 内存中校验 frontmatter schema + timeline 格式
   ↓
-acquire lock: 获取对应 scope 的 file lock（`.state/locks/sediment.lock`）
+acquire lock: 获取 project 级 file lock（`.pi-astack/sediment/locks/sediment.lock`）
   ↓
 write: 原子写入 markdown 文件（先写 tmp，再 rename）——这是事务核心
   ↓
@@ -634,7 +626,7 @@ P 引用了具体文件路径 / 模块名 / API 名？
 | Markdown 解析失败 | 记录 `sediment-events.jsonl`，跳过该条目，不阻断其他条目 |
 | Git 仓库不存在 | 允许写 markdown，标记 `git_unavailable`，doctor 中 warning；不写 graph.json（避免成功假象） |
 | Git push 冲突 | 保留本地 commit，标记 pending，**下**次写入前先 pull --rebase |
-| Lock 获取超时（>5s） | 退化为只读 + 入队 pending queue（`.state/locks/pending.jsonl`），下次 session 重试 |
+| Lock 获取超时（>5s） | writer 返回/抛出 lock timeout；auto-write audit 标记失败，git/audit 是诊断面。当前不实现 pending queue，也不把窗口标记为已写成功。 |
 | 磁盘满 / 权限错误 | 记录错误到 sediment-events.jsonl，通知主 session（ui.notify） |
 | 写入中途崩溃 | tmp 文件残留，下次启动时清理 `.tmp-*` 文件；graph.json 从 markdown 全量重建 |
 | ABRAIN_ROOT 未设置 | WorldStore 空返回；写入 world 的 attempt 记录到 `.state/pending-world-intents.jsonl`（格式：`{"ts","session_id","slug","kind","confidence","title","reason"}`），等 ABRAIN 可用后 sediment 重放或人工确认。不自动改 scope |

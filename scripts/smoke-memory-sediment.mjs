@@ -155,7 +155,7 @@ async function main() {
     const { buildRunWindow, saveCheckpoint, loadCheckpoint, loadSessionCheckpoint, saveSessionCheckpoint } = req("./sediment/checkpoint.js");
     const { detectProjectDuplicate } = req("./sediment/dedupe.js");
     const { parseExplicitMemoryBlocks } = req("./sediment/extractor.js");
-    const { summarizeLlmExtractorDryRun } = req("./sediment/llm-extractor.js");
+    const { summarizeLlmExtractorResult } = req("./sediment/llm-extractor.js");
     const { sanitizeForMemory } = req("./sediment/sanitizer.js");
     const compactionTunerExt = req("./compaction-tuner/index.js").default;
     const { classifyDecision, DEFAULT_COMPACTION_TUNER_SETTINGS } = req("./compaction-tuner/index.js");
@@ -645,7 +645,7 @@ END_MEMORY`;
     const crossEntryDrafts = parseExplicitMemoryBlocks(crossEntryFenceDrift);
     assert(crossEntryDrafts.length === 1 && crossEntryDrafts[0].title === "Cross Entry Real Insight", `entry-local fence reset failed: ${crossEntryDrafts.map(d => d.title).join(", ")}`);
 
-    const llmSummary = summarizeLlmExtractorDryRun({ ok: true, model: "x/y", rawText: "SKIP", extraction: { count: 0, drafts: [] } }, { maxCandidates: 3, rawPreviewChars: 10 });
+    const llmSummary = summarizeLlmExtractorResult({ ok: true, model: "x/y", rawText: "SKIP", extraction: { count: 0, drafts: [] } }, { maxCandidates: 3, rawPreviewChars: 10 });
     assert(llmSummary.quality.reason === "skip" && llmSummary.quality.passed, "llm summary skip gate failed");
 
     // === Safety/storage checks retained after ADR 0016 ==================
@@ -876,7 +876,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       // Recreate the auto-write substrate directly. The hook's live path
       // additionally calls the curator loop; here we lock in extractor,
       // schema validation, writer create, and writer update behavior.
-      const { runLlmExtractorDryRun } = req("./sediment/llm-extractor.js");
+      const { runLlmExtractor } = req("./sediment/llm-extractor.js");
       const { previewExtraction, parseExplicitMemoryBlocks: parseBlocks } = req("./sediment/extractor.js");
 
       const a2Settings = {
@@ -888,7 +888,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
 
       // Run the extractor directly (the in-process flow that
       // tryAutoWriteLane uses) for response[0]: valid block.
-      const r1 = await runLlmExtractorDryRun("--- ENTRY 1 t1 message/assistant ---\nWe figured out X.", {
+      const r1 = await runLlmExtractor("--- ENTRY 1 t1 message/assistant ---\nWe figured out X.", {
         settings: a2Settings,
         modelRegistry: mockModelRegistry,
       });
@@ -914,14 +914,14 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| captured \| smoke A2 e2e$/m.test(r1Written), `r1 timeline must use ISO datetime, got:\n${r1Written}`);
 
       // Response[1]: SKIP. Caller should treat as no candidates.
-      const r2 = await runLlmExtractorDryRun("--- ENTRY 2 t2 message/assistant ---\nNothing notable.", {
+      const r2 = await runLlmExtractor("--- ENTRY 2 t2 message/assistant ---\nNothing notable.", {
         settings: a2Settings,
         modelRegistry: mockModelRegistry,
       });
       assert(r2.ok && r2.rawText === "SKIP", `r2 SKIP path: ${JSON.stringify(r2)}`);
 
       // Response[2]: maxim+confidence=9. Schema-only validation allows it.
-      const r3 = await runLlmExtractorDryRun("--- ENTRY 3 t3 message/assistant ---\nWe should ALWAYS do X.", {
+      const r3 = await runLlmExtractor("--- ENTRY 3 t3 message/assistant ---\nWe should ALWAYS do X.", {
         settings: a2Settings,
         modelRegistry: mockModelRegistry,
       });

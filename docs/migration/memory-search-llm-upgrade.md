@@ -298,15 +298,13 @@ LLM 在 stage 2 精排时已经做过语义相似和 timeline 判断；sediment 
 [x] Phase 1.4: 改 index.ts 工具描述
 [x] Phase 1.5: 改 smoke-memory-sediment.mjs 加 LLM 路径 mock
 [x] Phase 1.6: npm run smoke:memory PASS
-[ ] Phase 1.7: 重启 pi 后实测 5 个真实 query 验证（当前进程仍加载旧 extension）
-[ ] Phase 1.8: commit + push（ADR 0015 Accepted；Phase 2 pending）
-[ ] [burn-in 1-2 天]
-[ ] Phase 2.1: 改 extensions/sediment/dedupe.ts 加 semanticDedupe
-[ ] Phase 2.2: 改 sediment/settings.ts + schema
-[ ] Phase 2.3: 改 writer.ts 接入
-[ ] Phase 2.4: 改 audit log 扩展
-[ ] Phase 2.5: smoke + 实测同义改述被拒
-[ ] Phase 2.6: commit + push
-[ ] [burn-in 再 1-2 天观察 D6 是否消除]
-[ ] Phase 3: 文档对齐 + ADR 0015 + ADR 0010 状态升级 + commit + push
+[x] Phase 1.7: 重启 pi 后实测真实 query；result card 带 created/updated/rank_reason/timeline_tail，且无 degraded
+[x] Phase 1.8: commit + push（ADR 0015 Accepted；Phase 0/1 landed）
+[x] Phase 2.1: ADR 0016 改写目标：不做 semanticDedupe hard reject，改为 memory_search lookup + curator lifecycle decision
+[x] Phase 2.2: 删除 semantic dedupe/readiness/rate/sampling/rolling settings 与 schema
+[x] Phase 2.3: writer substrate 接入 update/merge/archive/supersede/delete/skip
+[x] Phase 2.4: audit log 扩展 curator neighbors / decision / operation rationale
+[x] Phase 2.5: smoke 覆盖 lifecycle ops；live burn-in 观察 update/merge/skip，避免 append-only create
+[x] Phase 2.6: commit + push（ADR 0016 curator loop + lifecycle ops landed）
+[ ] Phase 3: 文档收敛 + stale memory entries 修正 + writer-level correlation id 增强
 ```

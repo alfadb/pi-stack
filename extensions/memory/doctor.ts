@@ -47,11 +47,13 @@ export interface DoctorLiteReport {
     error?: string;
   };
   sediment: {
-    llmDryRunCount: number;
-    llmDryRunPass: number;
-    llmDryRunFail: number;
-    llmDryRunPassRate: number;
-    llmReasons: Record<string, number>;
+    autoWriteCount: number;
+    autoWriteApplied: number;
+    autoWriteSkipped: number;
+    autoWriteFailed: number;
+    explicitExtractCount: number;
+    operationCounts: Record<string, number>;
+    reasons: Record<string, number>;
   };
 }
 
@@ -75,17 +77,19 @@ function projectRootForPensieveRoot(root: string): string | undefined {
   return path.basename(root) === ".pensieve" ? path.dirname(root) : undefined;
 }
 
-async function readLlmDryRunStats(root: string) {
+async function readSedimentAuditStats(root: string) {
   // root may be either a `.pensieve` directory or a project root; resolve
   // to the project root before computing the .pi-astack/sediment audit path.
   const projectRoot = path.basename(root) === ".pensieve" ? path.dirname(root) : root;
   const file = sedimentAuditPath(projectRoot);
-  const stats = {
-    llmDryRunCount: 0,
-    llmDryRunPass: 0,
-    llmDryRunFail: 0,
-    llmDryRunPassRate: 0,
-    llmReasons: {} as Record<string, number>,
+  const stats: DoctorLiteReport["sediment"] = {
+    autoWriteCount: 0,
+    autoWriteApplied: 0,
+    autoWriteSkipped: 0,
+    autoWriteFailed: 0,
+    explicitExtractCount: 0,
+    operationCounts: {},
+    reasons: {},
   };
 
   let raw = "";
@@ -99,14 +103,23 @@ async function readLlmDryRunStats(root: string) {
     if (!line.trim()) continue;
     let event: any;
     try { event = JSON.parse(line); } catch { continue; }
-    if (event.operation !== "llm_dry_run" || !event.llm?.quality) continue;
-    stats.llmDryRunCount++;
-    if (event.llm.quality.passed) stats.llmDryRunPass++;
-    else stats.llmDryRunFail++;
-    const reason = event.llm.quality.reason || "unknown";
-    stats.llmReasons[reason] = (stats.llmReasons[reason] ?? 0) + 1;
+    const operation = String(event.operation || "unknown");
+    stats.operationCounts[operation] = (stats.operationCounts[operation] ?? 0) + 1;
+
+    if (operation === "explicit_extract") stats.explicitExtractCount++;
+    const isAutoWrite = event.lane === "auto_write" || operation === "auto_write";
+    if (!isAutoWrite) continue;
+
+    stats.autoWriteCount++;
+    if (operation === "auto_write") stats.autoWriteApplied++;
+    else if (operation === "skip") stats.autoWriteSkipped++;
+
+    const reason = event.reason || event.llm?.quality?.reason || event.llm?.error;
+    if (reason) stats.reasons[String(reason)] = (stats.reasons[String(reason)] ?? 0) + 1;
+
+    const failed = event.llm?.ok === false || /error|failed|abort|unavailable|exception/i.test(String(event.reason || event.llm?.error || ""));
+    if (failed) stats.autoWriteFailed++;
   }
-  stats.llmDryRunPassRate = stats.llmDryRunCount === 0 ? 0 : stats.llmDryRunPass / stats.llmDryRunCount;
   return stats;
 }
 
@@ -174,7 +187,7 @@ export async function runDoctorLite(
   const lint = await lintTarget(absTarget, settings, signal);
   const migration = await planMigrationDryRun(absTarget, settings, signal, cwd);
   const migrationBackups = await readMigrationBackupStats(root, settings);
-  const sediment = await readLlmDryRunStats(root);
+  const sediment = await readSedimentAuditStats(root);
 
   let graph: DoctorLiteReport["graph"];
   try {
@@ -289,16 +302,17 @@ export function formatDoctorLiteReport(report: DoctorLiteReport): string {
     `- Returned: ${report.migrationBackups.returned}`,
     `- Build: ${report.migrationBackups.error ? `failed (${report.migrationBackups.error})` : "ok"}`,
     "",
-    "## Sediment LLM Dry-Run",
-    `- Runs: ${report.sediment.llmDryRunCount}`,
-    `- Pass: ${report.sediment.llmDryRunPass}`,
-    `- Fail: ${report.sediment.llmDryRunFail}`,
-    `- Pass rate: ${report.sediment.llmDryRunPassRate.toFixed(3)}`,
+    "## Sediment Auto-Write Audit",
+    `- Auto-write events: ${report.sediment.autoWriteCount}`,
+    `- Applied: ${report.sediment.autoWriteApplied}`,
+    `- Skipped: ${report.sediment.autoWriteSkipped}`,
+    `- Failed/error-like: ${report.sediment.autoWriteFailed}`,
+    `- Explicit extracts: ${report.sediment.explicitExtractCount}`,
   ];
 
   const backupStateEntries = Object.entries(report.migrationBackups.stateCounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   if (backupStateEntries.length > 0) {
-    const insertAt = lines.indexOf("## Sediment LLM Dry-Run") - 1;
+    const insertAt = lines.indexOf("## Sediment Auto-Write Audit") - 1;
     const backupLines = ["- States:", ...backupStateEntries.map(([state, count]) => `  - ${state}: ${count}`)];
     if (report.migrationBackups.recent.length > 0) {
       backupLines.push("- Recent:");
@@ -309,7 +323,13 @@ export function formatDoctorLiteReport(report: DoctorLiteReport): string {
     lines.splice(insertAt, 0, ...backupLines, "");
   }
 
-  const reasonEntries = Object.entries(report.sediment.llmReasons).sort((a, b) => b[1] - a[1]);
+  const operationEntries = Object.entries(report.sediment.operationCounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (operationEntries.length > 0) {
+    lines.push("- Operations:");
+    for (const [operation, count] of operationEntries) lines.push(`  - ${operation}: ${count}`);
+  }
+
+  const reasonEntries = Object.entries(report.sediment.reasons).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
   if (reasonEntries.length > 0) {
     lines.push("- Reasons:");
     for (const [reason, count] of reasonEntries) lines.push(`  - ${reason}: ${count}`);
