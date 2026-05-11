@@ -29,6 +29,10 @@ export interface VaultBashRunRecord {
   releases: ReleaseSecretResult[];
   envFile: string;
   grantKey: string;
+  /** Original LLM-emitted bash command, BEFORE we wrapped it with the vault env
+   * source line. Surfaced to the user at output-release authorization time so
+   * they can see what ran. Not persisted; cleared with the record. */
+  originalCommand?: string;
 }
 
 export interface VaultBashEnvVar {

@@ -546,6 +546,36 @@ check("activate handles missing registerCommand gracefully", () => {
   }
 });
 
+check("authorization prompt titles disclose key + scope + reason (so the user knows what they're approving)", () => {
+  // formatReleaseAuthorizationTitle must include scope:key and surface the reason.
+  const releaseTitle = indexModule.formatReleaseAuthorizationTitle("global", "github-token", "push to main");
+  if (!releaseTitle.includes("global:github-token")) throw new Error(`release title missing scope:key — ${releaseTitle}`);
+  if (!releaseTitle.includes("push to main")) throw new Error(`release title missing LLM reason — ${releaseTitle}`);
+  if (!releaseTitle.toLowerCase().includes("plaintext")) throw new Error(`release title missing plaintext warning — ${releaseTitle}`);
+  // When LLM omits the reason, prompt must still tell the user that no reason was supplied.
+  const noReasonTitle = indexModule.formatReleaseAuthorizationTitle({ project: "pi-global" }, "db-password", undefined);
+  if (!noReasonTitle.includes("project:pi-global:db-password")) throw new Error(`project scope label missing — ${noReasonTitle}`);
+  if (!noReasonTitle.toLowerCase().includes("none supplied")) throw new Error(`missing fallback reason annotation — ${noReasonTitle}`);
+
+  // formatBashAuthorizationTitle must include the vault keys AND the command preview.
+  const bashTitle = indexModule.formatBashAuthorizationTitle({
+    releases: [{ scope: "global", key: "github-token", value: "<x>", placeholder: "<vault:global:github-token>" }],
+    originalCommand: "curl -H \"Authorization: token $VAULT_github_token\" https://api.github.com/user",
+  });
+  if (!bashTitle.includes("global:github-token")) throw new Error(`bash title missing keys — ${bashTitle}`);
+  if (!bashTitle.includes("curl -H")) throw new Error(`bash title missing command preview — ${bashTitle}`);
+  if (!bashTitle.toLowerCase().includes("encoded")) throw new Error(`bash title missing encoded-secret warning — ${bashTitle}`);
+
+  // Very long values should be truncated so the prompt stays usable.
+  const longCmd = "echo " + "x".repeat(2000) + " tail-marker";
+  const truncated = indexModule.formatBashAuthorizationTitle({
+    releases: [{ scope: "global", key: "k", value: "v", placeholder: "<vault:global:k>" }],
+    originalCommand: longCmd,
+  });
+  if (truncated.length > 1000) throw new Error(`bash title not truncated, length=${truncated.length}`);
+  if (!truncated.includes("tail-marker")) throw new Error(`truncation should keep tail (last meaningful chars)`);
+});
+
 check("vault_release pre-flight existence check runs BEFORE user authorization (no phantom prompts)", () => {
   const src = fs.readFileSync(indexSrc, "utf8");
   if (!src.includes("checkedBeforeAuthorization")) throw new Error("pre-flight branch missing — vault_release would prompt for nonexistent keys");

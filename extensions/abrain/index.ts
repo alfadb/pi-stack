@@ -301,23 +301,56 @@ function toolJson(payload: unknown) {
   };
 }
 
-async function authorizeVaultBashOutput(ui: VaultReleaseUi | undefined, grantKey: string, releases: ReleaseSecretResult[], signal?: AbortSignal): Promise<"release" | "withhold"> {
-  if (bashOutputSessionGrants.has(grantKey)) return "release";
+// Truncate text to N chars so the TUI title stays readable. We keep the head
+// and the tail because vault-relevant info is often at both ends of a command.
+function truncateForPrompt(value: string, max = 240): string {
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  if (oneLine.length <= max) return oneLine;
+  const head = Math.floor((max - 5) * 0.7);
+  const tail = max - 5 - head;
+  return `${oneLine.slice(0, head)} ... ${oneLine.slice(-tail)}`;
+}
+
+export function formatBashAuthorizationTitle(record: { releases: ReleaseSecretResult[]; originalCommand?: string }): string {
+  const keys = record.releases.map((r) => `${scopeLabel(r.scope)}:${r.key}`).join(", ") || "<none>";
+  const cmd = record.originalCommand ? truncateForPrompt(record.originalCommand) : "<unknown command>";
+  return [
+    `Release bash output to the LLM?`,
+    `vault keys used: ${keys}`,
+    `command: ${cmd}`,
+    `⚠ The output may still contain encoded forms of the secret (base64/hex/xxd/xor) that literal redaction cannot catch.`,
+  ].join("\n");
+}
+
+export function formatReleaseAuthorizationTitle(scope: VaultScope, key: string, reason: string | undefined): string {
+  return [
+    `Release vault secret ${authKey(scope, key)} to the LLM?`,
+    reason ? `LLM reason: ${truncateForPrompt(reason, 320)}` : `LLM reason: (none supplied)`,
+    `⚠ Plaintext will enter this model context. Redaction is best-effort and does not cover base64/hex/xxd/xor transformations.`,
+  ].join("\n");
+}
+
+async function authorizeVaultBashOutput(
+  ui: VaultReleaseUi | undefined,
+  record: VaultBashRunRecord,
+  signal?: AbortSignal,
+): Promise<"release" | "withhold"> {
+  if (bashOutputSessionGrants.has(record.grantKey)) return "release";
   if (!ui?.select) return "withhold";
-  const keyList = releases.map((r) => `${scopeLabel(r.scope)}:${r.key}`).join(", ");
+  const title = formatBashAuthorizationTitle(record);
+  // Also push the full context into the message stream so it survives any TUI
+  // truncation of the select title.
+  ui.notify?.(title, "warning");
   // Fail closed in non-interactive/API runners that may auto-return the first
   // select item: put the deny option first. Interactive users can still move to
   // an explicit release choice.
-  const choice = await ui.select(
-    "Release vault-protected bash output?",
-    [...VAULT_BASH_OUTPUT_AUTH_CHOICES],
-    { signal },
-  );
+  const choice = await ui.select(title, [...VAULT_BASH_OUTPUT_AUTH_CHOICES], { signal });
   if (choice === "Yes once") return "release";
   if (choice === "Session") {
-    bashOutputSessionGrants.add(grantKey);
+    bashOutputSessionGrants.add(record.grantKey);
     return "release";
   }
+  const keyList = record.releases.map((r) => `${scopeLabel(r.scope)}:${r.key}`).join(", ");
   ui.notify?.(`Withheld bash output that used vault key(s): ${keyList}`, "warning");
   return "withhold";
 }
@@ -328,16 +361,15 @@ async function authorizeVaultRelease(ui: VaultReleaseUi | undefined, scope: Vaul
   if (releaseSessionGrants.has(gate)) return { ok: true };
   if (!ui) return { ok: false, reason: "ui_unavailable" };
 
-  const warning = [
-    `Release vault secret ${gate} to the LLM?`,
-    reason ? `Reason: ${reason}` : undefined,
-    "⚠ Plaintext will enter this model context. Redaction is best-effort and does not cover base64/hex/xxd/xor transformations.",
-  ].filter(Boolean).join("\n");
+  const title = formatReleaseAuthorizationTitle(scope, key, reason);
+  // Mirror the full context into the message stream so the user always sees
+  // what is about to be released, even if the TUI select clips long titles.
+  ui.notify?.(title, "warning");
 
   if (typeof ui.select === "function") {
     // Fail closed in non-interactive/API runners that may auto-return the first
     // select item: put deny choices before explicit release choices.
-    const choice = await ui.select("Vault release authorization", [...VAULT_RELEASE_AUTH_CHOICES], { signal });
+    const choice = await ui.select(title, [...VAULT_RELEASE_AUTH_CHOICES], { signal });
     if (choice === "Yes once") return { ok: true };
     if (choice === "Session") {
       releaseSessionGrants.add(gate);
@@ -348,7 +380,7 @@ async function authorizeVaultRelease(ui: VaultReleaseUi | undefined, scope: Vaul
   }
 
   if (typeof ui.confirm === "function") {
-    const ok = await ui.confirm("Vault release authorization", warning, { signal });
+    const ok = await ui.confirm("Vault release authorization", title, { signal });
     return ok ? { ok: true } : { ok: false, reason: "denied" };
   }
 
@@ -383,6 +415,9 @@ export default function activate(pi: ExtensionAPI): void {
       if (prepared.kind === "none") return;
       if (prepared.kind === "block") return { block: true, reason: prepared.reason };
       event.input.command = prepared.command;
+      // Stash the original (pre-wrap) command so the post-run authorization
+      // prompt can show the user exactly what ran.
+      prepared.record.originalCommand = command;
       vaultBashRuns.set(event.toolCallId, prepared.record);
     });
 
@@ -393,7 +428,7 @@ export default function activate(pi: ExtensionAPI): void {
       vaultBashRuns.delete(event.toolCallId);
       try { fs.rmSync(record.envFile, { force: true }); } catch {}
 
-      const decision = await authorizeVaultBashOutput(ctx.ui, record.grantKey, record.releases, ctx.signal);
+      const decision = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal);
       if (decision !== "release") {
         return {
           content: withheldVaultBashContent(record),
