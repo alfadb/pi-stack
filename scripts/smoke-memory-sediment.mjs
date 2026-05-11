@@ -609,6 +609,42 @@ END_MEMORY`;
       assert(!fencedDrafts.some(d => d.title === banned), `fenced MEMORY block "${banned}" leaked into drafts`);
     }
 
+    // Regression: fence state must reset at transcript entry boundaries.
+    // A prior message may contain an unmatched code fence; that must not
+    // flip the fence parity for a later assistant message and cause a
+    // fenced MEMORY format example to be written as a real memory.
+    const crossEntryFenceDrift = [
+      "--- ENTRY old 2026-05-11T00:00:00Z message/assistant ---",
+      "```",
+      "an older message left a fence unmatched in the run window",
+      "--- ENTRY new 2026-05-11T00:00:01Z message/assistant ---",
+      "This is documentation only:",
+      "",
+      "```text",
+      "MEMORY:",
+      "title: Fenced Example Must Not Persist",
+      "kind: fact",
+      "confidence: 7",
+      "---",
+      "# Fenced Example Must Not Persist",
+      "This example must not be captured.",
+      "END_MEMORY",
+      "```",
+      "",
+      "But this real top-level block should be captured:",
+      "",
+      "MEMORY:",
+      "title: Cross Entry Real Insight",
+      "kind: fact",
+      "confidence: 4",
+      "---",
+      "# Cross Entry Real Insight",
+      "This real top-level memory should still be captured.",
+      "END_MEMORY",
+    ].join("\n");
+    const crossEntryDrafts = parseExplicitMemoryBlocks(crossEntryFenceDrift);
+    assert(crossEntryDrafts.length === 1 && crossEntryDrafts[0].title === "Cross Entry Real Insight", `entry-local fence reset failed: ${crossEntryDrafts.map(d => d.title).join(", ")}`);
+
     const llmSummary = summarizeLlmExtractorDryRun({ ok: true, model: "x/y", rawText: "SKIP", extraction: { count: 0, drafts: [] } }, { maxCandidates: 3, rawPreviewChars: 10 });
     assert(llmSummary.quality.reason === "skip" && llmSummary.quality.passed, "llm summary skip gate failed");
 

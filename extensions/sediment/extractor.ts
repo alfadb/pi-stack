@@ -70,8 +70,17 @@ function parseBlock(block: string, markerIndex: number): ExtractedMemoryDraft | 
  * fence.
  */
 function isInsideCodeFence(text: string, charIndex: number): boolean {
+  // Fence state is local to a rendered transcript entry. Counting fences
+  // from the beginning of the whole run window lets an unmatched fence in
+  // an older message flip the state for later messages, which can turn a
+  // fenced documentation example into a false explicit MEMORY write. Reset
+  // the scan at the latest entry delimiter emitted by checkpoint.entryToText.
   const before = text.slice(0, charIndex);
-  const fences = before.match(/^(?:```|~~~)/gm) || [];
+  const entryStartAtZero = before.startsWith("--- ENTRY ") ? 0 : -1;
+  const lastEntryAfterNewline = before.lastIndexOf("\n--- ENTRY ");
+  const start = Math.max(entryStartAtZero, lastEntryAfterNewline >= 0 ? lastEntryAfterNewline + 1 : -1);
+  const localBefore = start >= 0 ? text.slice(start, charIndex) : before;
+  const fences = localBefore.match(/^(?:```|~~~)/gm) || [];
   return fences.length % 2 === 1;
 }
 
