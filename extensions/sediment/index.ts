@@ -36,7 +36,7 @@ import { runLlmExtractor, summarizeLlmExtractorResult, type LlmExtractorResult }
 import { listMigrationBackups, migrateOne, restoreMigrationBackup } from "./migration";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 
-import { appendAudit, archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, updateProjectEntry, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult } from "./writer";
+import { appendAudit, archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, updateProjectEntry, writeProjectEntry, type ProjectEntryDraft, type WriteProjectEntryResult, type WriterAuditContext } from "./writer";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
 
 // ---------------------------------------------------------------
@@ -139,6 +139,37 @@ function shouldAdvanceAfterResults(results: WriteProjectEntryResult[]): boolean 
     if (!result.reason) return false;
     return terminalReasons.has(result.reason) || result.reason.startsWith("credential pattern detected");
   });
+}
+
+function safeAuditIdPart(value: string | undefined, fallback: string): string {
+  const cleaned = (value || fallback).replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "");
+  return (cleaned || fallback).slice(-24);
+}
+
+function makeCorrelationId(lane: "explicit" | "auto_write", sessionId: string, window: RunWindow): string {
+  return `${lane}-${safeAuditIdPart(sessionId, "session")}-${safeAuditIdPart(window.lastEntryId, "entry")}-${Date.now().toString(36)}`;
+}
+
+function candidateIdFor(correlationId: string, index: number): string {
+  return `${correlationId}:c${index + 1}`;
+}
+
+function resultSummary(result: WriteProjectEntryResult) {
+  return {
+    status: result.status,
+    slug: result.slug,
+    reason: result.reason,
+    path: result.path,
+    deleteMode: result.deleteMode,
+    lintErrors: result.lintErrors,
+    lintWarnings: result.lintWarnings,
+    validationErrors: result.validationErrors,
+    duplicate: result.duplicate,
+    sanitizedReplacements: result.sanitizedReplacements,
+    gitCommit: result.gitCommit,
+    correlation_id: result.correlationId,
+    candidate_id: result.candidateId,
+  };
 }
 
 function registerSedimentCommand(pi: ExtensionAPI) {
@@ -464,8 +495,10 @@ export default function (pi: ExtensionAPI) {
       // updates synchronously with agent_end. The bg promise will
       // transition to completed/failed in its finally block.
       applySedimentStatus(setStatus, sessionId, "running", `auto-write (model=${settings.extractorModel})`);
+      const autoCorrelationId = makeCorrelationId("auto_write", sessionId, window);
 
-      const bgPromise = (async () => {
+      let bgPromise: Promise<void>;
+      bgPromise = (async () => {
         try {
           const auto = await tryAutoWriteLane({
             cwd,
@@ -474,6 +507,7 @@ export default function (pi: ExtensionAPI) {
             window,
             modelRegistry,
             signal: undefined,
+            correlationId: autoCorrelationId,
           });
           const tAutoEnd = Date.now();
 
@@ -487,9 +521,10 @@ export default function (pi: ExtensionAPI) {
               parser_version: PARSER_VERSION,
               settings_snapshot: settingsSnapshot,
               entry_breakdown: entryBreakdown,
+              correlation_id: autoCorrelationId,
               candidate_count: auto.drafts.length,
-              candidates: auto.drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
-              results: auto.results.map((r) => ({ status: r.status, slug: r.slug, reason: r.reason, path: r.path, deleteMode: r.deleteMode, lintErrors: r.lintErrors, lintWarnings: r.lintWarnings, validationErrors: r.validationErrors, duplicate: r.duplicate, sanitizedReplacements: r.sanitizedReplacements, gitCommit: r.gitCommit })),
+              candidates: auto.drafts.map((d, i) => ({ candidate_id: candidateIdFor(autoCorrelationId, i), title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
+              results: auto.results.map(resultSummary),
               curator: auto.curatorAudits,
               llm: auto.llmAuditSummary,
               raw_text: auto.rawTextStored,
@@ -536,6 +571,7 @@ export default function (pi: ExtensionAPI) {
             parser_version: PARSER_VERSION,
             settings_snapshot: settingsSnapshot,
             entry_breakdown: entryBreakdown,
+            correlation_id: autoCorrelationId,
             eligibility: auto.kind === "ineligible" ? auto.eligibility : undefined,
             llm: auto.kind === "ineligible" ? undefined : auto.llmAuditSummary,
             raw_text: auto.kind === "llm_error" || auto.kind === "llm_skip" ? auto.rawTextStored : undefined,
@@ -568,6 +604,7 @@ export default function (pi: ExtensionAPI) {
               parser_version: PARSER_VERSION,
               settings_snapshot: settingsSnapshot,
               entry_breakdown: entryBreakdown,
+              correlation_id: autoCorrelationId,
               error: err?.message ?? String(err),
               checkpoint_advanced: true,
               background_async: true,
@@ -596,13 +633,20 @@ export default function (pi: ExtensionAPI) {
     applySedimentStatus(setStatus, sessionId, "running", `explicit (${drafts.length} candidate${drafts.length === 1 ? "" : "s"})`);
 
     const tWriteStart = Date.now();
+    const explicitCorrelationId = makeCorrelationId("explicit", sessionId, window);
     const results: WriteProjectEntryResult[] = [];
-    for (const draft of drafts) {
+    for (const [i, draft] of drafts.entries()) {
+      const auditContext: WriterAuditContext = {
+        lane: "explicit",
+        sessionId,
+        correlationId: explicitCorrelationId,
+        candidateId: candidateIdFor(explicitCorrelationId, i),
+      };
       results.push(await writeProjectEntry({
         ...draft,
         sessionId,
         timelineNote: draft.timelineNote || "captured from explicit MEMORY block",
-      }, { projectRoot: cwd, settings, dryRun: false }));
+      }, { projectRoot: cwd, settings, dryRun: false, auditContext }));
     }
     const tWriteEnd = Date.now();
 
@@ -617,9 +661,10 @@ export default function (pi: ExtensionAPI) {
       parser_version: PARSER_VERSION,
       settings_snapshot: settingsSnapshot,
       entry_breakdown: entryBreakdown,
+      correlation_id: explicitCorrelationId,
       candidate_count: drafts.length,
-      candidates: drafts.map((d) => ({ title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
-      results: results.map((result) => ({ status: result.status, slug: result.slug, reason: result.reason, path: result.path, lintErrors: result.lintErrors, lintWarnings: result.lintWarnings, validationErrors: result.validationErrors, duplicate: result.duplicate, sanitizedReplacements: result.sanitizedReplacements, gitCommit: result.gitCommit })),
+      candidates: drafts.map((d, i) => ({ candidate_id: candidateIdFor(explicitCorrelationId, i), title: d.title, kind: d.kind, confidence: d.confidence, status: d.status, body_chars: (d.compiledTruth || "").length })),
+      results: results.map(resultSummary),
       stage_ms: { window_build: tWindowBuilt - tStart, parse: tParseEnd - tParseStart, write_total: tWriteEnd - tWriteStart, total: Date.now() - tStart },
       checkpoint_advanced: shouldAdvance,
     });
@@ -682,8 +727,9 @@ async function tryAutoWriteLane(args: {
   window: RunWindow;
   modelRegistry: unknown;
   signal?: AbortSignal;
+  correlationId: string;
 }): Promise<AutoWriteLaneOutcome> {
-  const { cwd, sessionId, settings, window } = args;
+  const { cwd, sessionId, settings, window, correlationId } = args;
   const modelRegistry = args.modelRegistry as ModelRegistryLike | undefined;
 
   if (!settings.autoLlmWriteEnabled) {
@@ -743,7 +789,14 @@ async function tryAutoWriteLane(args: {
   const writeStart = Date.now();
   const results: WriteProjectEntryResult[] = [];
   const curatorAudits: CuratorAudit[] = [];
-  for (const draft of compliantDrafts) {
+  for (const [i, draft] of compliantDrafts.entries()) {
+    const candidateId = candidateIdFor(correlationId, i);
+    const auditContext: WriterAuditContext = {
+      lane: "auto_write",
+      sessionId,
+      correlationId,
+      candidateId,
+    };
     const curated = await curateProjectDraft(draft, {
       projectRoot: cwd,
       sedimentSettings: settings,
@@ -758,6 +811,10 @@ async function tryAutoWriteLane(args: {
         path: "",
         status: "skipped",
         reason: curated.decision.reason,
+        lane: "auto_write",
+        sessionId,
+        correlationId,
+        candidateId,
       });
       continue;
     }
@@ -770,6 +827,7 @@ async function tryAutoWriteLane(args: {
         projectRoot: cwd,
         settings,
         dryRun: false,
+        auditContext,
       }));
       continue;
     }
@@ -783,6 +841,7 @@ async function tryAutoWriteLane(args: {
         projectRoot: cwd,
         settings,
         dryRun: false,
+        auditContext,
       }));
       continue;
     }
@@ -793,6 +852,7 @@ async function tryAutoWriteLane(args: {
         dryRun: false,
         reason: curated.decision.reason || curated.decision.rationale || "archived by sediment curator",
         sessionId,
+        auditContext,
       }));
       continue;
     }
@@ -804,6 +864,7 @@ async function tryAutoWriteLane(args: {
         newSlug: curated.decision.newSlug,
         reason: curated.decision.reason || curated.decision.rationale || "superseded by sediment curator",
         sessionId,
+        auditContext,
       }));
       continue;
     }
@@ -815,6 +876,7 @@ async function tryAutoWriteLane(args: {
         mode: curated.decision.mode,
         reason: curated.decision.reason || curated.decision.rationale || "deleted by sediment curator",
         sessionId,
+        auditContext,
       }));
       continue;
     }
@@ -827,6 +889,7 @@ async function tryAutoWriteLane(args: {
       projectRoot: cwd,
       settings,
       dryRun: false,
+      auditContext,
     }));
   }
 

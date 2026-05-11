@@ -441,6 +441,32 @@ Body.
     }, { projectRoot: root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
     assert(write.status === "created", `writer failed: ${write.reason}`);
 
+    const correlatedWrite = await writeProjectEntry({
+      title: "Writer Correlation Fixture",
+      kind: "fact",
+      confidence: 5,
+      sessionId: "session-smoke",
+      compiledTruth: "This validates that writer-level audit rows carry lane, session, correlation, and candidate identifiers.",
+    }, {
+      projectRoot: root,
+      settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
+      dryRun: false,
+      auditContext: {
+        lane: "auto_write",
+        sessionId: "session-smoke",
+        correlationId: "corr-smoke",
+        candidateId: "corr-smoke:c1",
+      },
+    });
+    assert(correlatedWrite.status === "created", `correlated writer failed: ${correlatedWrite.reason}`);
+    assert(correlatedWrite.correlationId === "corr-smoke" && correlatedWrite.candidateId === "corr-smoke:c1", "writer result should echo audit correlation ids");
+    const auditRows = fs.readFileSync(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
+    const correlatedAudit = auditRows.find((row) => row.operation === "create" && row.target === "project:writer-correlation-fixture");
+    assert(correlatedAudit?.lane === "auto_write", "writer audit row should include lane");
+    assert(correlatedAudit?.session_id === "session-smoke", "writer audit row should include session_id");
+    assert(correlatedAudit?.correlation_id === "corr-smoke", "writer audit row should include correlation_id");
+    assert(correlatedAudit?.candidate_id === "corr-smoke:c1", "writer audit row should include candidate_id");
+
     const missingPensieveRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-no-pensieve-"));
     const createdRootWrite = await writeProjectEntry({
       title: "Writer Creates Pensieve Root",

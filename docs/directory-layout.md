@@ -84,7 +84,7 @@ alfadb/pi-astack/
 │   │   ├── validation.ts              # schema-only draft runtime validation
 │   │   ├── dedupe.ts                  # storage-only slug collision detection（semantic dedupe 由 curator 处理）
 │   │   ├── sanitizer.ts               # sensitive-info fail-closed (jwt/pem/aws/url/email/ip/$HOME)
-│   │   └── writer.ts                  # create/update/archive/supersede/delete substrate + on-demand .pensieve create + validate/sensitive-info sanitize/dedupe/lint/lock/atomic write/audit/git
+│   │   └── writer.ts                  # create/update/archive/supersede/delete substrate + on-demand .pensieve create + validate/sensitive-info sanitize/dedupe/lint/lock/atomic write/audit/git + writer audit correlation ids
 │   ├── compaction-tuner/              # ✅ 实现：计划外落地（2026-05-08）
 │   │   ├── index.ts                   # agent_end hook 读 ctx.getContextUsage() 超阈 → ctx.compact()；/compaction-tuner [status|trigger]
 │   │   └── settings.ts                # thresholdPercent / rearmMarginPercent
@@ -204,7 +204,7 @@ OpenAI Responses API 生图。复用用户已有的 openai provider 配置（key
 ├── .pi-astack/
 │   ├── imagine/                     # 生成的 PNG
 │   ├── sediment/
-│   │   ├── audit.jsonl              # JSONL；v2 schema：本地 TZ + audit_version + pid + project_root + settings_snapshot + entry_breakdown + parser_version + stage_ms
+│   │   ├── audit.jsonl              # JSONL；v2 schema：本地 TZ + audit_version + pid + project_root + lane/session_id/correlation_id/candidate_id + settings_snapshot + entry_breakdown + parser_version + stage_ms
 │   │   ├── checkpoint.json          # 上次处理过的 entry_id
 │   │   ├── locks/                   # ephemeral 文件锁
 │   │   └── migration-backups/<ts>/  # /sediment migrate-one --apply 前的备份

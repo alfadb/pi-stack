@@ -39,13 +39,20 @@ export interface ProjectEntryDraft {
   timelineNote?: string;
 }
 
+export interface WriterAuditContext {
+  lane?: "explicit" | "auto_write" | string;
+  sessionId?: string;
+  correlationId?: string;
+  candidateId?: string;
+}
+
 export interface WriteProjectEntryOptions {
   projectRoot: string;
   settings: SedimentSettings;
   dryRun?: boolean;
   auditOperation?: string;
   auditExtras?: Record<string, unknown>;
-
+  auditContext?: WriterAuditContext;
 }
 
 export type DeleteMode = "soft" | "hard";
@@ -76,10 +83,39 @@ export interface WriteProjectEntryResult {
   sanitizedReplacements?: string[];
   duplicate?: DedupeResult;
   validationErrors?: Array<{ field: string; message: string }>;
+  lane?: string;
+  sessionId?: string;
+  correlationId?: string;
+  candidateId?: string;
 }
 
 interface LockHandle {
   release(): Promise<void>;
+}
+
+function writerAuditFields(opts: WriteProjectEntryOptions, fallbackSessionId?: string): Record<string, unknown> {
+  const ctx = opts.auditContext;
+  const sessionId = ctx?.sessionId ?? fallbackSessionId;
+  return {
+    ...(ctx?.lane ? { lane: ctx.lane } : {}),
+    ...(sessionId ? { session_id: sessionId } : {}),
+    ...(ctx?.correlationId ? { correlation_id: ctx.correlationId } : {}),
+    ...(ctx?.candidateId ? { candidate_id: ctx.candidateId } : {}),
+  };
+}
+
+function resultAuditFields(opts: WriteProjectEntryOptions, fallbackSessionId?: string): Pick<WriteProjectEntryResult, "lane" | "sessionId" | "correlationId" | "candidateId"> {
+  const ctx = opts.auditContext;
+  return {
+    ...(ctx?.lane ? { lane: ctx.lane } : {}),
+    ...((ctx?.sessionId ?? fallbackSessionId) ? { sessionId: ctx?.sessionId ?? fallbackSessionId } : {}),
+    ...(ctx?.correlationId ? { correlationId: ctx.correlationId } : {}),
+    ...(ctx?.candidateId ? { candidateId: ctx.candidateId } : {}),
+  };
+}
+
+function withWriterAuditContext(opts: WriteProjectEntryOptions, fallbackSessionId: string | undefined, event: Record<string, unknown>): Record<string, unknown> {
+  return { ...writerAuditFields(opts, fallbackSessionId), ...event };
 }
 
 function nowIso(): string {
@@ -423,6 +459,7 @@ export async function mergeProjectEntries(
     dryRun: opts.dryRun,
     auditOperation: "merge",
     auditExtras: { sources, reason },
+    auditContext: opts.auditContext,
   });
 
   const results: WriteProjectEntryResult[] = [
@@ -436,6 +473,7 @@ export async function mergeProjectEntries(
       dryRun: opts.dryRun,
       reason: `merged into ${targetSlug}: ${reason}`,
       sessionId: patch.sessionId,
+      auditContext: opts.auditContext,
     }));
   }
   return results;
@@ -457,6 +495,7 @@ export async function archiveProjectEntry(
     dryRun: opts.dryRun,
     auditOperation: "archive",
     auditExtras: { reason },
+    auditContext: opts.auditContext,
   });
   return { ...result, status: result.status === "dry_run" ? "dry_run" : result.status === "rejected" ? "rejected" : "archived" };
 }
@@ -479,6 +518,7 @@ export async function supersedeProjectEntry(
     dryRun: opts.dryRun,
     auditOperation: "supersede",
     auditExtras: { reason, ...(opts.newSlug ? { new_slug: opts.newSlug } : {}) },
+    auditContext: opts.auditContext,
   });
   return { ...result, status: result.status === "dry_run" ? "dry_run" : result.status === "rejected" ? "rejected" : "superseded" };
 }
@@ -493,17 +533,18 @@ export async function deleteProjectEntry(
   const slug = slugify(slugRaw);
   const mode: DeleteMode = opts.mode === "hard" ? "hard" : "soft";
   const reason = opts.reason || "deleted by sediment curator";
+  const resultCtx = resultAuditFields(opts, opts.sessionId);
 
   const target = await findProjectEntryFile(projectRoot, slug);
   if (!target) {
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "reject",
       reason: "entry_not_found",
       target: `project:${slug}`,
       delete_mode: mode,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, deleteMode: mode };
+    }));
+    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, deleteMode: mode, ...resultCtx };
   }
 
   if (mode === "soft") {
@@ -518,12 +559,13 @@ export async function deleteProjectEntry(
       dryRun: opts.dryRun,
       auditOperation: "delete",
       auditExtras: { delete_mode: "soft", reason },
+      auditContext: opts.auditContext,
     });
     return { ...result, status: result.status === "dry_run" ? "dry_run" : result.status === "rejected" ? "rejected" : "deleted", deleteMode: "soft" };
   }
 
   if (opts.dryRun) {
-    return { slug, path: target, status: "dry_run", deleteMode: "hard" };
+    return { slug, path: target, status: "dry_run", deleteMode: "hard", ...resultCtx };
   }
 
   let lock: LockHandle | undefined;
@@ -531,7 +573,7 @@ export async function deleteProjectEntry(
     lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
     await fs.unlink(target);
     const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `hard delete ${slug}`) : null;
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "delete",
       target: `project:${slug}`,
       path: path.relative(projectRoot, target),
@@ -539,18 +581,18 @@ export async function deleteProjectEntry(
       reason,
       git_commit: git,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: target, status: "deleted", gitCommit: git, auditPath, deleteMode: "hard" };
+    }));
+    return { slug, path: target, status: "deleted", gitCommit: git, auditPath, deleteMode: "hard", ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "error",
       target: `project:${slug}`,
       delete_mode: "hard",
       reason: message,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: target, status: "rejected", reason: message, auditPath, deleteMode: "hard" };
+    }));
+    return { slug, path: target, status: "rejected", reason: message, auditPath, deleteMode: "hard", ...resultCtx };
   } finally {
     await lock?.release();
   }
@@ -565,16 +607,17 @@ export async function updateProjectEntry(
   const projectRoot = path.resolve(opts.projectRoot);
   const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
   const slug = slugify(slugRaw);
+  const resultCtx = resultAuditFields(opts, patch.sessionId);
 
   const target = await findProjectEntryFile(projectRoot, slug);
   if (!target) {
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
       operation: "reject",
       reason: "entry_not_found",
       target: `project:${slug}`,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath };
+    }));
+    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, ...resultCtx };
   }
 
   let raw: string;
@@ -582,41 +625,41 @@ export async function updateProjectEntry(
     raw = await fs.readFile(target, "utf-8");
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
       operation: "reject",
       reason: `read_error: ${message}`,
       target: `project:${slug}`,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath };
+    }));
+    return { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath, ...resultCtx };
   }
 
   const merged = mergeUpdateMarkdown(raw, patch, slug, projectRoot);
   if ("error" in merged) {
     const reason = merged.error.startsWith("credential pattern detected") ? merged.error : merged.error.split(":")[0];
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
       operation: "reject",
       reason,
       target: `project:${slug}`,
       detail: merged.error,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: target, status: "rejected", reason, auditPath };
+    }));
+    return { slug, path: target, status: "rejected", reason, auditPath, ...resultCtx };
   }
 
   const lint = lintMarkdown(merged.markdown, target);
   const lintErrors = lint.filter((issue) => issue.severity === "error").length;
   const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
   if (lintErrors > 0) {
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
       operation: "reject",
       reason: "lint_error",
       target: `project:${slug}`,
       lintErrors,
       lintWarnings,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: target, status: "rejected", reason: "lint_error", lintErrors, lintWarnings, auditPath };
+    }));
+    return { slug, path: target, status: "rejected", reason: "lint_error", lintErrors, lintWarnings, auditPath, ...resultCtx };
   }
 
   if (opts.dryRun) {
@@ -627,6 +670,7 @@ export async function updateProjectEntry(
       lintErrors,
       lintWarnings,
       sanitizedReplacements: merged.sanitizedReplacements,
+      ...resultCtx,
     };
   }
 
@@ -636,7 +680,7 @@ export async function updateProjectEntry(
     await atomicWrite(target, merged.markdown);
     const operation = opts.auditOperation || "update";
     const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `${operation} ${slug}`) : null;
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
       operation,
       target: `project:${slug}`,
       path: path.relative(projectRoot, target),
@@ -644,7 +688,7 @@ export async function updateProjectEntry(
       git_commit: git,
       duration_ms: Date.now() - started,
       ...(opts.auditExtras ?? {}),
-    });
+    }));
     return {
       slug,
       path: target,
@@ -654,16 +698,17 @@ export async function updateProjectEntry(
       gitCommit: git,
       auditPath,
       sanitizedReplacements: merged.sanitizedReplacements,
+      ...resultCtx,
     };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
       operation: "error",
       target: `project:${slug}`,
       reason: message,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: target, status: "rejected", reason: message, lintErrors, lintWarnings, auditPath };
+    }));
+    return { slug, path: target, status: "rejected", reason: message, lintErrors, lintWarnings, auditPath, ...resultCtx };
   } finally {
     await lock?.release();
   }
@@ -676,16 +721,17 @@ export async function writeProjectEntry(
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
+  const resultCtx = resultAuditFields(opts, draft.sessionId);
 
   const validationErrors = validateProjectEntryDraft(draft);
   if (validationErrors.length > 0) {
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
       operation: "reject",
       reason: "validation_error",
       title: draft.title,
       validationErrors,
       duration_ms: Date.now() - started,
-    });
+    }));
     return {
       slug: slugify(draft.title),
       path: pensieveRoot,
@@ -693,6 +739,7 @@ export async function writeProjectEntry(
       reason: "validation_error",
       validationErrors,
       auditPath,
+      ...resultCtx,
     };
   }
 
@@ -709,13 +756,13 @@ export async function writeProjectEntry(
   const triggerPhraseSanitizes = (draft.triggerPhrases ?? []).map((p) => sanitizeForMemory(p));
   const failedSanitize = [titleSanitize, bodySanitize, noteSanitize, ...triggerPhraseSanitizes].find((result) => !result.ok);
   if (failedSanitize) {
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
       operation: "reject",
       reason: failedSanitize.error,
       title: draft.title,
       duration_ms: Date.now() - started,
-    });
-    return { slug: slugify(draft.title), path: pensieveRoot, status: "rejected", reason: failedSanitize.error, auditPath };
+    }));
+    return { slug: slugify(draft.title), path: pensieveRoot, status: "rejected", reason: failedSanitize.error, auditPath, ...resultCtx };
   }
 
   const sanitizedReplacements = [
@@ -745,13 +792,13 @@ export async function writeProjectEntry(
     kind: safeDraft.kind,
   });
   if (duplicate.duplicate) {
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
       operation: "reject",
       reason: "duplicate_slug",
       target: `project:${slug}`,
       duplicate,
       duration_ms: Date.now() - started,
-    });
+    }));
     return {
       slug,
       path: target,
@@ -759,21 +806,22 @@ export async function writeProjectEntry(
       reason: "duplicate_slug",
       duplicate,
       auditPath,
+      ...resultCtx,
     };
   }
   const lint = lintMarkdown(markdown, target);
   const lintErrors = lint.filter((issue) => issue.severity === "error").length;
   const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
   if (lintErrors > 0) {
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
       operation: "reject",
       reason: "lint_error",
       target: `project:${slug}`,
       lintErrors,
       lintWarnings,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: target, status: "rejected", reason: "lint_error", lintErrors, lintWarnings, auditPath };
+    }));
+    return { slug, path: target, status: "rejected", reason: "lint_error", lintErrors, lintWarnings, auditPath, ...resultCtx };
   }
 
   if (opts.dryRun) {
@@ -784,6 +832,7 @@ export async function writeProjectEntry(
       lintErrors,
       lintWarnings,
       sanitizedReplacements,
+      ...resultCtx,
     };
   }
 
@@ -797,26 +846,26 @@ export async function writeProjectEntry(
         score: 1,
         match: { slug, title: safeDraft.title, kind: safeDraft.kind, status, source_path: path.relative(projectRoot, target) },
       };
-      const auditPath = await appendAudit(projectRoot, {
+      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
         operation: "reject",
         reason: "duplicate_slug",
         target: `project:${slug}`,
         duplicate: duplicateRace,
         duration_ms: Date.now() - started,
-      });
-      return { slug, path: target, status: "rejected", reason: "duplicate_slug", duplicate: duplicateRace, auditPath };
+      }));
+      return { slug, path: target, status: "rejected", reason: "duplicate_slug", duplicate: duplicateRace, auditPath, ...resultCtx };
     }
 
     await atomicWrite(target, markdown);
     const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, slug) : null;
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
       operation: "create",
       target: `project:${slug}`,
       path: path.relative(projectRoot, target),
       lint_result: "pass",
       git_commit: git,
       duration_ms: Date.now() - started,
-    });
+    }));
 
     return {
       slug,
@@ -827,16 +876,17 @@ export async function writeProjectEntry(
       gitCommit: git,
       auditPath,
       sanitizedReplacements,
+      ...resultCtx,
     };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    const auditPath = await appendAudit(projectRoot, {
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
       operation: "error",
       target: `project:${slug}`,
       reason: message,
       duration_ms: Date.now() - started,
-    });
-    return { slug, path: target, status: "rejected", reason: message, lintErrors, lintWarnings, auditPath };
+    }));
+    return { slug, path: target, status: "rejected", reason: message, lintErrors, lintWarnings, auditPath, ...resultCtx };
   } finally {
     await lock?.release();
   }

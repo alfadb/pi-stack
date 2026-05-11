@@ -186,7 +186,7 @@ memory_search(query: "dispatch agent prompt")
 - lock：`.pi-astack/sediment/locks/sediment.lock`，超时可配置
 - write：缺失 `.pensieve/` 时按需创建；tmp → rename 原子写入 markdown
 - git：best-effort `git add` + `git commit`，失败不回滚 markdown
-- audit：追加 `.pi-astack/sediment/audit.jsonl`（v2 schema：本地 TZ 时间戳 + audit_version + pid + project_root；agent_end 汇总行额外带 lane + settings_snapshot + entry_breakdown + parser_version + stage_ms + candidates/results/curator/llm；从 `.pensieve/.state/sediment-events.jsonl` 在首次 appendAudit 调用时自动迁移）。auto-write / explicit write 不暴露 human dry-run 命令，故障诊断由 LLM 读取 audit + git history 完成。
+- audit：追加 `.pi-astack/sediment/audit.jsonl`（v2 schema：本地 TZ 时间戳 + audit_version + pid + project_root；agent_end 汇总行额外带 lane + session_id + correlation_id + settings_snapshot + entry_breakdown + parser_version + stage_ms + candidates/results/curator/llm；writer-level create/update/merge/archive/supersede/delete/reject rows 带 lane + session_id + correlation_id + candidate_id，可追踪到对应 summary candidate/result；从 `.pensieve/.state/sediment-events.jsonl` 在首次 appendAudit 调用时自动迁移）。auto-write / explicit write 不暴露 human dry-run 命令，故障诊断由 LLM 读取 audit + git history 完成。
 
 已完成 deterministic extractor stub：
 - 仅识别显式 block，不从普通对话中猜测
@@ -222,7 +222,7 @@ memory_search(query: "dispatch agent prompt")
   2. `runLlmExtractor()` → `parseExplicitMemoryBlocks(rawText)` → `previewExtraction(drafts)` schema-only 过滤
   3. `curateProjectDraft()` 调 `memory_search` 找近邻 → curator LLM 输出 create/update/merge/archive/supersede/delete/skip
   4. `writeProjectEntry()` / `updateProjectEntry()` / `mergeProjectEntries()` / `archiveProjectEntry()` / `supersedeProjectEntry()` / `deleteProjectEntry()` 写盘；git/audit 负责回滚与追踪。
-- audit：`operation: "auto_write"` 含 candidate_count / candidates / results / curator decisions / **raw_text 全文** (cap `autoWriteRawAuditChars` 默认 8000) / stage_ms.llm_total。如果 LLM 打一鱼三天这些都够复现。
+- audit：`operation: "auto_write"` 含 correlation_id / candidate_count / candidates(candidate_id) / results(candidate_id) / curator decisions / **raw_text 全文** (cap `autoWriteRawAuditChars` 默认 8000) / stage_ms.llm_total；writer-level rows 复用同一 correlation_id + candidate_id。如果 LLM 打一鱼三天这些都够复现。
 - 独立模型：复用现有 `extractorModel` settings（默认 deepseek-v4-pro）；不强制隔离主会话模型，仅靠 settings 表达意图。
 
 已完成 LLM auto-write lane A3（实战 burn-in + 修复，2026-05-08）：

@@ -116,7 +116,7 @@ UPDATE / MERGE existing memory
 缓解：
 
 - secret gate 和 storage gate 仍 fail-closed；
-- 所有 operation 写 audit + git commit，可回滚；audit 是给 LLM 诊断的主界面，记录 lane、window/checkpoint summary、settings snapshot、entry breakdown、candidate/result、curator neighbors/decision、LLM summary、stage timings；
+- 所有 operation 写 audit + git commit，可回滚；audit 是给 LLM 诊断的主界面，记录 lane、session_id、correlation_id、candidate_id、window/checkpoint summary、settings snapshot、entry breakdown、candidate/result、curator neighbors/decision、LLM summary、stage timings；writer-level create/update/merge/archive/supersede/delete/reject rows 与 agent_end summary row 共享 correlation/candidate id，便于端到端追踪；
 - delete 默认 soft；hard delete 默认不用，只在 secret/junk/用户明确要求时启用；
 - Phase 1/2 已支持 create/update/merge/archive/supersede/delete/skip；manual sediment dry-run commands deliberately not exposed.
 
