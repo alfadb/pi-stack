@@ -509,8 +509,7 @@ export async function llmSearchEntries(
   const stage2Picks = parseFinalPicks(stage2.rawText);
 
   // ── Cache metrics log ─────────────────────────────────────────
-  // Write to process.stderr.write (bypasses console buffering that
-  // pi captures internally). JSONL format for easy grep + analysis.
+  // Write to project-scoped metrics file for analysis.
   const s1 = stage1.usage;
   const s2 = stage2.usage;
   const entry = {
@@ -521,7 +520,6 @@ export async function llmSearchEntries(
     results: stage2Picks.length,
   };
   logSearchMetrics(entry, projectRoot);
-  process.stderr.write(`[memory_search] ${JSON.stringify(entry)}\n`);
 
   if (stage2Picks.length === 0) return [];
   return rankFromStage2(entriesBySlug, stage2Picks, finalLimit);
