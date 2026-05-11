@@ -333,6 +333,8 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const sessionId = readSessionId(ctx.sessionManager);
+    // Capture getBranch for drain-loop re-reads (bg work outlives ctx).
+    const getBranch = ctx.sessionManager.getBranch.bind(ctx.sessionManager);
     const notify = ctx.ui?.notify?.bind(ctx.ui);
     // setStatus is ctx.ui.setStatus; we need to bind it AND tolerate
     // older pi versions where the method is missing. Wrap in a
@@ -479,6 +481,58 @@ export default function (pi: ExtensionAPI) {
       //     writes are never optimistically dropped.
       //   - In pi --print, the process exits after agent_end and bg
       //     work is cancelled. Acceptable: --print is one-shot.
+      // ── Drain loop ─────────────────────────────────────────────
+      // After a bg auto-write cycle completes, immediately check if
+      // more entries accumulated while it was running. If so, start
+      // another cycle without waiting for the next agent_end.
+      const scheduleDrainIfBacklog = () => {
+        const branchNow = getBranch();
+        loadSessionCheckpoint(cwd, sessionId).then((cp) => {
+          const win = buildRunWindow(branchNow, cp, settings);
+          if (win.skipReason || !win.lastEntryId) return; // no backlog
+
+          // Save checkpoint and launch another cycle
+          saveSessionCheckpoint(cwd, sessionId, { lastProcessedEntryId: win.lastEntryId }).then(() => {
+            applySedimentStatus(setStatus, sessionId, "running", `auto-write drain (model=${settings.extractorModel})`);
+            const corrId = makeCorrelationId("auto_write", sessionId, win);
+            const bg = (async () => {
+              try {
+                const auto = await tryAutoWriteLane({
+                  cwd, sessionId, settings, window: win,
+                  modelRegistry, signal: undefined, correlationId: corrId,
+                });
+                // ... audit + notify (same as main bg path) ...
+                if (auto.kind === "wrote") {
+                  await appendAudit(cwd, {
+                    operation: "auto_write", lane: "auto_write",
+                    session_id: sessionId, ...checkpointSummary(win),
+                    extractor: "llm_extractor", parser_version: PARSER_VERSION,
+                    settings_snapshot: settingsSnapshot,
+                    correlation_id: corrId,
+                    candidate_count: auto.drafts.length,
+                    results: auto.results.map(resultSummary),
+                    curator: auto.curatorAudits, llm: auto.llmAuditSummary,
+                    raw_text: auto.rawTextStored,
+                    raw_text_truncated: auto.rawTextTruncated,
+                    checkpoint_advanced: true, background_async: true,
+                  });
+                  const ok = auto.results.filter(r => r.status !== "rejected" && r.status !== "skipped").length;
+                  applySedimentStatus(setStatus, sessionId, "completed", `drain: ${ok} written`);
+                } else {
+                  applySedimentStatus(setStatus, sessionId, "completed", `drain: ${auto.kind}`);
+                }
+              } catch (err: any) {
+                applySedimentStatus(setStatus, sessionId, "failed", `drain error: ${err?.message ?? String(err)}`);
+              } finally {
+                if (autoWriteInFlight.get(sessionId) === bg) autoWriteInFlight.delete(sessionId);
+                scheduleDrainIfBacklog(); // recurse
+              }
+            })();
+            autoWriteInFlight.set(sessionId, bg);
+          }).catch(() => {});
+        }).catch(() => {});
+      };
+
       if (autoWriteInFlight.has(sessionId)) {
         // A previous background sediment run is still authoritative.
         // Do not advance the checkpoint and do not write audit noise:
@@ -619,6 +673,15 @@ export default function (pi: ExtensionAPI) {
           if (autoWriteInFlight.get(sessionId) === bgPromise) {
             autoWriteInFlight.delete(sessionId);
           }
+
+          // Drain loop: while this bg cycle ran, the user may have sent
+          // more messages → new entries in the branch. Check immediately
+          // and start another cycle if there's a backlog, rather than
+          // waiting for the next agent_end (which might not come soon).
+          scheduleDrainIfBacklog({
+            cwd, sessionId, settings, getBranch, notify, setStatus,
+            modelRegistry, settingsSnapshot,
+          });
         }
       })();
       autoWriteInFlight.set(sessionId, bgPromise);
