@@ -214,7 +214,7 @@ export default function (pi: ExtensionAPI) {
       const settings = resolveSettings();
       const entries = await loadEntries(ctx.cwd, settings, signal);
       try {
-        return wrapToolResult(await llmSearchEntries(entries, params, settings, ctx.modelRegistry, signal));
+        return wrapToolResult(await llmSearchEntries(entries, params, settings, ctx.modelRegistry, signal, ctx.cwd));
       } catch (err: unknown) {
         return wrapToolResult({
           ok: false,

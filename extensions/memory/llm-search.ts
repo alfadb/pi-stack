@@ -1,21 +1,19 @@
-import * as fsSync from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { MemorySettings, ThinkingLevel } from "./settings";
 import type { MemoryEntry, SearchFilters, SearchParams } from "./types";
 import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
 import { clamp, normalizeBareSlug, stableUnique } from "./utils";
+import { memorySearchMetricsPath } from "../_shared/runtime";
 
-const SEARCH_METRICS_LOG = path.join(
-  os.homedir(), ".pi", "agent", ".pi-astack", "memory", "search-metrics.jsonl",
-);
-
-function logSearchMetrics(entry: Record<string, unknown>): void {
+function logSearchMetrics(entry: Record<string, unknown>, projectRoot?: string): void {
+  if (!projectRoot) return;
   try {
-    const dir = path.dirname(SEARCH_METRICS_LOG);
+    const file = memorySearchMetricsPath(projectRoot);
+    const dir = path.dirname(file);
+    const fsSync = require("node:fs") as typeof import("node:fs");
     if (!fsSync.existsSync(dir)) fsSync.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fsSync.appendFileSync(SEARCH_METRICS_LOG, JSON.stringify(entry) + "\n", "utf-8");
+    fsSync.appendFileSync(file, JSON.stringify(entry) + "\n", "utf-8");
   } catch { /* best-effort */ }
 }
 
@@ -462,6 +460,7 @@ export async function llmSearchEntries(
   settings: MemorySettings,
   modelRegistryRaw: unknown,
   signal?: AbortSignal,
+  projectRoot?: string,
 ) {
   const query = String(params.query ?? "").trim();
   if (!query) return [];
@@ -521,7 +520,7 @@ export async function llmSearchEntries(
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
     results: stage2Picks.length,
   };
-  logSearchMetrics(entry);
+  logSearchMetrics(entry, projectRoot);
   process.stderr.write(`[memory_search] ${JSON.stringify(entry)}\n`);
 
   if (stage2Picks.length === 0) return [];

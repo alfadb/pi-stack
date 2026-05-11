@@ -91,6 +91,9 @@ export function memoryDir(projectRoot: string): string {
 export function memoryMigrationReportPath(projectRoot: string): string {
   return path.join(memoryDir(projectRoot), "migration-report.md");
 }
+export function memorySearchMetricsPath(projectRoot: string): string {
+  return path.join(memoryDir(projectRoot), "search-metrics.jsonl");
+}
 
 /* -------- compaction-tuner -------------------------------------------- */
 

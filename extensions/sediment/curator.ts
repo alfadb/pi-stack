@@ -295,6 +295,7 @@ export async function curateProjectDraft(
       deps.memorySettings,
       deps.modelRegistry,
       deps.signal,
+      deps.projectRoot,
     ) as any[];
   } catch (e: unknown) {
     const error = e instanceof Error ? e.message : String(e);
