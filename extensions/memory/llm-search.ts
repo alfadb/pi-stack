@@ -1,8 +1,23 @@
+import * as fsSync from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { MemorySettings, ThinkingLevel } from "./settings";
 import type { MemoryEntry, SearchFilters, SearchParams } from "./types";
 import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
 import { clamp, normalizeBareSlug, stableUnique } from "./utils";
+
+const SEARCH_METRICS_LOG = path.join(
+  os.homedir(), ".pi", "agent", ".pi-astack", "memory", "search-metrics.jsonl",
+);
+
+function logSearchMetrics(entry: Record<string, unknown>): void {
+  try {
+    const dir = path.dirname(SEARCH_METRICS_LOG);
+    if (!fsSync.existsSync(dir)) fsSync.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fsSync.appendFileSync(SEARCH_METRICS_LOG, JSON.stringify(entry) + "\n", "utf-8");
+  } catch { /* best-effort */ }
+}
 
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
@@ -506,6 +521,7 @@ export async function llmSearchEntries(
     s2: s2 ? { in: s2.input, out: s2.output, ...(s2.cacheHit != null ? { hit: s2.cacheHit } : {}), ...(s2.cacheWrite != null ? { write: s2.cacheWrite } : {}) } : null,
     results: stage2Picks.length,
   };
+  logSearchMetrics(entry);
   process.stderr.write(`[memory_search] ${JSON.stringify(entry)}\n`);
 
   if (stage2Picks.length === 0) return [];
