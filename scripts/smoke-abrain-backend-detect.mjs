@@ -546,6 +546,17 @@ check("activate handles missing registerCommand gracefully", () => {
   }
 });
 
+check("vault_release pre-flight existence check runs BEFORE user authorization (no phantom prompts)", () => {
+  const src = fs.readFileSync(indexSrc, "utf8");
+  if (!src.includes("checkedBeforeAuthorization")) throw new Error("pre-flight branch missing — vault_release would prompt for nonexistent keys");
+  if (!src.includes("vaultFilePath(ABRAIN_HOME, scope, key)")) throw new Error("vault_release must consult vaultFilePath() pre-flight");
+  const preFlightIdx = src.indexOf("checkedBeforeAuthorization");
+  const authorizeIdx = src.indexOf("authorizeVaultRelease(ctx.ui");
+  if (preFlightIdx < 0 || authorizeIdx < 0 || preFlightIdx >= authorizeIdx) {
+    throw new Error("pre-flight must precede authorizeVaultRelease() in execute() to avoid phantom prompts");
+  }
+});
+
 check("vault authorization menus are default-deny for non-interactive runners", () => {
   const src = fs.readFileSync(indexSrc, "utf8");
   if (!indexModule.VAULT_RELEASE_AUTH_CHOICES || indexModule.VAULT_RELEASE_AUTH_CHOICES[0] !== "No") throw new Error("vault_release authorization should put No first");

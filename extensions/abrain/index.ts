@@ -41,7 +41,7 @@ import {
   writeSecret, listSecrets, forgetSecret, validateKey,
   type VaultScope,
 } from "./vault-writer";
-import { releaseSecret, type ReleaseSecretResult } from "./vault-reader";
+import { releaseSecret, vaultFilePath, type ReleaseSecretResult } from "./vault-reader";
 import {
   authKey,
   prepareBootVaultBashCommand,
@@ -459,6 +459,24 @@ export default function activate(pi: ExtensionAPI): void {
 
         try { validateKey(key); }
         catch (err: any) { return toolJson({ ok: false, error: `invalid vault key: ${err.message}` }); }
+
+        // Pre-flight: avoid spending a user authorization prompt on a key that
+        // does not exist. The encrypted file's mere existence is already
+        // visible via `/secret list` metadata, so this check leaks no new
+        // information but saves the user from approving phantom releases.
+        try {
+          if (!fs.existsSync(vaultFilePath(ABRAIN_HOME, scope, key))) {
+            return toolJson({
+              ok: false,
+              key,
+              scope,
+              error: `vault key not found or forgotten: ${scopeLabel(scope)}:${key}`,
+              checkedBeforeAuthorization: true,
+            });
+          }
+        } catch (err: any) {
+          return toolJson({ ok: false, key, scope, error: `vault key pre-flight failed: ${err?.message ?? String(err)}` });
+        }
 
         const auth = await authorizeVaultRelease(ctx.ui, scope, key, reason, signal);
         if (!auth.ok) return toolJson({ ok: false, key, scope, denied: true, reason: auth.reason });
