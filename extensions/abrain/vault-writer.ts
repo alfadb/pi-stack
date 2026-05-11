@@ -220,6 +220,39 @@ function metaFilePath(vaultDir: string, key: string): string {
   return path.join(vaultDir, "_meta", `${key}.md`);
 }
 
+export interface VaultEntryMeta {
+  description?: string;
+  created?: string;
+  forgottenAt?: string;
+}
+
+/**
+ * Read a single key's _meta/<key>.md without decrypting the secret. Returns
+ * null if the meta file is missing. Used by authorization prompts to surface
+ * the human-readable description, and by callers that already know which key
+ * they want (cheaper than walking the whole vault via listSecrets).
+ */
+export function readVaultEntryMeta(abrainHome: string, scope: VaultScope, key: string): VaultEntryMeta | null {
+  validateKey(key);
+  const vaultDir = vaultDirForScope(abrainHome, scope);
+  const metaPath = metaFilePath(vaultDir, key);
+  if (!fs.existsSync(metaPath)) return null;
+  try {
+    const content = fs.readFileSync(metaPath, "utf8");
+    const description = content.match(/^description:\s*(.+)$/m)?.[1]?.trim();
+    const created = content.match(/^created:\s*(.+)$/m)?.[1]?.trim();
+    let forgottenAt: string | undefined;
+    const forgottenLines = content.match(/^- (\S+)\s+\|\s+forgotten\b/gm);
+    if (forgottenLines && forgottenLines.length > 0) {
+      const m = forgottenLines[forgottenLines.length - 1]!.match(/^- (\S+)/);
+      if (m) forgottenAt = m[1]!;
+    }
+    return { description, created, forgottenAt };
+  } catch {
+    return null;
+  }
+}
+
 interface TimelineRow {
   ts: string;
   op: "created" | "rotated" | "forgotten";

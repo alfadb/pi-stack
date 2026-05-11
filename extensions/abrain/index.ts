@@ -38,7 +38,7 @@ import {
   type EncryptableBackend, type ExecFn,
 } from "./keychain";
 import {
-  writeSecret, listSecrets, forgetSecret, validateKey,
+  writeSecret, listSecrets, forgetSecret, readVaultEntryMeta, validateKey,
   type VaultScope,
 } from "./vault-writer";
 import { releaseSecret, vaultFilePath, type ReleaseSecretResult } from "./vault-reader";
@@ -312,23 +312,54 @@ function truncateForPrompt(value: string, max = 240): string {
   return `${oneLine.slice(0, head)} ... ${oneLine.slice(-tail)}`;
 }
 
-export function formatBashAuthorizationTitle(record: { releases: ReleaseSecretResult[]; originalCommand?: string }): string {
-  const keys = record.releases.map((r) => `${scopeLabel(r.scope)}:${r.key}`).join(", ") || "<none>";
+export function formatBashAuthorizationTitle(
+  record: { releases: ReleaseSecretResult[]; originalCommand?: string },
+  descriptions?: ReadonlyMap<string, string>,
+): string {
+  const lines: string[] = [`Release bash output to the LLM?`];
+  if (record.releases.length === 0) {
+    lines.push(`vault keys used: <none>`);
+  } else {
+    lines.push(`vault keys used:`);
+    for (const r of record.releases) {
+      const label = authKey(r.scope, r.key);
+      const desc = descriptions?.get(label);
+      lines.push(`  ${label}${desc ? ` — ${truncateForPrompt(desc, 200)}` : ""}`);
+    }
+  }
   const cmd = record.originalCommand ? truncateForPrompt(record.originalCommand) : "<unknown command>";
-  return [
-    `Release bash output to the LLM?`,
-    `vault keys used: ${keys}`,
-    `command: ${cmd}`,
-    `⚠ The output may still contain encoded forms of the secret (base64/hex/xxd/xor) that literal redaction cannot catch.`,
-  ].join("\n");
+  lines.push(`command: ${cmd}`);
+  lines.push(`⚠ The output may still contain encoded forms of the secret (base64/hex/xxd/xor) that literal redaction cannot catch.`);
+  return lines.join("\n");
 }
 
-export function formatReleaseAuthorizationTitle(scope: VaultScope, key: string, reason: string | undefined): string {
-  return [
-    `Release vault secret ${authKey(scope, key)} to the LLM?`,
-    reason ? `LLM reason: ${truncateForPrompt(reason, 320)}` : `LLM reason: (none supplied)`,
-    `⚠ Plaintext will enter this model context. Redaction is best-effort and does not cover base64/hex/xxd/xor transformations.`,
-  ].join("\n");
+export function formatReleaseAuthorizationTitle(
+  scope: VaultScope,
+  key: string,
+  reason: string | undefined,
+  description?: string,
+): string {
+  const lines: string[] = [`Release vault secret ${authKey(scope, key)} to the LLM?`];
+  if (description) lines.push(`description: ${truncateForPrompt(description, 240)}`);
+  lines.push(reason ? `LLM reason: ${truncateForPrompt(reason, 320)}` : `LLM reason: (none supplied)`);
+  lines.push(`⚠ Plaintext will enter this model context. Redaction is best-effort and does not cover base64/hex/xxd/xor transformations.`);
+  return lines.join("\n");
+}
+
+function collectReleaseDescriptions(releases: ReleaseSecretResult[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const r of releases) {
+    try {
+      const meta = readVaultEntryMeta(ABRAIN_HOME, r.scope, r.key);
+      if (meta?.description) out.set(authKey(r.scope, r.key), meta.description);
+    } catch { /* ignore unreadable meta */ }
+  }
+  return out;
+}
+
+function readReleaseDescription(scope: VaultScope, key: string): string | undefined {
+  try { return readVaultEntryMeta(ABRAIN_HOME, scope, key)?.description; }
+  catch { return undefined; }
 }
 
 async function authorizeVaultBashOutput(
@@ -339,7 +370,8 @@ async function authorizeVaultBashOutput(
 ): Promise<"release" | "withhold"> {
   if (bashOutputSessionGrants.has(record.grantKey)) return "release";
   if (!ui?.select) return "withhold";
-  const englishTitle = formatBashAuthorizationTitle(record);
+  const descriptions = collectReleaseDescriptions(record.releases);
+  const englishTitle = formatBashAuthorizationTitle(record, descriptions);
   const title = await localizePrompt(englishTitle, hostCtx);
   // Also push the full context into the message stream so it survives any TUI
   // truncation of the select title.
@@ -371,7 +403,8 @@ async function authorizeVaultRelease(
   if (releaseSessionGrants.has(gate)) return { ok: true };
   if (!ui) return { ok: false, reason: "ui_unavailable" };
 
-  const englishTitle = formatReleaseAuthorizationTitle(scope, key, reason);
+  const description = readReleaseDescription(scope, key);
+  const englishTitle = formatReleaseAuthorizationTitle(scope, key, reason, description);
   const title = await localizePrompt(englishTitle, hostCtx);
   // Mirror the full context into the message stream so the user always sees
   // what is about to be released, even if the TUI select clips long titles.

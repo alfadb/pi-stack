@@ -263,6 +263,25 @@ await check("v1.4.4 dogfood: listSecrets parses forgottenAt from _meta timeline"
   if (item.forgottenAt <= item.created) throw new Error(`forgottenAt (${item.forgottenAt}) should be > created (${item.created})`);
 });
 
+await check("readVaultEntryMeta returns description + created (single-key reader, no decrypt)", async () => {
+  const { home } = freshAbrainHome();
+  await vw.writeSecret({ abrainHome: home, scope: "global", key: "shared-key", value: "v", description: "shared across hosts" });
+  const meta = vw.readVaultEntryMeta(home, "global", "shared-key");
+  if (!meta) throw new Error("expected meta for existing key");
+  if (meta.description !== "shared across hosts") throw new Error(`bad description: ${meta.description}`);
+  if (!meta.created) throw new Error("created should be populated");
+  if (meta.forgottenAt) throw new Error(`forgottenAt should be undefined: ${meta.forgottenAt}`);
+});
+
+await check("readVaultEntryMeta returns null for missing key + populates forgottenAt after forget", async () => {
+  const { home } = freshAbrainHome();
+  if (vw.readVaultEntryMeta(home, "global", "nope") !== null) throw new Error("missing key should yield null");
+  await vw.writeSecret({ abrainHome: home, scope: "global", key: "k", value: "v" });
+  await vw.forgetSecret(home, "global", "k");
+  const meta = vw.readVaultEntryMeta(home, "global", "k");
+  if (!meta?.forgottenAt) throw new Error("forgottenAt should populate after forget");
+});
+
 await check("v1.4.4 dogfood: forgottenAt absent when not forgotten", async () => {
   const { home } = freshAbrainHome();
   await vw.writeSecret({ abrainHome: home, scope: "global", key: "k", value: "v" });

@@ -549,25 +549,40 @@ check("activate handles missing registerCommand gracefully", () => {
   }
 });
 
-check("authorization prompt titles disclose key + scope + reason (so the user knows what they're approving)", () => {
-  // formatReleaseAuthorizationTitle must include scope:key and surface the reason.
-  const releaseTitle = indexModule.formatReleaseAuthorizationTitle("global", "github-token", "push to main");
+check("authorization prompt titles disclose key + scope + reason + description (so the user knows what they're approving)", () => {
+  // formatReleaseAuthorizationTitle: scope:key + LLM reason + description + plaintext warning.
+  const releaseTitle = indexModule.formatReleaseAuthorizationTitle("global", "github-token", "push to main", "GitHub PAT for the release pipeline");
   if (!releaseTitle.includes("global:github-token")) throw new Error(`release title missing scope:key — ${releaseTitle}`);
   if (!releaseTitle.includes("push to main")) throw new Error(`release title missing LLM reason — ${releaseTitle}`);
+  if (!releaseTitle.includes("GitHub PAT for the release pipeline")) throw new Error(`release title missing description — ${releaseTitle}`);
   if (!releaseTitle.toLowerCase().includes("plaintext")) throw new Error(`release title missing plaintext warning — ${releaseTitle}`);
-  // When LLM omits the reason, prompt must still tell the user that no reason was supplied.
+  // Description omitted: prompt still renders without a phantom line.
+  const noDescTitle = indexModule.formatReleaseAuthorizationTitle("global", "github-token", "reason", undefined);
+  if (noDescTitle.includes("description:")) throw new Error(`should omit description line when none — ${noDescTitle}`);
+  // No LLM reason supplied: prompt annotates that explicitly.
   const noReasonTitle = indexModule.formatReleaseAuthorizationTitle({ project: "pi-global" }, "db-password", undefined);
   if (!noReasonTitle.includes("project:pi-global:db-password")) throw new Error(`project scope label missing — ${noReasonTitle}`);
   if (!noReasonTitle.toLowerCase().includes("none supplied")) throw new Error(`missing fallback reason annotation — ${noReasonTitle}`);
 
-  // formatBashAuthorizationTitle must include the vault keys AND the command preview.
+  // formatBashAuthorizationTitle: keys list (with optional per-key description) + command preview.
+  const descriptions = new Map([
+    ["global:github-token", "GitHub PAT for the release pipeline"],
+  ]);
   const bashTitle = indexModule.formatBashAuthorizationTitle({
     releases: [{ scope: "global", key: "github-token", value: "<x>", placeholder: "<vault:global:github-token>" }],
     originalCommand: "curl -H \"Authorization: token $VAULT_github_token\" https://api.github.com/user",
-  });
+  }, descriptions);
   if (!bashTitle.includes("global:github-token")) throw new Error(`bash title missing keys — ${bashTitle}`);
+  if (!bashTitle.includes("GitHub PAT for the release pipeline")) throw new Error(`bash title missing description — ${bashTitle}`);
   if (!bashTitle.includes("curl -H")) throw new Error(`bash title missing command preview — ${bashTitle}`);
   if (!bashTitle.toLowerCase().includes("encoded")) throw new Error(`bash title missing encoded-secret warning — ${bashTitle}`);
+  // Without descriptions, the keys line still renders cleanly.
+  const bashTitleNoDesc = indexModule.formatBashAuthorizationTitle({
+    releases: [{ scope: "global", key: "github-token", value: "<x>", placeholder: "<vault:global:github-token>" }],
+    originalCommand: "echo ok",
+  });
+  if (!bashTitleNoDesc.includes("global:github-token")) throw new Error(`bash title (no descriptions) missing key — ${bashTitleNoDesc}`);
+  if (bashTitleNoDesc.includes(" — ")) throw new Error(`bash title should not render empty description dash — ${bashTitleNoDesc}`);
 
   // Very long values should be truncated so the prompt stays usable.
   const longCmd = "echo " + "x".repeat(2000) + " tail-marker";

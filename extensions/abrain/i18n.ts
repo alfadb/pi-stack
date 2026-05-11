@@ -22,7 +22,11 @@
 const RING_MAX = 3;
 const RING_TEXT_MAX = 1200;
 const CACHE_MAX = 200;
-const TRANSLATE_TIMEOUT_MS = 5_000;
+// Long enough for a slow reasoning model to localize the bash authorization
+// prompt, which is meaningfully bigger than the vault_release one (it carries
+// the keys list + command preview + an extra encoded-secret caveat). Pre-bump:
+// 5s was occasionally truncating to English on the bash path in live testing.
+const TRANSLATE_TIMEOUT_MS = 12_000;
 
 const userMessageRing: string[] = [];
 const cache = new Map<string, string>();
