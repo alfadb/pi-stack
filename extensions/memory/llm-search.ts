@@ -23,6 +23,12 @@ interface FinalPick {
 interface ModelCallResult {
   rawText: string;
   stopReason?: string;
+  usage?: {
+    input: number;
+    output: number;
+    cacheHit?: number;
+    cacheWrite?: number;
+  };
 }
 
 interface ModelLike {
@@ -117,7 +123,19 @@ async function callSearchModel(
     .join("\n")
     .trim();
   if (!rawText) throw new Error(`memory.search ${modelRef} returned empty text`);
-  return { rawText, stopReason: finalMsg.stopReason };
+
+  // Capture cache + usage metrics from provider response.
+  // pi-ai surfaces these as usage.input / usage.output / usage.cacheReadInputTokens / usage.cacheCreationInputTokens.
+  // Field names vary by provider; we normalize to a flat object.
+  const usageRaw = (finalMsg as any).usage;
+  const usage: ModelCallResult["usage"] = usageRaw ? {
+    input: usageRaw.input ?? usageRaw.promptTokens ?? usageRaw.inputTokens ?? 0,
+    output: usageRaw.output ?? usageRaw.completionTokens ?? usageRaw.outputTokens ?? 0,
+    ...(typeof usageRaw.cacheReadInputTokens === "number" ? { cacheHit: usageRaw.cacheReadInputTokens } : {}),
+    ...(typeof usageRaw.cacheCreationInputTokens === "number" ? { cacheWrite: usageRaw.cacheCreationInputTokens } : {}),
+  } : undefined;
+
+  return { rawText, stopReason: finalMsg.stopReason, usage };
 }
 
 function kindLabel(kind: string): string {
@@ -473,6 +491,30 @@ export async function llmSearchEntries(
     settings.search.stage2Thinking,
   );
   const stage2Picks = parseFinalPicks(stage2.rawText);
+
+  // ── Cache metrics log ─────────────────────────────────────────
+  // One-line summary per search to stderr so it appears regardless
+  // of pi output mode. Cache hit/write fields may be undefined when
+  // the provider doesn't surface them or when the cache was cold.
+  const s1 = stage1.usage;
+  const s2 = stage2.usage;
+  const s1Cache = s1?.cacheHit != null
+    ? ` hit=${s1.cacheHit}`
+    : s1?.cacheWrite != null
+      ? ` write=${s1.cacheWrite}`
+      : "";
+  const s2Cache = s2?.cacheHit != null
+    ? ` hit=${s2.cacheHit}`
+    : s2?.cacheWrite != null
+      ? ` write=${s2.cacheWrite}`
+      : "";
+  console.error(
+    `[memory_search] ` +
+    `s1:↑${s1?.input ?? "?"}↓${s1?.output ?? "?"}${s1Cache} ` +
+    `s2:↑${s2?.input ?? "?"}↓${s2?.output ?? "?"}${s2Cache} ` +
+    `→ ${stage2Picks.length} results`,
+  );
+
   if (stage2Picks.length === 0) return [];
   return rankFromStage2(entriesBySlug, stage2Picks, finalLimit);
 }
