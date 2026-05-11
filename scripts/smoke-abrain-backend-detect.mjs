@@ -506,10 +506,16 @@ check("PI_ABRAIN_DISABLED unset → activate registers /vault, vault_release, an
     const registered = [];
     const tools = [];
     const events = [];
-    activate({ registerCommand: (name) => registered.push(name), registerTool: (tool) => tools.push(tool.name), on: (event) => events.push(event) });
+    const toolDefs = [];
+    activate({ registerCommand: (name) => registered.push(name), registerTool: (tool) => { tools.push(tool.name); toolDefs.push(tool); }, on: (event) => events.push(event) });
     if (!registered.includes("vault")) throw new Error(`expected /vault, got: ${registered.join(", ")}`);
     if (!tools.includes("vault_release")) throw new Error(`expected vault_release tool, got: ${tools.join(", ")}`);
     if (!events.includes("tool_call") || !events.includes("tool_result")) throw new Error(`expected bash vault hooks, got: ${events.join(", ")}`);
+    const release = toolDefs.find((t) => t.name === "vault_release");
+    if (!release || !release.parameters || !release.parameters.properties) throw new Error("vault_release tool definition missing parameters.properties");
+    if (!release.parameters.properties.scope) throw new Error("vault_release schema must declare top-level scope (LLMs cannot reliably emit nested options object)");
+    if (!release.parameters.properties.reason) throw new Error("vault_release schema must declare top-level reason");
+    if (release.parameters.properties.options) throw new Error("vault_release schema should not declare nested options (callers must use flat scope/reason)");
   } finally {
     if (prev !== undefined) process.env.PI_ABRAIN_DISABLED = prev;
   }

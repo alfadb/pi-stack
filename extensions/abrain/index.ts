@@ -414,7 +414,7 @@ export default function activate(pi: ExtensionAPI): void {
         "Request user-authorized release of a vault secret into the LLM context. " +
         "This is the P0c.read LLM-facing path: it prompts the user (Yes once / Session / No / Deny+remember) before decrypting. " +
         "Scope='global' targets the global vault; scope='project' targets the boot-time active project's vault (rejected when no active project is bound). Sub-pi processes register no vault tools.",
-      promptSnippet: "vault_release(key, options?: { scope?: 'global'|'project', reason?: string })",
+      promptSnippet: "vault_release(key, scope?: 'global'|'project', reason?: string)",
       promptGuidelines: [
         "Use vault_release only when plaintext is strictly necessary for the current task.",
         "Always provide a concise reason explaining why the secret must enter model context.",
@@ -425,21 +425,20 @@ export default function activate(pi: ExtensionAPI): void {
         type: "object",
         properties: {
           key: { type: "string", description: "Vault key name to release, e.g. github-token." },
-          options: {
-            type: "object",
-            properties: {
-              scope: { type: "string", enum: ["global", "project"], description: "'global' = ~/.abrain/vault; 'project' = boot-time active project's vault." },
-              reason: { type: "string", description: "Why plaintext must be released into the LLM context." },
-            },
-          },
+          scope: { type: "string", enum: ["global", "project"], description: "'global' = ~/.abrain/vault; 'project' = boot-time active project's vault. Defaults to 'global'." },
+          reason: { type: "string", description: "Why plaintext must be released into the LLM context." },
         },
         required: ["key"],
       },
       async execute(_toolCallId, params, signal, _onUpdate, ctx) {
         const key = String(params.key ?? "").trim();
-        const options = (params.options && typeof params.options === "object") ? params.options as Record<string, unknown> : params;
-        const scopeRaw = String(options.scope ?? "global");
-        const reason = typeof options.reason === "string" ? options.reason : undefined;
+        // Accept both flat (scope/reason at top level — preferred) and legacy
+        // nested options.{scope,reason}. The flat form is the canonical schema;
+        // the nested fallback covers callers that emit the older shape.
+        const nested = (params.options && typeof params.options === "object") ? params.options as Record<string, unknown> : undefined;
+        const scopeRaw = String((params.scope ?? nested?.scope ?? "global"));
+        const reasonRaw = params.reason ?? nested?.reason;
+        const reason = typeof reasonRaw === "string" ? reasonRaw : undefined;
 
         let scope: VaultScope;
         if (scopeRaw === "global") {
