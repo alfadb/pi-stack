@@ -63,6 +63,12 @@ import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
  */
 const autoWriteInFlight = new Map<string, Promise<void>>();
 
+/** Track agent_start/end balance per session. When ended >= started,
+ *  the main-session LLM is in agent_end state (finished, not working) —
+ *  safe for bg drain. When started > ended, the LLM is working — drain
+ *  must wait for the next agent_end. */
+const sessionAgentCycle = new Map<string, { started: number; ended: number }>();
+
 /** Status key for ctx.ui.setStatus(). */
 const SEDIMENT_STATUS_KEY = FOOTER_STATUS_KEYS.sediment;
 
@@ -296,6 +302,9 @@ export default function (pi: ExtensionAPI) {
     if (!settings.enabled) return;
     const sessionId = readSessionId(ctx.sessionManager);
     if (!sessionId) return;
+    const c = sessionAgentCycle.get(sessionId) ?? { started: 0, ended: 0 };
+    c.started++;
+    sessionAgentCycle.set(sessionId, c);
     const prev = sedimentStatusBySession.get(sessionId);
     if (prev !== "completed" && prev !== "failed") return;  // running -> stay; idle -> already idle
     const setStatusRaw = ctx.ui?.setStatus?.bind(ctx.ui);
@@ -333,6 +342,12 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     const sessionId = readSessionId(ctx.sessionManager);
+    // Track agent_end for drain-loop gating (only drain when LLM not working).
+    if (sessionId) {
+      const c = sessionAgentCycle.get(sessionId) ?? { started: 0, ended: 0 };
+      c.ended++;
+      sessionAgentCycle.set(sessionId, c);
+    }
     // Capture getBranch for drain-loop re-reads (bg work outlives ctx).
     const getBranch = ctx.sessionManager.getBranch.bind(ctx.sessionManager);
     const notify = ctx.ui?.notify?.bind(ctx.ui);
@@ -486,6 +501,13 @@ export default function (pi: ExtensionAPI) {
       // more entries accumulated while it was running. If so, start
       // another cycle without waiting for the next agent_end.
       const scheduleDrainIfBacklog = () => {
+        // Only drain when the main-session LLM is NOT working
+        // (agent_end fires and no new agent_start has followed).
+        // If started > ended, the LLM is mid-response — the next
+        // agent_end will trigger sediment naturally.
+        const cyc = sessionAgentCycle.get(sessionId);
+        if (!cyc || cyc.started > cyc.ended) return;
+
         const branchNow = getBranch();
         loadSessionCheckpoint(cwd, sessionId).then((cp) => {
           const win = buildRunWindow(branchNow, cp, settings);
