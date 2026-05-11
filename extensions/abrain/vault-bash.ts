@@ -33,6 +33,9 @@ export interface VaultBashRunRecord {
    * source line. Surfaced to the user at output-release authorization time so
    * they can see what ran. Not persisted; cleared with the record. */
   originalCommand?: string;
+  /** $VAULT_<name> -> scope:key resolution captured at inject time, in matching
+   * positional order with `releases`. Used by the audit log only. */
+  variables?: Array<{ varName: string; scopeKey: string }>;
 }
 
 export interface VaultBashEnvVar {
@@ -157,6 +160,10 @@ export async function prepareVaultBashCommand(command: string, deps: VaultBashPr
 
   const envFile = deps.writeEnvFile(envVars);
   const quoted = shellSingleQuote(envFile);
+  const variables = envVars.map((v, i) => ({
+    varName: v.varName,
+    scopeKey: authKey(releases[i]!.scope, releases[i]!.key),
+  }));
   return {
     kind: "prepared",
     command: `__pi_vault_env=${quoted}; trap 'rm -f "$__pi_vault_env"' EXIT; . "$__pi_vault_env"; ${command}`,
@@ -164,6 +171,7 @@ export async function prepareVaultBashCommand(command: string, deps: VaultBashPr
       releases,
       envFile,
       grantKey: releases.map((r) => authKey(r.scope, r.key)).sort().join(","),
+      variables,
     },
   };
 }

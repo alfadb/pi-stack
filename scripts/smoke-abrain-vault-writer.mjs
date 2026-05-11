@@ -194,6 +194,47 @@ await check("vault-events: 'rotate' on second write of same key", async () => {
   if (lines[1].op !== "rotate") throw new Error(`second should be rotate, got ${lines[1].op}`);
 });
 
+await check("appendVaultReadAudit: read-path ops land in vault-events.jsonl without plaintext", async () => {
+  const { home } = freshAbrainHome();
+  fs.mkdirSync(path.join(home, ".state"), { recursive: true });
+  await vw.appendVaultReadAudit(home, {
+    ts: new Date().toISOString(),
+    op: "release",
+    scope: "global",
+    key: "github-token",
+    lane: "vault_release",
+  });
+  await vw.appendVaultReadAudit(home, {
+    ts: new Date().toISOString(),
+    op: "bash_inject",
+    scope: "global",
+    lane: "bash_inject",
+    keys: ["global:github-token"],
+    variables: [{ varName: "VAULT_github_token", scopeKey: "global:github-token" }],
+    command_preview: "curl -H \"Authorization: token $VAULT_github_token\" ...",
+  });
+  await vw.appendVaultReadAudit(home, {
+    ts: new Date().toISOString(),
+    op: "release_denied",
+    scope: "global",
+    key: "github-token",
+    lane: "vault_release",
+    reason: "no",
+  });
+  const raw = fs.readFileSync(path.join(home, ".state", "vault-events.jsonl"), "utf8");
+  if (raw.includes("plaintext")) throw new Error("audit must not mention plaintext");
+  const rows = raw.split("\n").filter(Boolean).map(JSON.parse);
+  if (rows.length !== 3) throw new Error(`expected 3 audit rows, got ${rows.length}`);
+  if (rows[0].op !== "release" || rows[0].lane !== "vault_release") throw new Error(`row 0 mismatched: ${JSON.stringify(rows[0])}`);
+  if (rows[1].op !== "bash_inject" || !Array.isArray(rows[1].variables)) throw new Error(`row 1 mismatched: ${JSON.stringify(rows[1])}`);
+  if (rows[1].variables[0].varName !== "VAULT_github_token") throw new Error(`row 1 varName missing: ${JSON.stringify(rows[1])}`);
+  if (rows[1].variables[0].scopeKey !== "global:github-token") throw new Error(`row 1 scopeKey missing: ${JSON.stringify(rows[1])}`);
+  if (rows[2].op !== "release_denied" || rows[2].reason !== "no") throw new Error(`row 2 mismatched: ${JSON.stringify(rows[2])}`);
+  for (const row of rows) {
+    if ("value" in row) throw new Error("audit row must not carry plaintext value");
+  }
+});
+
 // ── 5. listSecrets ──────────────────────────────────────────────
 
 await check("listSecrets: returns metadata for all written keys, no decrypt", async () => {

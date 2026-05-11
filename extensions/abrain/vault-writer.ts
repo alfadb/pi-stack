@@ -188,16 +188,71 @@ function tryReclaimStaleLock(lockFile: string): boolean {
 
 // ── audit log (vault-events.jsonl) ──────────────────────────────
 
-interface VaultEvent {
+/**
+ * Audit row operations recorded in `~/.abrain/.state/vault-events.jsonl`.
+ *
+ * Write path (already shipped):
+ *   - `create` / `rotate` / `forget` / `recovered_missing_audit`
+ *
+ * Read path (ADR 0014 P0c.read audit closure):
+ *   - `release`            — vault_release tool authorized + plaintext delivered
+ *   - `release_denied`     — vault_release tool authorization denied
+ *   - `release_blocked`    — vault_release tool rejected before authorization
+ *                            (pre-flight: key missing/forgotten or bad input)
+ *   - `bash_inject`        — $VAULT_* / $PVAULT_* / $GVAULT_* matched, env file written
+ *   - `bash_inject_block`  — bash hook refused (missing key, $PVAULT_* without
+ *                            active project, decrypt error, etc.)
+ *   - `bash_output_release` — user authorized vault-backed bash stdout to LLM
+ *   - `bash_output_withhold` — user denied / pre-existing withhold path
+ *
+ * Plaintext NEVER enters audit rows. Command previews are truncated and only
+ * contain `$VAULT_*` variable refs (the bash hook rewrites the command before
+ * execution, never the other way around).
+ */
+export type VaultEventOp =
+  | "create"
+  | "rotate"
+  | "forget"
+  | "recovered_missing_audit"
+  | "release"
+  | "release_denied"
+  | "release_blocked"
+  | "bash_inject"
+  | "bash_inject_block"
+  | "bash_output_release"
+  | "bash_output_withhold";
+
+export interface VaultEvent {
   ts: string;
-  op: "create" | "rotate" | "forget" | "recovered_missing_audit";
+  op: VaultEventOp;
   scope: "global" | string; // "global" or "project:<id>"
-  key: string;
-  /** size of plaintext (NOT the secret itself) for cardinality */
+  /** Per-key writes set this. Read-path events that span multiple keys (bash
+   * inject / bash output release) leave this empty and use `keys` instead. */
+  key?: string;
+  /** Size of plaintext (NOT the secret itself) for cardinality. */
   size?: number;
   description?: string;
-  /** identifying info for recovery rows */
+  /** Identifying info for recovery rows. */
   recovered_ts?: string;
+  /** Read-path identifier of the originating lane. */
+  lane?: string;
+  /** Read-path: denial / block reason code. */
+  reason?: string;
+  /** Read-path: list of scope:key strings for events that span multiple keys. */
+  keys?: string[];
+  /** Read-path: $VAULT_<name> → scope:key mapping captured at injection time. */
+  variables?: Array<{ varName: string; scopeKey: string }>;
+  /** Read-path: truncated bash command preview — variable refs only, never plaintext. */
+  command_preview?: string;
+}
+
+/**
+ * Public read-path entry point: append a single audit row. Use this from
+ * vault_release / bash hook code in index.ts. Plaintext must NOT appear in
+ * any field; the type purposely has no `value` slot.
+ */
+export async function appendVaultReadAudit(abrainHome: string, ev: VaultEvent): Promise<void> {
+  return appendVaultEvent(abrainHome, ev);
 }
 
 async function appendVaultEvent(abrainHome: string, ev: VaultEvent): Promise<void> {

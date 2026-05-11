@@ -39,7 +39,8 @@ import {
 } from "./keychain";
 import {
   writeSecret, listSecrets, forgetSecret, readVaultEntryMeta, validateKey,
-  type VaultScope,
+  appendVaultReadAudit,
+  type VaultEventOp, type VaultScope,
 } from "./vault-writer";
 import { releaseSecret, vaultFilePath, type ReleaseSecretResult } from "./vault-reader";
 import {
@@ -346,6 +347,67 @@ export function formatReleaseAuthorizationTitle(
   return lines.join("\n");
 }
 
+function scopeAuditLabel(scope: VaultScope): string {
+  return scope === "global" ? "global" : `project:${scope.project}`;
+}
+
+function safeAuditAppend(ev: Parameters<typeof appendVaultReadAudit>[1]): void {
+  // Audit failures must never break vault read paths — they're observability,
+  // not enforcement. Swallow + best-effort log via stderr if anything throws.
+  appendVaultReadAudit(ABRAIN_HOME, ev).catch((err) => {
+    try { process.stderr.write(`abrain vault audit append failed: ${err?.message ?? err}\n`); } catch {}
+  });
+}
+
+function auditReleaseDecision(op: VaultEventOp, scope: VaultScope, key: string, extras: { reason?: string } = {}): void {
+  safeAuditAppend({
+    ts: new Date().toISOString(),
+    op,
+    scope: scopeAuditLabel(scope),
+    key,
+    lane: "vault_release",
+    ...(extras.reason ? { reason: extras.reason } : {}),
+  });
+}
+
+function auditBashInject(record: VaultBashRunRecord): void {
+  if (record.releases.length === 0) return;
+  const firstScope = record.releases[0]!.scope;
+  safeAuditAppend({
+    ts: new Date().toISOString(),
+    op: "bash_inject",
+    scope: scopeAuditLabel(firstScope),
+    lane: "bash_inject",
+    keys: record.releases.map((r) => authKey(r.scope, r.key)),
+    variables: record.variables,
+    command_preview: record.originalCommand ? truncateForPrompt(record.originalCommand, 240) : undefined,
+  });
+}
+
+function auditBashInjectBlock(originalCommand: string, reason: string): void {
+  safeAuditAppend({
+    ts: new Date().toISOString(),
+    op: "bash_inject_block",
+    scope: "global", // scope is unknown at block time; lane marks the row
+    lane: "bash_inject",
+    reason,
+    command_preview: truncateForPrompt(originalCommand, 240),
+  });
+}
+
+function auditBashOutput(op: "bash_output_release" | "bash_output_withhold", record: VaultBashRunRecord): void {
+  if (record.releases.length === 0) return;
+  const firstScope = record.releases[0]!.scope;
+  safeAuditAppend({
+    ts: new Date().toISOString(),
+    op,
+    scope: scopeAuditLabel(firstScope),
+    lane: "bash_output",
+    keys: record.releases.map((r) => authKey(r.scope, r.key)),
+    command_preview: record.originalCommand ? truncateForPrompt(record.originalCommand, 240) : undefined,
+  });
+}
+
 function collectReleaseDescriptions(releases: ReleaseSecretResult[]): Map<string, string> {
   const out = new Map<string, string>();
   for (const r of releases) {
@@ -466,12 +528,16 @@ export default function activate(pi: ExtensionAPI): void {
       const activeProjectId = bootActiveProject?.activeProject?.projectId ?? null;
       const prepared = await prepareBootVaultBashCommand(command, { abrainHome: ABRAIN_HOME, stateDir: STATE_DIR, activeProjectId });
       if (prepared.kind === "none") return;
-      if (prepared.kind === "block") return { block: true, reason: prepared.reason };
+      if (prepared.kind === "block") {
+        auditBashInjectBlock(command, prepared.reason);
+        return { block: true, reason: prepared.reason };
+      }
       event.input.command = prepared.command;
       // Stash the original (pre-wrap) command so the post-run authorization
       // prompt can show the user exactly what ran.
       prepared.record.originalCommand = command;
       vaultBashRuns.set(event.toolCallId, prepared.record);
+      auditBashInject(prepared.record);
     });
 
     eventRegistry.on("tool_result", async (event, ctx) => {
@@ -483,11 +549,13 @@ export default function activate(pi: ExtensionAPI): void {
 
       const decision = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal, ctx);
       if (decision !== "release") {
+        auditBashOutput("bash_output_withhold", record);
         return {
           content: withheldVaultBashContent(record),
           details: { ...(event.details ?? {}), vault: { outputWithheld: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
         };
       }
+      auditBashOutput("bash_output_release", record);
       return {
         content: redactVaultBashContent(event.content, record.releases),
         details: { ...(event.details ?? {}), vault: { outputReleased: true, redacted: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
@@ -555,6 +623,7 @@ export default function activate(pi: ExtensionAPI): void {
         // information but saves the user from approving phantom releases.
         try {
           if (!fs.existsSync(vaultFilePath(ABRAIN_HOME, scope, key))) {
+            auditReleaseDecision("release_blocked", scope, key, { reason: "key_not_found" });
             return toolJson({
               ok: false,
               key,
@@ -564,14 +633,19 @@ export default function activate(pi: ExtensionAPI): void {
             });
           }
         } catch (err: any) {
+          auditReleaseDecision("release_blocked", scope, key, { reason: "preflight_error" });
           return toolJson({ ok: false, key, scope, error: `vault key pre-flight failed: ${err?.message ?? String(err)}` });
         }
 
         const auth = await authorizeVaultRelease(ctx.ui, scope, key, reason, signal, ctx);
-        if (!auth.ok) return toolJson({ ok: false, key, scope, denied: true, reason: auth.reason });
+        if (!auth.ok) {
+          auditReleaseDecision("release_denied", scope, key, { reason: auth.reason });
+          return toolJson({ ok: false, key, scope, denied: true, reason: auth.reason });
+        }
 
         try {
           const released = await releaseSecret({ abrainHome: ABRAIN_HOME, scope, key });
+          auditReleaseDecision("release", scope, key);
           return toolJson({
             ok: true,
             key,
@@ -581,6 +655,7 @@ export default function activate(pi: ExtensionAPI): void {
             warning: "Plaintext is now in model context. Redaction is best-effort and does not cover encoded/transformed values.",
           });
         } catch (err: any) {
+          auditReleaseDecision("release_blocked", scope, key, { reason: `release_error: ${err?.message ?? "unknown"}` });
           return toolJson({ ok: false, key, scope, error: err?.message ?? String(err) });
         }
       },

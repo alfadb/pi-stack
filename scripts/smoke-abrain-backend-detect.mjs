@@ -594,6 +594,34 @@ check("authorization prompt titles disclose key + scope + reason + description (
   if (!truncated.includes("tail-marker")) throw new Error(`truncation should keep tail (last meaningful chars)`);
 });
 
+check("vault_release / bash hook write read-path audit ops via appendVaultReadAudit", () => {
+  // Static contract: source code must wire the audit helpers into both the
+  // vault_release tool execute() path AND the bash tool_call / tool_result
+  // hooks, so the read-path audit story stays plumbed through future
+  // refactors. (Live audit writes are exercised via smoke-abrain-vault-writer.)
+  const src = fs.readFileSync(indexSrc, "utf8");
+  for (const symbol of [
+    "appendVaultReadAudit",
+    "auditReleaseDecision",
+    "auditBashInject",
+    "auditBashInjectBlock",
+    "auditBashOutput",
+  ]) {
+    if (!src.includes(symbol)) throw new Error(`audit wiring missing symbol: ${symbol}`);
+  }
+  for (const op of [
+    'auditReleaseDecision("release_blocked"',
+    'auditReleaseDecision("release_denied"',
+    'auditReleaseDecision("release"',
+    'auditBashInjectBlock(',
+    'auditBashInject(',
+    'auditBashOutput("bash_output_release"',
+    'auditBashOutput("bash_output_withhold"',
+  ]) {
+    if (!src.includes(op)) throw new Error(`audit callsite missing: ${op}`);
+  }
+});
+
 check("vault_release pre-flight existence check runs BEFORE user authorization (no phantom prompts)", () => {
   const src = fs.readFileSync(indexSrc, "utf8");
   if (!src.includes("checkedBeforeAuthorization")) throw new Error("pre-flight branch missing — vault_release would prompt for nonexistent keys");
