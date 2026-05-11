@@ -113,7 +113,7 @@ export function renderSedimentStatus(state: SedimentStatus, detail?: string): st
       case "failed":    return "⚠️  sediment";
     }
   })();
-  return detail ? `${prefix} ${detail}` : prefix;
+  return detail ? `${prefix}: ${detail}` : prefix;
 }
 
 /**
@@ -136,20 +136,15 @@ function applySedimentStatus(
   } catch { /* stale ctx late fire is best-effort */ }
 }
 
-/** Format write results compactly: e.g. "+3 ~1 ·2" instead of
- *  "3 created, 1 updated, 2 skipped". Zero-count statuses omitted. */
+/** Format write results: only non-zero counts, e.g. "3 created, 1 updated, 2 skipped". */
 function compactResultSummary(results: WriteProjectEntryResult[]): string {
   const c: Record<string, number> = {};
   for (const r of results) c[r.status] = (c[r.status] || 0) + 1;
-  const sym: Record<string, string> = {
-    created: "+", updated: "~", merged: "⊕", archived: "∅",
-    superseded: "^", skipped: "·", deleted: "-", rejected: "✗",
-  };
   const parts: string[] = [];
-  for (const [st, ch] of Object.entries(sym)) {
-    if (c[st]) parts.push(`${ch}${c[st]}`);
+  for (const st of ["created", "updated", "merged", "archived", "superseded", "deleted", "skipped", "rejected"]) {
+    if (c[st]) parts.push(`${c[st]} ${st}`);
   }
-  return parts.join(" ") || "0";
+  return parts.join(", ") || "no changes";
 }
   const terminalReasons = new Set([
     "duplicate_slug", "validation_error", "lint_error",
@@ -450,8 +445,8 @@ export default function (pi: ExtensionAPI) {
         stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
       });
       const detail = unhealthyStopReason === "agent_error"
-        ? "skip: agent error"
-        : "skip: agent aborted";
+        ? "agent error"
+        : "agent aborted";
       applySedimentStatus(setStatus, sessionId, "completed", detail);
       return;
     }
@@ -555,7 +550,7 @@ export default function (pi: ExtensionAPI) {
                   const compact = compactResultSummary(auto.results);
                   applySedimentStatus(setStatus, sessionId, "completed", compact);
                 } else {
-                  applySedimentStatus(setStatus, sessionId, "completed", `skip: ${auto.kind}`);
+                  applySedimentStatus(setStatus, sessionId, "completed", auto.kind);
                 }
               } catch (err: any) {
                 applySedimentStatus(setStatus, sessionId, "failed", `err: ${err?.message?.slice(0, 40) ?? String(err).slice(0, 40)}`);
@@ -584,7 +579,7 @@ export default function (pi: ExtensionAPI) {
       // Mark running BEFORE scheduling the bg promise so the footer
       // updates synchronously with agent_end. The bg promise will
       // transition to completed/failed in its finally block.
-      applySedimentStatus(setStatus, sessionId, "running", "auto-write");
+      applySedimentStatus(setStatus, sessionId, "running", "extracting");
       const autoCorrelationId = makeCorrelationId("auto_write", sessionId, window);
 
       let bgPromise: Promise<void>;
@@ -729,7 +724,7 @@ export default function (pi: ExtensionAPI) {
     // Synchronous explicit lane: status visible briefly during the
     // write loop (each writeProjectEntry typically < 200ms). Lands at
     // completed/failed when agent_end returns.
-    applySedimentStatus(setStatus, sessionId, "running", `explicit x${drafts.length}`);
+    applySedimentStatus(setStatus, sessionId, "running", `writing x${drafts.length}`);
 
     const tWriteStart = Date.now();
     const explicitCorrelationId = makeCorrelationId("explicit", sessionId, window);
