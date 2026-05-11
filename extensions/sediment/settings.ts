@@ -15,11 +15,15 @@ export interface SedimentSettings {
   minWindowChars: number;
   maxWindowChars: number;
   maxWindowEntries: number;
+  maxEntryChars: number;
   extractorModel: string;
   extractorTimeoutMs: number;
   extractorMaxRetries: number;
   extractorMaxCandidates: number;
   extractorAuditRawChars: number;
+  curatorModel: string;
+  curatorTimeoutMs: number;
+  curatorMaxRetries: number;
   autoLlmWriteEnabled: boolean;
   autoWriteRawAuditChars: number;
 }
@@ -30,13 +34,27 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
   lockTimeoutMs: 5_000,
   defaultConfidence: 3,
   minWindowChars: 200,
-  maxWindowChars: 200_000,
+  // 2026-05-11: raised from 200K to 350K (with per-entry truncation at
+  // 30K chars for toolResult/bashExecution). 350K ~87.5K tokens, well
+  // within deepseek 128K context (71% utilization). See 3-model audit.
+  maxWindowChars: 350_000,
   maxWindowEntries: 200,
+  // Per-entry char cap for toolResult and bashExecution entries.
+  // Prevents a single large tool output from dominating the window.
+  // Head 25K + tail 5K preserved; middle truncated with marker.
+  maxEntryChars: 30_000,
   extractorModel: "deepseek/deepseek-v4-pro",
   extractorTimeoutMs: 180_000,
   extractorMaxRetries: 0,
   extractorMaxCandidates: 5,
   extractorAuditRawChars: 1_000,
+  // 2026-05-11: curator split from extractorModel (3-model audit).
+  // Curator is a small-context entity-resolution task (candidate +
+  // ≤5 neighbors). v4-flash is sufficient; timeout dropped to 60s;
+  // 1 retry to recover from JSON parse errors.
+  curatorModel: "deepseek/deepseek-v4-flash",
+  curatorTimeoutMs: 60_000,
+  curatorMaxRetries: 1,
   autoLlmWriteEnabled: false,
   autoWriteRawAuditChars: 8_000,
 };
@@ -60,6 +78,7 @@ export function resolveSedimentSettings(): SedimentSettings {
     minWindowChars: Math.max(0, asNumber(cfg.minWindowChars, DEFAULT_SEDIMENT_SETTINGS.minWindowChars)),
     maxWindowChars: Math.max(1_000, asNumber(cfg.maxWindowChars, DEFAULT_SEDIMENT_SETTINGS.maxWindowChars)),
     maxWindowEntries: Math.max(1, Math.floor(asNumber(cfg.maxWindowEntries, DEFAULT_SEDIMENT_SETTINGS.maxWindowEntries))),
+    maxEntryChars: Math.max(1_000, asNumber(cfg.maxEntryChars, DEFAULT_SEDIMENT_SETTINGS.maxEntryChars)),
     extractorModel: typeof cfg.extractorModel === "string" && cfg.extractorModel.trim()
       ? cfg.extractorModel.trim()
       : DEFAULT_SEDIMENT_SETTINGS.extractorModel,
@@ -67,6 +86,11 @@ export function resolveSedimentSettings(): SedimentSettings {
     extractorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.extractorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.extractorMaxRetries))),
     extractorMaxCandidates: Math.max(1, Math.floor(asNumber(cfg.extractorMaxCandidates, DEFAULT_SEDIMENT_SETTINGS.extractorMaxCandidates))),
     extractorAuditRawChars: Math.max(0, Math.floor(asNumber(cfg.extractorAuditRawChars, DEFAULT_SEDIMENT_SETTINGS.extractorAuditRawChars))),
+    curatorModel: typeof cfg.curatorModel === "string" && cfg.curatorModel.trim()
+      ? cfg.curatorModel.trim()
+      : DEFAULT_SEDIMENT_SETTINGS.curatorModel,
+    curatorTimeoutMs: Math.max(1_000, asNumber(cfg.curatorTimeoutMs, DEFAULT_SEDIMENT_SETTINGS.curatorTimeoutMs)),
+    curatorMaxRetries: Math.max(0, Math.floor(asNumber(cfg.curatorMaxRetries, DEFAULT_SEDIMENT_SETTINGS.curatorMaxRetries))),
     autoLlmWriteEnabled: asBoolean(cfg.autoLlmWriteEnabled, DEFAULT_SEDIMENT_SETTINGS.autoLlmWriteEnabled),
     autoWriteRawAuditChars: Math.max(0, Math.floor(asNumber(cfg.autoWriteRawAuditChars, DEFAULT_SEDIMENT_SETTINGS.autoWriteRawAuditChars))),
   };

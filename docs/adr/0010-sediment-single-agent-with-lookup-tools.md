@@ -4,7 +4,7 @@
 - **日期**: 2026-05-06
 - **决策者**: alfadb
 - **替代**: ADR 0004（v6.5 三模型投票方案）
-- **依赖**: ADR 0002（superseded by 0012，gbrain 仅作为世界级 target）/ ADR 0003（主会话只读）/ ADR 0009（multi-agent 自由化，但 sediment 不再借用）
+- **依赖**: ADR 0002（superseded by memory-architecture.md）/ ADR 0003（主会话只读）/ ADR 0009（multi-agent 自由化，但 sediment 不再借用）
 - **互补**: ADR 0012（v6.8 双 target 架构）
 
 ## 背景

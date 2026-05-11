@@ -18,7 +18,7 @@
  * 2. **Capability advertisement**: before every main-session turn,
  *    before_agent_start injects a markdown table into the system prompt.
  *
- * Override via piStack.modelCurator in settings.json (providers, hints).
+ * Override via modelCurator in pi-astack-settings.json (top-level key; providers, hints).
  */
 
 import * as fs from "node:fs";

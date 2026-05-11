@@ -88,7 +88,7 @@
 
     "sediment": {
       "type": "object",
-      "description": "Project-only sediment writer settings (extensions/sediment/). Provides explicit MEMORY writes plus live LLM auto-write. ADR 0016 default posture trusts the LLM curator for semantic write decisions; hard gates focus on sensitive information and storage integrity.",
+      "description": "Project-only sediment writer settings (extensions/sediment/). Provides explicit MEMORY writes plus LLM auto-write. ADR 0016 curator model for semantic decisions; sensitive-info sanitizer + storage integrity gates remain hard. Extractor and Curator have independent model configs (2026-05-11 audit).",
       "additionalProperties": false,
       "properties": {
         "_comment": { "type": "string" },
@@ -129,9 +129,9 @@
 
         "maxWindowChars": {
           "type": "number",
-          "default": 200000,
+          "default": 350000,
           "minimum": 1000,
-          "description": "Maximum rendered run-window size. The builder keeps the newest entries within this budget."
+          "description": "Maximum rendered run-window size. Raised from 200K to 350K (2026-05-11) with per-entry truncation at maxEntryChars. 350K chars ~87.5K tokens, 71% of deepseek 128K context."
         },
 
         "maxWindowEntries": {
@@ -141,31 +141,38 @@
           "description": "Maximum number of newest session entries considered for a sediment run window."
         },
 
+        "maxEntryChars": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 1000,
+          "description": "Per-entry character cap for toolResult and bashExecution entries. Head 85% + tail 15% preserved; middle truncated. Prevents a single large tool output (e.g. 150K file read) from dominating the extractor window. User/assistant/compaction entries pass through untouched."
+        },
+
         "extractorModel": {
           "type": "string",
           "default": "deepseek/deepseek-v4-pro",
-          "description": "Model used by the live sediment LLM extractor and curator. Expected format: provider/modelId."
+          "description": "Model used by the LLM extractor (transcript → MEMORY blocks). Needs strong long-context reading comprehension + bilingual + adversarial resistance. v4-pro recommended; do not downgrade to flash for this task."
         },
 
         "extractorTimeoutMs": {
           "type": "number",
           "default": 180000,
           "minimum": 1000,
-          "description": "Timeout for live sediment extractor/curator model calls."
+          "description": "Timeout for LLM extractor model calls."
         },
 
         "extractorMaxRetries": {
           "type": "number",
           "default": 0,
           "minimum": 0,
-          "description": "Max retries for live sediment extractor/curator model calls. Default 0 to avoid hidden repeated extraction costs."
+          "description": "Max retries for LLM extractor calls. Default 0 to avoid repeated extraction costs on large windows."
         },
 
         "extractorMaxCandidates": {
           "type": "number",
           "default": 5,
           "minimum": 1,
-          "description": "Runaway-detection cap: outputs with more candidates than this are marked too_many_candidates and fail the quality gate. The extractor prompt asks the LLM for at most two MEMORY blocks per response; a healthy run produces 1–2, a slightly noisy run produces 3–4. Default 5 catches true runaway (LLM ignoring the prompt) without flagging benign overshoot — raised from 3 after live observation showed the lower cap tripping the rolling-quality gate on borderline runs."
+          "description": "Runaway-detection cap: outputs with more candidates than this are marked too_many_candidates and skipped (LLM likely ignoring the prompt). The extractor prompt asks the LLM for at most two MEMORY blocks per response; a healthy run produces 1–2, a slightly noisy run produces 3–4. Default 5 catches true runaway without flagging benign overshoot."
         },
 
         "extractorAuditRawChars": {
@@ -173,6 +180,26 @@
           "default": 1000,
           "minimum": 0,
           "description": "Number of raw LLM output characters stored in manual extractor previews. The live auto-write audit uses autoWriteRawAuditChars."
+        },
+
+        "curatorModel": {
+          "type": "string",
+          "default": "deepseek/deepseek-v4-flash",
+          "description": "Model used by the curator (candidate + neighbors → create/update/merge/skip decision). Small-context entity-resolution task; v4-flash is sufficient. Split from extractorModel (2026-05-11 audit)."
+        },
+
+        "curatorTimeoutMs": {
+          "type": "number",
+          "default": 60000,
+          "minimum": 1000,
+          "description": "Timeout for curator model calls. Curator context is small (candidate + ≤5 neighbors); 60s is generous."
+        },
+
+        "curatorMaxRetries": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "description": "Max retries for curator calls. Default 1 to recover from occasional JSON parse errors (highly structured output)."
         },
 
         "autoLlmWriteEnabled": {
@@ -282,7 +309,7 @@
 
         "search": {
           "type": "object",
-          "description": "LLM-driven memory_search settings (ADR 0015, Accepted 2026-05-10). Two-stage rerank: stage 1 selects candidates from enhanced _index.md, stage 2 reranks full content. Defaults to deepseek family for in-China latency + reasoning + bilingual quality; switch stage2Model to anthropic/openai for diverse failure modes if deepseek service degrades. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",
+          "description": "LLM-driven memory_search settings (ADR 0015, Accepted 2026-05-10). Two-stage rerank: stage 1 selects candidates from enhanced _index.md, stage 2 reranks full content. Both stages default to deepseek-v4-flash + thinking=off — retrieval ranking does not benefit from reasoning mode. Override stage2Model for diverse failure modes or stronger cross-language semantic matching. Accuracy is the contract: LLM failures hard-error and there is no grep degradation path.",
           "additionalProperties": false,
           "properties": {
             "_comment": { "type": "string" },
@@ -307,9 +334,9 @@
             },
             "stage2Model": {
               "type": "string",
-              "default": "deepseek/deepseek-v4-pro",
+              "default": "deepseek/deepseek-v4-flash",
               "minLength": 1,
-              "description": "Stage 2 final-rerank model. Reads stage 1 candidates' full content (compiled_truth + timeline) and produces ranked top-stage2Limit. Needs strong reasoning (cross-entry comparison, timeline-aware: 'X is deprecated by Y'). Recommended: top-tier reasoning model. Set to a different family from stage1Model + sediment.extractorModel for diversity if cost is not a concern."
+              "description": "Stage 2 final-rerank model. Reads stage 1 candidates' full content and produces ranked top-stage2Limit. This is a reading comprehension + relevance judgment task, NOT a reasoning task — thinking mode adds latency with zero ranking benefit. Default v4-flash is fast, cheap, and bilingual-quality-sufficient. Override to v4-pro or another family only if you observe quality issues with complex cross-entry semantic matching."
             },
             "stage2Limit": {
               "type": "number",
@@ -319,9 +346,9 @@
             },
             "stage2Thinking": {
               "type": "string",
-              "default": "high",
+              "default": "off",
               "enum": ["off", "minimal", "low", "medium", "high", "xhigh"],
-              "description": "Reasoning level for Stage 2 full-content rerank. Default high because Stage 2 compares compiled_truth + timeline, handles freshness/supersession, and produces rank_reason. Unsupported levels hard-error rather than silently clamping."
+              "description": "Reasoning level for Stage 2 full-content rerank. Default off because ranking is a relevance judgment task, not a logical reasoning task — reading the candidates and sorting by match quality doesn't benefit from chain-of-thought. Unsupported levels hard-error rather than silently clamping."
             }
           }
         }

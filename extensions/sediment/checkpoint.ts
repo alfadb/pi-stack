@@ -249,6 +249,29 @@ function textFromContent(content: unknown): string {
   }).filter(Boolean).join("\n");
 }
 
+/**
+ * Truncate tool output entries (toolResult, bashExecution) to prevent
+ * a single large output from dominating the extractor window.
+ * Head 85% + tail 15% preserved; middle replaced with marker.
+ * User/assistant/compaction entries pass through untouched.
+ */
+function truncateEntryText(entry: unknown, rendered: string, maxChars: number): string {
+  if (!maxChars || rendered.length <= maxChars) return rendered;
+  if (!entry || typeof entry !== "object") return rendered;
+  const e = entry as Record<string, unknown>;
+  const type = typeof e.type === "string" ? e.type : "unknown";
+  if (type !== "message") return rendered;
+  const msg = e.message as Record<string, unknown> | undefined;
+  if (!msg) return rendered;
+  const role = typeof msg.role === "string" ? msg.role : "";
+  if (role !== "toolResult" && role !== "bashExecution") return rendered;
+
+  const headChars = Math.floor(maxChars * 0.85);
+  const tailChars = maxChars - headChars;
+  const marker = `\n[... truncated ${rendered.length - headChars - tailChars} chars at ${maxChars} cap ...]\n`;
+  return rendered.slice(0, headChars) + marker + rendered.slice(rendered.length - tailChars);
+}
+
 export function entryToText(entry: unknown): string {
   if (!entry || typeof entry !== "object") return "";
   const e = entry as Record<string, unknown>;
@@ -320,15 +343,17 @@ export function buildRunWindow(
   let chars = 0;
 
   for (let i = limitedByCount.length - 1; i >= 0; i--) {
-    const rendered = entryToText(limitedByCount[i]);
+    const entry = limitedByCount[i];
+    const rawRendered = entryToText(entry);
+    const rendered = truncateEntryText(entry, rawRendered, settings.maxEntryChars);
     if (selectedNewestFirst.length > 0 && chars + rendered.length > settings.maxWindowChars) break;
-    selectedNewestFirst.push(limitedByCount[i]);
+    selectedNewestFirst.push(entry);
     chars += rendered.length;
     if (chars >= settings.maxWindowChars) break;
   }
 
   const entries = selectedNewestFirst.reverse();
-  const text = entries.map(entryToText).join("\n\n");
+  const text = entries.map((entry) => truncateEntryText(entry, entryToText(entry), settings.maxEntryChars)).join("\n\n");
   const lastEntryId = entryId(entries[entries.length - 1]);
   const finalChars = text.length;
 

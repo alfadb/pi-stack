@@ -12,16 +12,21 @@
  * extensions/dispatch/index.ts; the third is the offline smoke
  * `smoke:vault-subpi-isolation`).
  *
- * P0a scope (this commit):
+ * Current scope (P0a-P0c shipped as of 2026-05-11):
  *   - extension skeleton + activate() guard
  *   - platform backend detection (backend-detect.ts, pure logic)
  *   - `/vault status` slash command (read-only display)
+ *   - `/vault init [--backend=X]` non-interactive bootstrap (P0b)
+ *   - master key generation + portable identity encryption (bootstrap.ts, keychain.ts)
+ *   - vaultWriter library + atomic lock + per-key _meta (vault-writer.ts, P0c.write)
+ *   - vaultReader: unlock master + decrypt per-key secrets (vault-reader.ts, P0c.read)
+ *   - vault_release LLM tool + $VAULT_* bash injection (P0c.read)
+ *   - `/secret set/list/forget` command with active-project routing (P0c.write)
+ *   - reconcile() crash recovery wired into activate() (2026-05-11)
+ *   - 7-zone brain layout bootstrap (brain-layout.ts, 2026-05-11)
  *
- * Out of scope for P0a (subsequent P0 chunks):
- *   - master key generation / OS keychain integration (P0b)
- *   - vaultWriter library + flock + per-key _meta (P0c)
- *   - onboarding TUI flow / `pi vault init` (P0d)
- *   - `/secret` command + Lane V wiring (after P0c)
+ * Remaining:
+ *   - Lane G /about-me command + ABOUT-ME extractor (P3-P5)
  */
 
 import * as fs from "node:fs";
@@ -39,10 +44,13 @@ import {
 } from "./keychain";
 import {
   writeSecret, listSecrets, forgetSecret, readVaultEntryMeta, validateKey,
-  appendVaultReadAudit,
+  appendVaultReadAudit, reconcile,
   type VaultEventOp, type VaultScope,
 } from "./vault-writer";
 import { releaseSecret, vaultFilePath, type ReleaseSecretResult } from "./vault-reader";
+import {
+  ensureBrainLayout,
+} from "./brain-layout";
 import {
   authKey,
   prepareBootVaultBashCommand,
@@ -510,6 +518,35 @@ export default function activate(pi: ExtensionAPI): void {
   // dynamically change with bash `cd`. Resolve once at activate.
   bootActiveProject = snapshotBootActiveProject();
   bootActiveProjectAt = Date.now();
+
+  // ── Crash recovery ────────────────────────────────────────────
+  // reconcile scans vault dirs for encrypted files missing audit rows
+  // (crash between atomic rename and vault-events append) and inserts
+  // recovered_missing_audit entries. Safe no-op when vault not yet init'd.
+  reconcile(ABRAIN_HOME)
+    .then(({ recovered, scanned }) => {
+      if (recovered > 0) {
+        console.error(`[abrain] reconcile: recovered ${recovered} missing audit rows (${scanned} files scanned)`);
+      }
+    })
+    .catch((err) => {
+      console.error(`[abrain] reconcile failed:`, err);
+    });
+
+  // ── 7-zone layout bootstrap ──────────────────────────────────
+  // Ensure brain directory structure exists (idempotent). Vault zone
+  // is created here so it's available before /vault init runs.
+  try {
+    const layout = ensureBrainLayout(ABRAIN_HOME);
+    if (layout.created.length > 0) {
+      console.error(`[abrain] brain layout: created ${layout.created.join(", ")}`);
+    }
+    for (const w of layout.warnings) {
+      console.error(`[abrain] brain layout warning: ${w}`);
+    }
+  } catch (err: any) {
+    console.error(`[abrain] brain layout failed:`, err);
+  }
 
   const registry = pi as unknown as CommandRegistry;
   const toolRegistry = pi as unknown as ToolRegistry;

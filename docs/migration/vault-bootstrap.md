@@ -1,6 +1,6 @@
 # Migration — Vault Bootstrap（age 加密 + portable identity）
 
-> **状态**：待实施
+> **状态**：P0a-P0c shipped（2026-05-11）；P0d/P0e 待实施
 > **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D4 / [brain-redesign-spec.md](../brain-redesign-spec.md) §6
 > **关联**：本文件解决 Round 3 复核 P0-B2（OS keychain 跨平台承诺不成立）
 >

@@ -226,6 +226,7 @@ function runSubprocess(
   signal: AbortSignal,
   timeoutMs: number,
   onSpawn?: (pid: number) => void,
+  toolAllowlist?: string,
 ): Promise<SubprocessResult> {
   return new Promise((resolve) => {
     const start = Date.now();
@@ -243,6 +244,16 @@ function runSubprocess(
     if (thinking !== "off") {
       args.push("--thinking", thinking);
     }
+
+    // ── Tool allowlist ──────────────────────────────────────────
+    // pi supports --tools <allowlist> to restrict which tools the
+    // sub-agent can call (see `pi --help`). When no allowlist is
+    // provided, default to read-only safe tools (read, grep, find,
+    // ls). When PI_MULTI_AGENT_ALLOW_MUTATING=1 and mutating tools
+    // were explicitly requested, the caller passes the expanded
+    // allowlist including bash/edit/write.
+    const allowlist = toolAllowlist || "read,grep,find,ls";
+    args.push("--tools", allowlist);
 
     // The prompt as the positional argument
     args.push(promptArgValue);
@@ -538,13 +549,15 @@ export default function (pi: ExtensionAPI) {
     name: "dispatch_agent",
     label: "Dispatch Agent",
     description:
-      "Spawn a single sub-agent with a specific model and thinking level. " +
+      "Spawn a SINGLE sub-agent. For 2+ independent tasks, use dispatch_agents instead " +
+      "(calling dispatch_agent N times runs them serially, wasting wall-clock time). " +
       "The sub-agent runs as an independent pi process, capable of multi-turn " +
       "tool calling (read, grep, find, ls). Mutating tools (bash, edit, write) " +
       "are blocked by default.",
-    promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?)",
+    promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?) — SINGLE task only",
     promptGuidelines: [
-      "Use dispatch_agent to delegate single analysis/reasoning tasks to a specific model.",
+      "Use dispatch_agent ONLY for a single analysis/reasoning task. For 2+ tasks, use dispatch_agents.",
+      "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_agents which runs them in parallel (~30s).",
       "Sub-agents CAN use read, grep, find, ls. Mutating tools require PI_MULTI_AGENT_ALLOW_MUTATING=1.",
       "The sub-agent is an independent pi process — its context does NOT count against your token budget.",
     ],
@@ -587,7 +600,7 @@ export default function (pi: ExtensionAPI) {
       // an actionable tool-result error.
       let result: SubprocessResult;
       try {
-        result = await runSubprocess(params.model, params.thinking, params.prompt, signal, timeoutMs);
+        result = await runSubprocess(params.model, params.thinking, params.prompt, signal, timeoutMs, undefined, params.tools || undefined);
       } catch (err: any) {
         result = {
           output: "",
@@ -618,14 +631,16 @@ export default function (pi: ExtensionAPI) {
     name: "dispatch_agents",
     label: "Dispatch Agents",
     description:
-      "Spawn multiple sub-agents in parallel with different models. " +
-      "Each is an independent pi process. Mutating tools blocked by default. " +
-      `Up to ${MAX_PARALLEL} tasks per call; up to ${MAX_CONCURRENCY} run concurrently in the in-process worker pool (excess tasks are queued and started as workers free up).`,
-    promptSnippet: "dispatch_agents(tasks[{model, thinking, prompt, timeoutMs?}], timeoutMs?)",
+      "Run multiple sub-agents IN PARALLEL. Each is an independent pi process. " +
+      "Results are collected when ALL complete. This is the primary tool for " +
+      "multi-model analysis — do NOT call dispatch_agent N times instead. " +
+      "Mutating tools blocked by default. " +
+      `Up to ${MAX_PARALLEL} tasks per call; up to ${MAX_CONCURRENCY} run concurrently.`,
+    promptSnippet: "dispatch_agents([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
-      "Use dispatch_agents for parallel multi-model analysis, review, or voting.",
-      "Each task uses a different model. Results collected when all complete.",
-      `Concurrency: up to ${MAX_PARALLEL} task specs are accepted; the in-process worker pool size is ${MAX_CONCURRENCY}, so extra tasks queue rather than fan out. Plan voter quorum / debate width accordingly.`,
+      "Use dispatch_agents EVERY TIME you have 2+ independent analysis tasks with different models. All tasks run in parallel — do NOT call dispatch_agent N times.",
+      "Example: dispatch_agents([{model:'claude-opus-4-7', thinking:'high', prompt:'audit docs'}, {model:'gpt-5.5', thinking:'high', prompt:'audit code'}, {model:'deepseek-v4-pro', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together.",
+      `Concurrency: up to ${MAX_PARALLEL} tasks accepted; ${MAX_CONCURRENCY} run at once, others queue. Choose models from DIFFERENT providers for diversity.`,
       "For reasoning-only tasks, omit tools (sub-pi uses built-in read/grep/find/ls).",
     ],
     parameters: Type.Object({
@@ -722,6 +737,8 @@ export default function (pi: ExtensionAPI) {
             res = await runSubprocess(
               t.model, t.thinking, t.prompt, signal,
               t.timeoutMs ?? timeoutMs,
+              undefined,
+              "read,grep,find,ls",
             );
           } catch (err: any) {
             res = {

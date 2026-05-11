@@ -8,7 +8,7 @@
 > 通过内部 writer substrate 单写（create/update/merge/archive/supersede/delete/skip），不暴露 LLM-facing 写工具。
 > gbrain 被完全去除；其 timeline/图谱方法论被借鉴到 markdown 条目格式中（Compiled Truth + `## Timeline` + `graph.json`）。
 >
-> **v7.1 update (2026-05-09, [ADR 0014](./docs/adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](./docs/brain-redesign-spec.md)):** `~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑——七区结构（identity / skills / habits / workflows / projects / knowledge / vault）。`.pensieve/` 物理位置废止，项目知识 Phase 2 起将迁入 `~/.abrain/projects/<id>/`（迁移计划见 [migration/abrain-pensieve-migration.md](./docs/migration/abrain-pensieve-migration.md)）。新增 Lane G（about-me）+ Lane V（vault declare）；`extensions/abrain/` 已落地 vault P0a-c 子集（`/secret` + `/vault` 命令，age 加密 + portable identity backend）。
+> **v7.1 update (2026-05-09 起持续 v1.x 迭代，[ADR 0014](./docs/adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](./docs/brain-redesign-spec.md)):** `~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑——七区结构（identity / skills / habits / workflows / projects / knowledge / vault）。`.pensieve/` 已由 ADR 0014 废止（设计层面），当前 Phase 1.4 runtime 仍以 `.pensieve/` 为项目 SOT；Phase 2 起将迁入 `~/.abrain/projects/<id>/`（8-phase 迁移计划见 [migration/abrain-pensieve-migration.md](./docs/migration/abrain-pensieve-migration.md)，状态：spec ready，待实施）。新增 Lane G（about-me）+ Lane V（vault declare）；`extensions/abrain/` 已落地 vault P0a-c 子集（`/secret` + `/vault` 命令，age 加密 + portable identity backend）。
 >
 > 历史架构演进：v6.5（gbrain 唯一存储 + 三模型投票）→ v6.6（单 agent + lookup tools）→ v6.7（双轨 gbrain sources）
 > → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）→ v7.1（abrain 重定位为数字孪生）**。详见 [docs/adr/](./docs/adr/) 16 条 ADR（含 [ADR 0015](./docs/adr/0015-memory-search-llm-driven-retrieval.md) memory_search LLM-driven retrieval，以及 [ADR 0016](./docs/adr/0016-sediment-as-llm-curator.md) sediment 从 gate-heavy extractor 转向 LLM curator）。
@@ -20,7 +20,7 @@
 - pi 技能（skills/）
 - pi 提示模板（prompts/）
 - 记忆基础设施（markdown+git 唯一 source of truth + sediment 单写）
-- 上游 vendor 引用（vendor/）`[计划]`
+- 上游 vendor 引用（vendor/）`[计划 — 当前未挂载，详见 UPSTREAM.md]`
 
 参考心智模型：**gstack 之于 claude-code 的关系，pi-astack 之于 pi 的关系一样**。作者为自己常用的 harness agent 打造一整套工作流，集成自己认同的 review/qa/security/multi-agent/memory 等能力，不断演进。不是发行版（不为不同环境打包同一软件），不是仓库集合（不是谁都可以拿出一个独立包），是**作者自用 + 作者认可的完整工作流**。
 
@@ -29,9 +29,9 @@
 | 维度 | 决策 |
 |---|---|
 | 单一记忆基础设施 | **markdown+git**（纯文件，零依赖，离线可用，人类可编辑） |
-| 项目级存储 | `<project>/.pensieve/{maxims,decisions,knowledge,staging,archive}/` |
-| 世界级存储 | `~/.abrain/`（独立 git repo，`ABRAIN_ROOT` 环境变量） |
-| Sediment 写入 | 单 sidecar 写入；extract → sanitize → classify → dedupe → lint → write md → git commit |
+| 项目级存储 | Phase 1.4 当前：`<project>/.pensieve/{maxims,decisions,knowledge,staging,archive}/`；Phase 2 起迁入 `~/.abrain/projects/<id>/`（详见 [abrain-pensieve-migration.md](./docs/migration/abrain-pensieve-migration.md)） |
+| 世界级存储 | `~/.abrain/`（独立 git repo；v7.1 七区结构：identity/skills/habits/workflows/projects/knowledge/vault；`ABRAIN_ROOT` 环境变量） |
+| Sediment 写入 | 单 sidecar 写入；LLM curator → sensitive sanitize → memory_search lookup → op∈{create,update,merge,archive,supersede,delete,skip} → lint → atomic write → audit → git（ADR 0016 curator 模型） |
 | 主会话角色 | 只读（`memory_search` / `memory_get` / `memory_list` / `memory_neighbors`） |
 | 条目格式 | frontmatter v1 + compiled truth + `## Timeline`（借鉴 gbrain 方法论） |
 | Multi-agent 能力 | `dispatch_agent`/`dispatch_agents` 基础能力；主会话自由组合；sediment 单 agent 不借用 |
@@ -41,6 +41,8 @@
 详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 16 条 ADR。
 
 > ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 supersede（详见各 ADR 顶部状态字段）。
+>
+> 文件布局参考：[docs/directory-layout.md](./docs/directory-layout.md) — 反映当前实际实现状态。
 
 ## 安装方式
 
@@ -48,7 +50,7 @@
 
 **前置依赖**（零外部服务依赖）：
 - 无。markdown+git 架构不需要 postgres/pgvector/gbrain CLI。
-- 可选：`qmd` 用于加速全文搜索（Phase 3，详见 memory-architecture.md 附录 C）。
+- 可选：`qmd` 作为可选 BM25 augmentation（Phase 3，非 LLM retrieval fallback；详见 memory-architecture.md 附录 C）。
 - vault backend 可通过 `SECRETS_BACKEND` 环境变量手动覆盖自动检测（可选值：`ssh-key` / `gpg-file` / `macos` / `secret-service` / `pass` / `passphrase-only` / `disabled`）。
 
 挂为 `~/.pi/agent/skills/pi-astack/` submodule，并在官方 pi settings chain（`~/.pi/agent/settings.json` 或项目 `.pi/settings.json`）里用 local package path 加载这份扩展本身。改一行立即生效。
@@ -67,12 +69,16 @@ git submodule update --init --recursive
 # 2) ~/.pi/agent/pi-astack-settings.json 里顶层 key 调运行时配置（不要包裹在 piStack 下，不是 pi 官方 chain）:
 #   {"sediment": {"enabled": true}, "memory": {"search": {"stage1Model": "deepseek/deepseek-v4-flash"}}, "vision": {"modelPreferences": [...]}}
 
-# 初始化世界级知识库
-mkdir -p ~/.abrain
+# 初始化 abrain 世界级知识库（v7.1 七区结构）
+mkdir -p ~/.abrain/{identity,skills,habits,workflows,projects,knowledge,vault}
 cd ~/.abrain && git init
 export ABRAIN_ROOT=~/.abrain  # 加入 shell rc
 
-# 初始化项目级知识库（在任意项目根目录）
+# 初始化 vault（age 加密后端；进入 pi 会话后执行 /vault init 或手动指定 backend）
+# 详见 docs/migration/vault-bootstrap.md
+
+# 初始化项目级知识库（Phase 1.4 当前位置；Phase 2 起将迁入 ~/.abrain/projects/<id>/）
+# ⚠️ 在项目根目录下执行（不是 ~/.pi 里）
 mkdir -p .pensieve/{maxims,decisions,knowledge,staging,archive,schemas}
 ```
 
@@ -149,8 +155,8 @@ pi install git:github.com/alfadb/pi-astack
 ## 沉淀
 
 记忆基础设施 = **markdown+git**（详见 [memory-architecture.md](./docs/memory-architecture.md)）：
-- 项目记忆 → `<project>/.pensieve/{maxims,decisions,knowledge,staging,archive}/`（md + git）
-- 跨项目准则 → `~/.abrain/{maxims,patterns,anti-patterns,facts,staging,archive}/`（独立 git repo）
+- 项目记忆 → Phase 1.4 当前：`<project>/.pensieve/{maxims,decisions,knowledge,staging,archive}/`；Phase 2 起迁入 `~/.abrain/projects/<id>/`（md + git）
+- 跨项目准则 → `~/.abrain/knowledge/`（v7.1 七区之 knowledge 区；独立 git repo）
 - 条目格式：frontmatter v1 + compiled truth + `## Timeline`
 - 主会话只读（`memory_search/get/list/neighbors`），sediment 单写（内部 writer substrate 已实现：create/update/merge/archive/supersede/delete/skip；不计划暴露 LLM-facing 写工具）
 - 派生索引（`graph.json`）gitignored，可从 markdown 重建

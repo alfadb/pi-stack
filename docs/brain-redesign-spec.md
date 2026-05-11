@@ -1,8 +1,8 @@
 # Brain Redesign Spec
 
-> **状态**：v1.4.6 — current as of 2026-05-11（abrain vault P0a-c shipped + PI_ABRAIN_DISABLED sub-pi enforcement + vault git policy unified + SECRETS_BACKEND override）。
+> **状态**：v1.5 — current as of 2026-05-11（abrain vault P0a-c shipped + dispatch --tools allowlist enforcement + vaultWriter security claim corrected）。
 >
-> Baseline v1.0 accepted alongside [ADR 0014](adr/0014-abrain-as-personal-brain.md)；v1.1 完成 Round 3 P0 闭合；v1.2 完成 Round 4 P0 闭合；v1.3 完成 Round 5 P0 闭合。
+> Baseline v1.0 accepted alongside [ADR 0014](adr/0014-abrain-as-personal-brain.md)；v1.1 完成 Round 3 P0 闭合；v1.2 完成 Round 4 P0 闭合；v1.3 完成 Round 5 P0 闭合；v1.4.6 中间迭代；v1.5 修正 §6.4.0 vaultWriter module export 安全声明。
 >
 > **v1.3 变更点**（三家 Round 5 复核 → 1 PASS after fixing P0 / 2 CONDITIONAL，5 个新 P0）：
 > - **真代码修订**：`extensions/dispatch/index.ts` 的 `runSubprocess()` 加 `env: { ...process.env, PI_ABRAIN_DISABLED: "1" }` env override（v1.2 文档写了但代码未实施——GPT P0-1）；加 `smoke:vault-subpi-isolation` 验证 5 项不变量
@@ -536,7 +536,12 @@ pi /secret malicious-key "$(cat ~/.ssh/id_ed25519)"
 
 这三条路径**都**可能被 prompt injection 诱导。层 1 机制不覆盖它们。防御手段是装装装：§6.5.1 stdout 默认不回流（限 exfiltration）、§6.6 redaction（限明文看见）、sediment audit 后置检测（限事后追责）——三者合起来压低面但不消除。列为已知 trade-off于 ADR 0014 §坟处 #10。
 
-vaultWriter library 本身的保护（限制层 1 范围严格）：不在 module-level export 公开 `writeSecret` API。只在 abrain extension 调 `activate(api)` 后、通过闭包深处的 `__internalWriter` 返回给 TUI command handler。`require(".../vault-writer.js").writeSecret(···)` 尝试遇到 `undefined is not a function`——以这个机制防 "node -e require attack"（bash 路径二）。bash 路径一与三仍是 residual surface。
+vaultWriter library 本身的保护：
+
+- **writeSecret 不持有 master key**。vault-writer.ts 仅导入 `.vault-pubkey`（age 公钥，磁盘明文），不调 unlock、不解密 `.vault-master.age`。即使 `require()` 拿到 `writeSecret`，也只能加密写入——无法解密读取已有 secret。
+- **TUI 授权在调用方实施**。`/secret set` command handler 在调用 `writeSecret` 之前完成 TUI 授权（`VAULT_RELEASE_AUTH_CHOICES`），`writeSecret` 自身是纯加密+写函数，不做授权判断。
+- **bash 路径二的 residual surface 已接受**：`node -e 'require(".../vault-writer.js").writeSecret({...})'` 是 Node.js 模块系统的固有属性（`export` 即 `require` 可见），无法在语言层面阻止。防御依赖：该路径需要攻击者自行提供 plaintext value（若已有 plaintext，保护目标已失）；写入操作产生 audit trail（vault-events.jsonl）；stdout 默认不回流（§6.5.1）。
+- v1.0 spec 曾声称 "不在 module-level export 公开 writeSecret API"——该声明在 Node.js ESM/CJS 模块系统中不可行，v1.5 修正为上述实际保护描述。bash 路径一与三仍是 residual surface。
 
 #### 事务语义（v1.3 统一顺序，Round 5 DS P0-A）
 

@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type { MemorySettings } from "./settings";
 import type { Jsonish, MemoryEntry, RelationEdge, StoreRef, Scope } from "./types";
 import { normalizeBareSlug, prettyPath, stableUnique, titleFromSlug, throwIfAborted } from "./utils";
+import { resolveActiveProject, abrainProjectDir } from "../_shared/runtime";
 
 const execFileAsync = promisify(execFile);
 
@@ -33,20 +34,43 @@ export function resolveStores(cwdRaw: string | undefined, settings: MemorySettin
   const cwd = path.resolve(cwdRaw || process.cwd());
   const stores: StoreRef[] = [];
 
+  // 1. Primary project store: <cwd>/.pensieve/ (Phase 1.4 SOT)
   const projectRoot = path.join(cwd, ".pensieve");
   if (fsSync.existsSync(projectRoot) && fsSync.statSync(projectRoot).isDirectory()) {
     stores.push({ scope: "project", root: projectRoot, label: "project" });
   }
 
-  if (settings.includeWorld) {
-    const abrainRoot = path.resolve(
-      process.env.ABRAIN_ROOT
-        ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
-        : path.join(os.homedir(), ".abrain"),
-    );
-    if (fsSync.existsSync(abrainRoot) && fsSync.statSync(abrainRoot).isDirectory()) {
-      stores.push({ scope: "world", root: abrainRoot, label: "world" });
+  // Resolve abrain home once (used by both project-dual and world)
+  const abrainHome = path.resolve(
+    process.env.ABRAIN_ROOT
+      ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+      : path.join(os.homedir(), ".abrain"),
+  );
+  const abrainExists = fsSync.existsSync(abrainHome) && fsSync.statSync(abrainHome).isDirectory();
+
+  // 2. Abrain project store (dual-read, migration plan P2):
+  //    ~/.abrain/projects/<id>/ — read alongside .pensieve/ when
+  //    the active project has a binding. Currently this directory
+  //    is empty (migration P5-P6 not yet executed), so this store
+  //    is a future-proof no-op. When migration happens, entries
+  //    found here will be deduped against .pensieve/ in loadEntries().
+  if (abrainExists) {
+    try {
+      const resolved = resolveActiveProject(cwd, { abrainHome });
+      if (resolved.activeProject) {
+        const abrainProjDir = abrainProjectDir(abrainHome, resolved.activeProject.projectId);
+        if (fsSync.existsSync(abrainProjDir) && fsSync.statSync(abrainProjDir).isDirectory()) {
+          stores.push({ scope: "project", root: abrainProjDir, label: "abrain-project" });
+        }
+      }
+    } catch {
+      // bindings parse failure / missing _bindings.md → no dual-read, not an error
     }
+  }
+
+  // 3. World store: ~/.abrain/ (flat legacy world knowledge)
+  if (settings.includeWorld && abrainExists) {
+    stores.push({ scope: "world", root: abrainHome, label: "world" });
   }
 
   return stores;
@@ -449,5 +473,28 @@ export async function loadEntries(
   const batches = await Promise.all(
     stores.map((store) => scanStore(store, cwd, settings, signal).catch(() => [])),
   );
-  return batches.flat();
+  const flat = batches.flat();
+
+  // Dedup: when the same slug appears in multiple stores (e.g. .pensieve/
+  // and abrain/projects/<id>/ after migration), keep the first occurrence.
+  // Stores are ordered by priority: .pensieve/ > abrain project > world.
+  // Within same slug, higher-confidence entries win; otherwise first-wins.
+  const seen = new Map<string, MemoryEntry>();
+  for (const entry of flat) {
+    const existing = seen.get(entry.slug);
+    if (!existing) {
+      seen.set(entry.slug, entry);
+      continue;
+    }
+    // Keep the entry with higher confidence; tiebreak by updated date
+    if (entry.confidence > existing.confidence) {
+      seen.set(entry.slug, entry);
+    } else if (entry.confidence === existing.confidence) {
+      const eu = entry.updated || entry.created || "";
+      const xu = existing.updated || existing.created || "";
+      if (eu > xu) seen.set(entry.slug, entry);
+    }
+  }
+
+  return Array.from(seen.values());
 }

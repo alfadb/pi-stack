@@ -28,9 +28,15 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage1Model: "deepseek/deepseek-v4-flash",
   stage1Limit: 50,
   stage1Thinking: "off",
-  stage2Model: "deepseek/deepseek-v4-pro",
+  // Stage 2 is a retrieval ranking task (reading comprehension + relevance
+  // judgment), NOT a reasoning task. Zero benefit from thinking mode — it
+  // only adds latency. DeepSeek v4-flash is fast ($0.14/M), cheap, and
+  // bilingual quality is sufficient for relevance ranking against markdown
+  // entries. Use v4-pro only when the operator needs stronger Chinese
+  // semantic matching at the cost of latency.
+  stage2Model: "deepseek/deepseek-v4-flash",
   stage2Limit: 10,
-  stage2Thinking: "high",
+  stage2Thinking: "off",
 };
 
 export interface MemorySettings {

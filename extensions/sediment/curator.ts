@@ -32,8 +32,7 @@ export interface CuratorOutcome {
   audit: CuratorAudit;
 }
 
-const CURATOR_TIMEOUT_MS = 180_000;
-const CURATOR_MAX_RETRIES = 0;
+// (2026-05-11: timeout/retries moved to SedimentSettings.curatorTimeoutMs/curatorMaxRetries)
 
 function parseModelRef(ref: string): { provider: string; id: string } | null {
   const slash = ref.indexOf("/");
@@ -241,10 +240,10 @@ async function callCuratorModel(
   prompt: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const parsed = parseModelRef(settings.extractorModel);
-  if (!parsed) throw new Error(`invalid sediment.extractorModel: ${settings.extractorModel || "<empty>"}; expected provider/model`);
+  const parsed = parseModelRef(settings.curatorModel);
+  if (!parsed) throw new Error(`invalid sediment.curatorModel: ${settings.curatorModel || "<empty>"}; expected provider/model`);
   const model = modelRegistry.find(parsed.provider, parsed.id);
-  if (!model) throw new Error(`sediment curator model not found in registry: ${settings.extractorModel}`);
+  if (!model) throw new Error(`sediment curator model not found in registry: ${settings.curatorModel}`);
   const auth = await modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok || !auth.apiKey) throw new Error(`sediment curator auth unavailable: ${auth.error || "missing api key"}`);
 
@@ -259,7 +258,7 @@ async function callCuratorModel(
   const stream = piAi.streamSimple(
     model,
     { messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }] },
-    { apiKey: auth.apiKey, headers: auth.headers, signal, timeoutMs: CURATOR_TIMEOUT_MS, maxRetries: CURATOR_MAX_RETRIES },
+    { apiKey: auth.apiKey, headers: auth.headers, signal, timeoutMs: settings.curatorTimeoutMs, maxRetries: settings.curatorMaxRetries },
   );
   const finalMsg = await stream.result();
   if (finalMsg.stopReason === "error" || finalMsg.stopReason === "aborted") {

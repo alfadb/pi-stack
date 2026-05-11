@@ -1,6 +1,6 @@
 # ADR 0015 — memory_search 升级为双阶段 LLM-driven retrieval
 
-- **状态**：Accepted（2026-05-10；Phase 0/1 已实现；Phase 2 被 [ADR 0016](0016-sediment-as-llm-curator.md) 扩展为 sediment curator lookup/update loop）
+- **状态**：Accepted（2026-05-10；Phase 0/1 已实现；Phase 2 被 [ADR 0016](0016-sediment-as-llm-curator.md) 扩展；2026-05-11 修正 D3：Stage 2 默认从 v4-pro+thinking=high 降为 v4-flash+thinking=off，因精排是相关性判断非逻辑推理任务）
 - **日期**：2026-05-10
 - **决策者**：alfadb
 - **依赖**：[ADR 0010](0010-sediment-single-agent-with-lookup-tools.md)（lookup-tools loop 设计，本 ADR 落地其内核）/ [memory-architecture.md](../memory-architecture.md) §6（read facade 契约）/ [brain-redesign-spec.md](../brain-redesign-spec.md) §4（cross-project 召回）
@@ -73,18 +73,18 @@ Stage 1 (粗排，可配模型，默认 deepseek-v4-flash，thinking=off)：
 Stage 1.5 (本地)：
   memory_get(slug) × K 拿 candidate 完整 entry（compiled_truth + timeline）
 
-Stage 2 (精排，可配模型，默认 deepseek-v4-pro，thinking=high)：
+Stage 2 (精排，可配模型，默认 deepseek-v4-flash，thinking=off)：
   输入: query + K 个完整 entry（~60-150k tokens）
   输出: top-N 排序 + 每条相关性分析（rank_reason）
-  目标: 高精度，跨 entry 推理（"X 比 Y 更相关 because timeline 显示 Z 已废弃"）。Stage 2 必须开推理；请求的 thinking level 若模型不支持则 hard error，不允许 silently clamp。
+  目标: 高精度排序。**2026-05-11 修正**：原默认 v4-pro+thinking=high。经分析，精排是阅读理解+相关性判断任务，非逻辑推理任务——timeline 证据（"X supersedes Y"）是阅读事实不是推理链。thinking 模式对排序质量零增益，改回 v4-flash+thinking=off。
 ```
 
-### D3. 默认全 deepseek 家族
+### D3. 默认全 deepseek 家族（2026-05-11 修正：Stage 2 reasoning 降为 off）
 
 | Stage | 默认模型 | 理由 |
 |---|---|---|
 | Stage 1 | `deepseek/deepseek-v4-flash` + `thinking=off` | 国内访问无跨国延迟（alfadb 首要诉求）；粗排是 high-volume eval 任务，flash 甜区；不开推理避免过度筛选和 DeepSeek minimal→high clamp |
-| Stage 2 | `deepseek/deepseek-v4-pro` + `thinking=high` | 同 family 国内速度；reasoning 强，跨 entry 推理需要；中文理解原生强；与 sediment extractor 共享，模型 cache 命中 |
+| Stage 2 | `deepseek/deepseek-v4-flash` + `thinking=off` | **2026-05-11 修正**：原为 v4-pro + thinking=high。经实测，精排是阅读理解+相关性判断任务，非逻辑推理任务——thinking 模式对排序质量零增益，纯增延迟。改用 v4-flash + thinking=off：更快、更便宜、质量等价 |
 
 **单 family 风险**：sediment extractor 也是 v4-pro，deepseek 服务一挂两个子系统同时失能。可接受理由：
 - sediment 是 fire-and-forget；ADR 0016 已删除 rolling pass-rate fuse，失败通过 audit/git 诊断，auto-write 不把低准确度 fallback 结果写入知识库
@@ -101,9 +101,12 @@ Stage 2 (精排，可配模型，默认 deepseek-v4-pro，thinking=high)：
       "stage1Model": "deepseek/deepseek-v4-flash",
       "stage1Limit": 50,
       "stage1Thinking": "off",
-      "stage2Model": "deepseek/deepseek-v4-pro",
+      // Stage 2 默认 v4-flash + thinking=off（2026-05-11 修正）。
+      // 需要更强中文语义匹配时可切 v4-pro:
+      // "stage2Model": "deepseek/deepseek-v4-pro",
+      "stage2Model": "deepseek/deepseek-v4-flash",
       "stage2Limit": 10,
-      "stage2Thinking": "high"
+      "stage2Thinking": "off"
     }
   }
 }
