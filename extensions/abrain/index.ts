@@ -44,7 +44,7 @@ import {
 import { releaseSecret, type ReleaseSecretResult } from "./vault-reader";
 import {
   authKey,
-  prepareGlobalVaultBashCommand,
+  prepareBootVaultBashCommand,
   redactVaultBashContent,
   scopeLabel,
   VAULT_BASH_OUTPUT_AUTH_CHOICES,
@@ -377,7 +377,8 @@ export default function activate(pi: ExtensionAPI): void {
     eventRegistry.on("tool_call", async (event, ctx) => {
       if (event.toolName !== "bash") return;
       const command = String(event.input?.command ?? "");
-      const prepared = await prepareGlobalVaultBashCommand(command, { abrainHome: ABRAIN_HOME, stateDir: STATE_DIR });
+      const activeProjectId = bootActiveProject?.activeProject?.projectId ?? null;
+      const prepared = await prepareBootVaultBashCommand(command, { abrainHome: ABRAIN_HOME, stateDir: STATE_DIR, activeProjectId });
       if (prepared.kind === "none") return;
       if (prepared.kind === "block") return { block: true, reason: prepared.reason };
       event.input.command = prepared.command;
@@ -410,15 +411,15 @@ export default function activate(pi: ExtensionAPI): void {
       name: "vault_release",
       label: "Release Vault Secret",
       description:
-        "Request user-authorized release of a global vault secret into the LLM context. " +
+        "Request user-authorized release of a vault secret into the LLM context. " +
         "This is the P0c.read LLM-facing path: it prompts the user (Yes once / Session / No / Deny+remember) before decrypting. " +
-        "Only global scope is implemented until ADR 0014 active-project routing lands; sub-pi processes register no vault tools.",
-      promptSnippet: "vault_release(key, options?: { scope?: 'global', reason?: string })",
+        "Scope='global' targets the global vault; scope='project' targets the boot-time active project's vault (rejected when no active project is bound). Sub-pi processes register no vault tools.",
+      promptSnippet: "vault_release(key, options?: { scope?: 'global'|'project', reason?: string })",
       promptGuidelines: [
         "Use vault_release only when plaintext is strictly necessary for the current task.",
         "Always provide a concise reason explaining why the secret must enter model context.",
-        "Do not use vault_release for bash commands; future $VAULT_<key> injection is the safer execution path.",
-        "Never ask for project scope yet; current P0c.read only supports global vault secrets.",
+        "Do not use vault_release for bash commands; $VAULT_<key> injection is the safer execution path.",
+        "Project scope binds to the boot-time active project; restart pi (or use `pi project switch`) to change it.",
       ],
       parameters: {
         type: "object",
@@ -427,7 +428,7 @@ export default function activate(pi: ExtensionAPI): void {
           options: {
             type: "object",
             properties: {
-              scope: { type: "string", enum: ["global"], description: "Only 'global' is implemented in P0c.read." },
+              scope: { type: "string", enum: ["global", "project"], description: "'global' = ~/.abrain/vault; 'project' = boot-time active project's vault." },
               reason: { type: "string", description: "Why plaintext must be released into the LLM context." },
             },
           },
@@ -439,13 +440,27 @@ export default function activate(pi: ExtensionAPI): void {
         const options = (params.options && typeof params.options === "object") ? params.options as Record<string, unknown> : params;
         const scopeRaw = String(options.scope ?? "global");
         const reason = typeof options.reason === "string" ? options.reason : undefined;
-        if (scopeRaw !== "global") {
-          return toolJson({ ok: false, error: "vault_release currently supports only scope='global'; project vault routing is ADR 0014 P1." });
+
+        let scope: VaultScope;
+        if (scopeRaw === "global") {
+          scope = "global";
+        } else if (scopeRaw === "project") {
+          const projectId = bootActiveProject?.activeProject?.projectId;
+          if (!projectId) {
+            const reasonCode = bootActiveProject?.reason ?? "bindings_missing";
+            return toolJson({
+              ok: false,
+              error: `vault_release(scope='project') refused: ${secretDefaultRejection(reasonCode)}`,
+            });
+          }
+          scope = { project: projectId };
+        } else {
+          return toolJson({ ok: false, error: `vault_release: unsupported scope='${scopeRaw}'. Use 'global' or 'project'.` });
         }
+
         try { validateKey(key); }
         catch (err: any) { return toolJson({ ok: false, error: `invalid vault key: ${err.message}` }); }
 
-        const scope: VaultScope = "global";
         const auth = await authorizeVaultRelease(ctx.ui, scope, key, reason, signal);
         if (!auth.ok) return toolJson({ ok: false, key, scope, denied: true, reason: auth.reason });
 

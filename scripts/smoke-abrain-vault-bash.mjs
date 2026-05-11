@@ -2,9 +2,14 @@
 /**
  * Smoke test: abrain P0c.read — vault-backed bash injection helpers.
  *
- * This stays library-level: no real vault unlock required. It verifies parsing,
- * project-scope blocking, no plaintext in rewritten command argv, temp env-file
- * permissions, output withholding payloads, and literal redaction.
+ * Library-level coverage (no real age unlock). Verifies:
+ *   - $VAULT_/$GVAULT_/$PVAULT_ parsing
+ *   - boot-aware scope routing per ADR 0014 P1 step 3:
+ *       $VAULT_   → active project first, fall back to global
+ *       $GVAULT_  → global only
+ *       $PVAULT_  → active project only (blocked when no project bound)
+ *   - 0600 temp env-file creation + command rewrite without plaintext argv
+ *   - default withheld output payload + literal redaction
  */
 
 import { createRequire } from "node:module";
@@ -45,7 +50,6 @@ function transpile(srcPath) {
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-vault-bash-"));
 for (const file of ["vault-bash", "vault-reader", "vault-writer", "keychain"]) {
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));
-  // Relative imports in transpiled CJS keep the original .ts-free names.
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
 
@@ -68,6 +72,13 @@ await check("vaultVarRefs parses bare/braced VAULT and GVAULT refs", () => {
   if (refs.includes("NOT_VAULT")) throw new Error("matched non-vault variable");
 });
 
+await check("vaultVarPrefix classifies prefix correctly", () => {
+  if (bash.vaultVarPrefix("VAULT_x") !== "VAULT_") throw new Error("VAULT_");
+  if (bash.vaultVarPrefix("GVAULT_x") !== "GVAULT_") throw new Error("GVAULT_");
+  if (bash.vaultVarPrefix("PVAULT_x") !== "PVAULT_") throw new Error("PVAULT_");
+  if (bash.vaultVarPrefix("OTHER_x") !== null) throw new Error("non-vault must be null");
+});
+
 await check("keyCandidatesFromVaultVar maps underscores to dash fallback", () => {
   const candidates = bash.keyCandidatesFromVaultVar("VAULT_GitHub_Token");
   for (const expected of ["GitHub_Token", "GitHub-Token", "github_token", "github-token"]) {
@@ -84,32 +95,33 @@ await check("prepareVaultBashCommand returns none when command has no vault refs
   if (result.kind !== "none") throw new Error(`expected none, got ${result.kind}`);
 });
 
-await check("prepareVaultBashCommand blocks $PVAULT_* until project routing lands", async () => {
+await check("prepareVaultBashCommand surfaces pvaultBlockReason when no project bound", async () => {
   const result = await bash.prepareVaultBashCommand("echo $PVAULT_api_key", {
-    keyForVar: () => "api-key",
+    keyForVar: () => undefined,
     releaseKey: async () => release,
     writeEnvFile: () => "/tmp/unused",
+    pvaultBlockReason: "$PVAULT_* requires an active project; current cwd is not bound to one.",
   });
   if (result.kind !== "block") throw new Error(`expected block, got ${result.kind}`);
-  if (!result.reason.includes("active-project routing")) throw new Error(`unexpected reason: ${result.reason}`);
+  if (!result.reason.includes("active project")) throw new Error(`unexpected reason: ${result.reason}`);
 });
 
-await check("prepareVaultBashCommand blocks missing global key", async () => {
+await check("prepareVaultBashCommand blocks missing key with where-to-look hint", async () => {
   const result = await bash.prepareVaultBashCommand("echo $VAULT_missing_key", {
     keyForVar: () => undefined,
     releaseKey: async () => release,
     writeEnvFile: () => "/tmp/unused",
   });
   if (result.kind !== "block") throw new Error(`expected block, got ${result.kind}`);
-  if (!result.reason.includes("not found in global vault")) throw new Error(`unexpected reason: ${result.reason}`);
+  if (!result.reason.includes("active project or global vault")) throw new Error(`unexpected reason: ${result.reason}`);
 });
 
 await check("prepareVaultBashCommand rewrites command without plaintext in argv", async () => {
   let capturedVars;
   const envFile = "/tmp/pi vault env 'quoted.sh";
   const result = await bash.prepareVaultBashCommand("printf '%s' \"$VAULT_api_key\"", {
-    keyForVar: (varName) => varName === "VAULT_api_key" ? "api-key" : undefined,
-    releaseKey: async (key) => ({ ...release, key }),
+    keyForVar: (varName) => varName === "VAULT_api_key" ? { scope: "global", key: "api-key" } : undefined,
+    releaseKey: async ({ scope, key }) => ({ ...release, scope, key }),
     writeEnvFile: (vars) => { capturedVars = vars; return envFile; },
   });
   if (result.kind !== "prepared") throw new Error(`expected prepared, got ${result.kind}`);
@@ -129,6 +141,69 @@ await check("writeVaultEnvFile creates 0600 env file with shell-escaped value", 
   if (mode !== 0o600) throw new Error(`expected 0600, got ${mode.toString(8)}`);
   const body = fs.readFileSync(file, "utf8");
   if (!body.includes("export VAULT_quote='a'\\''b'")) throw new Error(`unexpected env file body: ${body}`);
+});
+
+// ── boot-aware scope routing ────────────────────────────────────
+//
+// We touch fake `.md.age` files in a tmp abrain home to exercise the disk-lookup
+// half of buildBootVaultBashDeps. releaseKey isn't invoked from these resolver
+// assertions because we call keyForVar directly.
+const abrainHome = fs.mkdtempSync(path.join(tmpDir, "abrain-"));
+function touchVault(abrainHome, scope, key) {
+  const dir = scope === "global"
+    ? path.join(abrainHome, "vault")
+    : path.join(abrainHome, "projects", scope.project, "vault");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, `${key}.md.age`), "dummy ciphertext\n", { mode: 0o600 });
+}
+
+touchVault(abrainHome, "global", "shared-token");
+touchVault(abrainHome, "global", "github-token");
+touchVault(abrainHome, { project: "pi-astack" }, "shared-token");
+touchVault(abrainHome, { project: "pi-astack" }, "prod-db-password");
+
+const projectDeps = bash.buildBootVaultBashDeps({ abrainHome, stateDir: path.join(tmpDir, "state-proj"), activeProjectId: "pi-astack" });
+const unboundDeps = bash.buildBootVaultBashDeps({ abrainHome, stateDir: path.join(tmpDir, "state-unbound"), activeProjectId: null });
+
+await check("$VAULT_<key>: prefers active project when both layers have the key", () => {
+  const match = projectDeps.keyForVar("VAULT_shared_token", "VAULT_");
+  if (!match || match.scope.project !== "pi-astack" || match.key !== "shared-token") throw new Error(JSON.stringify(match));
+});
+
+await check("$VAULT_<key>: falls back to global when active project is missing it", () => {
+  const match = projectDeps.keyForVar("VAULT_github_token", "VAULT_");
+  if (!match || match.scope !== "global" || match.key !== "github-token") throw new Error(JSON.stringify(match));
+});
+
+await check("$GVAULT_<key>: only consults global even if active project has the key", () => {
+  const match = projectDeps.keyForVar("GVAULT_prod_db_password", "GVAULT_");
+  if (match) throw new Error(`GVAULT must not see project keys: ${JSON.stringify(match)}`);
+  const sharedAsGlobal = projectDeps.keyForVar("GVAULT_shared_token", "GVAULT_");
+  if (!sharedAsGlobal || sharedAsGlobal.scope !== "global") throw new Error(JSON.stringify(sharedAsGlobal));
+});
+
+await check("$PVAULT_<key>: only consults active project, never global", () => {
+  const match = projectDeps.keyForVar("PVAULT_prod_db_password", "PVAULT_");
+  if (!match || match.scope.project !== "pi-astack") throw new Error(JSON.stringify(match));
+  const onlyGlobal = projectDeps.keyForVar("PVAULT_github_token", "PVAULT_");
+  if (onlyGlobal) throw new Error(`PVAULT must not fall back to global: ${JSON.stringify(onlyGlobal)}`);
+});
+
+await check("$PVAULT_<key>: yields pvaultBlockReason when no project is bound", () => {
+  const match = unboundDeps.keyForVar("PVAULT_anything", "PVAULT_");
+  if (match) throw new Error(`expected no match, got ${JSON.stringify(match)}`);
+  if (!unboundDeps.pvaultBlockReason) throw new Error("pvaultBlockReason should be set when no project");
+});
+
+await check("$VAULT_<key>: with no active project, queries global only", () => {
+  const match = unboundDeps.keyForVar("VAULT_github_token", "VAULT_");
+  if (!match || match.scope !== "global") throw new Error(JSON.stringify(match));
+});
+
+await check("prepareBootVaultBashCommand wires $PVAULT_* block reason end-to-end", async () => {
+  const result = await bash.prepareBootVaultBashCommand("echo $PVAULT_db", { abrainHome, stateDir: path.join(tmpDir, "state-block"), activeProjectId: null });
+  if (result.kind !== "block") throw new Error(`expected block, got ${result.kind}`);
+  if (!result.reason.includes("active project")) throw new Error(`unexpected reason: ${result.reason}`);
 });
 
 await check("withheldVaultBashContent mentions key but not plaintext", () => {

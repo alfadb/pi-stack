@@ -5,6 +5,15 @@
  * env file and rewriting the command to source it. Tool-result output is
  * withheld by default by index.ts; when the user explicitly releases it,
  * literal redaction is applied via redactVaultBashContent().
+ *
+ * Scope routing (ADR 0014 P1 step 3):
+ *
+ *   $VAULT_<key>   → active project first, fall back to global
+ *   $GVAULT_<key>  → global only
+ *   $PVAULT_<key>  → active project only (block if no active project)
+ *
+ * Active project is the ADR 0014 §5.4 boot-time snapshot — bash `cd`
+ * during a session does NOT change which vault gets injected.
  */
 
 import * as fs from "node:fs";
@@ -13,6 +22,8 @@ import { validateKey, type VaultScope } from "./vault-writer";
 import { releaseSecret, redactWithReleasedSecrets, type ReleaseSecretResult } from "./vault-reader";
 
 export const VAULT_BASH_OUTPUT_AUTH_CHOICES = ["No", "Yes once", "Session"] as const;
+
+export type VaultVarPrefix = "VAULT_" | "GVAULT_" | "PVAULT_";
 
 export interface VaultBashRunRecord {
   releases: ReleaseSecretResult[];
@@ -25,10 +36,24 @@ export interface VaultBashEnvVar {
   value: string;
 }
 
+export interface VaultBashKeyMatch {
+  scope: VaultScope;
+  key: string;
+}
+
 export interface VaultBashPrepareDeps {
-  keyForVar(varName: string): string | undefined;
-  releaseKey(key: string): Promise<ReleaseSecretResult>;
+  /**
+   * Resolve a `$VAULT_*` / `$GVAULT_*` / `$PVAULT_*` reference into the actual
+   * vault scope + key, or return null/undefined if nothing matches. Implementations
+   * decide the priority between project and global.
+   */
+  keyForVar(varName: string, prefix: VaultVarPrefix): VaultBashKeyMatch | undefined | null;
+  /** Release plaintext for a previously-resolved scope+key match. */
+  releaseKey(match: VaultBashKeyMatch): Promise<ReleaseSecretResult>;
+  /** Persist injected env vars to a short-lived 0600 file. */
   writeEnvFile(vars: VaultBashEnvVar[]): string;
+  /** Returned to the LLM (as `block.reason`) when `$PVAULT_*` is referenced but no active project exists. */
+  pvaultBlockReason?: string;
 }
 
 export type VaultBashPrepareResult =
@@ -46,6 +71,13 @@ export function authKey(scope: VaultScope, key: string): string {
 
 export function shellSingleQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function vaultVarPrefix(varName: string): VaultVarPrefix | null {
+  if (varName.startsWith("GVAULT_")) return "GVAULT_";
+  if (varName.startsWith("PVAULT_")) return "PVAULT_";
+  if (varName.startsWith("VAULT_")) return "VAULT_";
+  return null;
 }
 
 export function vaultVarRefs(command: string): string[] {
@@ -66,12 +98,22 @@ export function keyCandidatesFromVaultVar(varName: string): string[] {
   ].filter(Boolean)));
 }
 
-export function existingGlobalVaultKey(abrainHome: string, varName: string): string | undefined {
+function existingVaultKey(abrainHome: string, scope: VaultScope, varName: string): string | undefined {
   for (const key of keyCandidatesFromVaultVar(varName)) {
     try { validateKey(key); } catch { continue; }
-    if (fs.existsSync(path.join(abrainHome, "vault", `${key}.md.age`))) return key;
+    if (fs.existsSync(vaultEncryptedPath(abrainHome, scope, key))) return key;
   }
   return undefined;
+}
+
+function vaultEncryptedPath(abrainHome: string, scope: VaultScope, key: string): string {
+  if (scope === "global") return path.join(abrainHome, "vault", `${key}.md.age`);
+  return path.join(abrainHome, "projects", scope.project, "vault", `${key}.md.age`);
+}
+
+/** Legacy: only walks the global vault. Kept for callers that explicitly want global. */
+export function existingGlobalVaultKey(abrainHome: string, varName: string): string | undefined {
+  return existingVaultKey(abrainHome, "global", varName);
 }
 
 export function writeVaultEnvFile(stateDir: string, vars: VaultBashEnvVar[]): string {
@@ -90,13 +132,18 @@ export async function prepareVaultBashCommand(command: string, deps: VaultBashPr
   const releases: ReleaseSecretResult[] = [];
   const envVars: VaultBashEnvVar[] = [];
   for (const varName of refs) {
-    if (varName.startsWith("PVAULT_")) {
-      return { kind: "block", reason: "$PVAULT_* requires ADR 0014 active-project routing; only global vault injection is implemented." };
+    const prefix = vaultVarPrefix(varName);
+    if (!prefix) return { kind: "block", reason: `unrecognized vault variable: $${varName}` };
+    const match = deps.keyForVar(varName, prefix);
+    if (!match) {
+      if (prefix === "PVAULT_" && deps.pvaultBlockReason) return { kind: "block", reason: deps.pvaultBlockReason };
+      const where = prefix === "GVAULT_" ? "global vault"
+        : prefix === "PVAULT_" ? "active project's vault"
+        : "active project or global vault";
+      return { kind: "block", reason: `vault key for $${varName} not found in ${where}` };
     }
-    const key = deps.keyForVar(varName);
-    if (!key) return { kind: "block", reason: `vault key for $${varName} not found in global vault` };
     try {
-      const release = await deps.releaseKey(key);
+      const release = await deps.releaseKey(match);
       releases.push(release);
       envVars.push({ varName, value: release.value });
     } catch (err: any) {
@@ -117,12 +164,49 @@ export async function prepareVaultBashCommand(command: string, deps: VaultBashPr
   };
 }
 
-export async function prepareGlobalVaultBashCommand(command: string, opts: { abrainHome: string; stateDir: string }): Promise<VaultBashPrepareResult> {
-  return prepareVaultBashCommand(command, {
-    keyForVar: (varName) => existingGlobalVaultKey(opts.abrainHome, varName),
-    releaseKey: (key) => releaseSecret({ abrainHome: opts.abrainHome, scope: "global", key }),
+export interface PrepareBootVaultBashOptions {
+  abrainHome: string;
+  stateDir: string;
+  /** Active project id from the ADR 0014 §5.4 boot-time snapshot, or null if unbound. */
+  activeProjectId: string | null;
+}
+
+export function buildBootVaultBashDeps(opts: PrepareBootVaultBashOptions): VaultBashPrepareDeps {
+  const projectId = opts.activeProjectId;
+  return {
+    keyForVar(varName, prefix) {
+      if (prefix === "GVAULT_") {
+        const key = existingVaultKey(opts.abrainHome, "global", varName);
+        return key ? { scope: "global", key } : undefined;
+      }
+      if (prefix === "PVAULT_") {
+        if (!projectId) return undefined; // pvaultBlockReason kicks in
+        const key = existingVaultKey(opts.abrainHome, { project: projectId }, varName);
+        return key ? { scope: { project: projectId }, key } : undefined;
+      }
+      // $VAULT_ — active project first, fall back to global.
+      if (projectId) {
+        const projKey = existingVaultKey(opts.abrainHome, { project: projectId }, varName);
+        if (projKey) return { scope: { project: projectId }, key: projKey };
+      }
+      const globalKey = existingVaultKey(opts.abrainHome, "global", varName);
+      return globalKey ? { scope: "global", key: globalKey } : undefined;
+    },
+    releaseKey: (match) => releaseSecret({ abrainHome: opts.abrainHome, scope: match.scope, key: match.key }),
     writeEnvFile: (vars) => writeVaultEnvFile(opts.stateDir, vars),
-  });
+    pvaultBlockReason: projectId
+      ? undefined
+      : "$PVAULT_* requires an active project; current cwd is not bound to one (~/.abrain/projects/_bindings.md).",
+  };
+}
+
+export async function prepareBootVaultBashCommand(command: string, opts: PrepareBootVaultBashOptions): Promise<VaultBashPrepareResult> {
+  return prepareVaultBashCommand(command, buildBootVaultBashDeps(opts));
+}
+
+/** Legacy: global-only convenience for callers/tests that don't have project context. */
+export async function prepareGlobalVaultBashCommand(command: string, opts: { abrainHome: string; stateDir: string }): Promise<VaultBashPrepareResult> {
+  return prepareBootVaultBashCommand(command, { ...opts, activeProjectId: null });
 }
 
 export function redactVaultBashContent(content: unknown, releases: ReleaseSecretResult[]): unknown {
