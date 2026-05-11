@@ -41,7 +41,16 @@ import {
   writeSecret, listSecrets, forgetSecret, validateKey,
   type VaultScope,
 } from "./vault-writer";
-import { releaseSecret, redactWithReleasedSecrets, type ReleaseSecretResult } from "./vault-reader";
+import { releaseSecret, type ReleaseSecretResult } from "./vault-reader";
+import {
+  authKey,
+  prepareGlobalVaultBashCommand,
+  redactVaultBashContent,
+  scopeLabel,
+  VAULT_BASH_OUTPUT_AUTH_CHOICES,
+  withheldVaultBashContent,
+  type VaultBashRunRecord,
+} from "./vault-bash";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
 
@@ -170,17 +179,16 @@ interface VaultReleaseUi {
   confirm?(title: string, message: string, opts?: { timeout?: number; signal?: AbortSignal }): Promise<boolean>;
 }
 
+export const VAULT_RELEASE_AUTH_CHOICES = ["No", "Deny + remember", "Yes once", "Session"] as const;
+
 const releaseSessionGrants = new Set<string>();
 const releaseRememberDenies = new Set<string>();
 const bashOutputSessionGrants = new Set<string>();
-const vaultBashRuns = new Map<string, { releases: ReleaseSecretResult[]; envFile: string; grantKey: string }>();
+const vaultBashRuns = new Map<string, VaultBashRunRecord>();
 
-function scopeLabel(scope: VaultScope): string {
-  return scope === "global" ? "global" : `project:${scope.project}`;
-}
-
-function authKey(scope: VaultScope, key: string): string {
-  return `${scopeLabel(scope)}:${key}`;
+function vaultReleaseChoiceReason(choice: string | undefined): string {
+  if (!choice) return "cancelled";
+  return choice.toLowerCase().replace(/\s*\+\s*/g, "_").replace(/\s+/g, "_");
 }
 
 function toolJson(payload: unknown) {
@@ -188,61 +196,6 @@ function toolJson(payload: unknown) {
     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     details: payload,
   };
-}
-
-function shellSingleQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-function vaultVarRefs(command: string): string[] {
-  const refs = new Set<string>();
-  const re = /\$(?:\{((?:GVAULT|PVAULT|VAULT)_[A-Za-z0-9_]+)\}|((?:GVAULT|PVAULT|VAULT)_[A-Za-z0-9_]+))/g;
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(command))) refs.add(match[1] || match[2]);
-  return [...refs];
-}
-
-function keyCandidatesFromVaultVar(varName: string): string[] {
-  const suffix = varName.replace(/^(?:GVAULT|PVAULT|VAULT)_/, "");
-  return Array.from(new Set([
-    suffix,
-    suffix.replace(/_/g, "-"),
-    suffix.toLowerCase(),
-    suffix.toLowerCase().replace(/_/g, "-"),
-  ].filter(Boolean)));
-}
-
-function existingGlobalVaultKey(varName: string): string | undefined {
-  for (const key of keyCandidatesFromVaultVar(varName)) {
-    try { validateKey(key); } catch { continue; }
-    if (fs.existsSync(path.join(ABRAIN_HOME, "vault", `${key}.md.age`))) return key;
-  }
-  return undefined;
-}
-
-function writeVaultEnvFile(vars: Array<{ varName: string; value: string }>): string {
-  fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
-  const file = path.join(STATE_DIR, `vault-env-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.sh`);
-  const body = vars.map(({ varName, value }) => `export ${varName}=${shellSingleQuote(value)}`).join("\n") + "\n";
-  fs.writeFileSync(file, body, { mode: 0o600 });
-  return file;
-}
-
-function redactTextContent(content: unknown, releases: ReleaseSecretResult[]): unknown {
-  if (!Array.isArray(content)) return content;
-  return content.map((part) => {
-    if (!part || typeof part !== "object") return part;
-    const obj = part as Record<string, unknown>;
-    if (obj.type === "text" && typeof obj.text === "string") {
-      return { ...obj, text: redactWithReleasedSecrets(obj.text, releases) };
-    }
-    return part;
-  });
-}
-
-function withheldVaultBashContent(record: { releases: ReleaseSecretResult[] }) {
-  const keys = record.releases.map((r) => `${scopeLabel(r.scope)}:${r.key}`).join(", ");
-  return [{ type: "text", text: `(vault-protected bash output withheld from LLM context; keys: ${keys}. Ask the user to release this command's output if needed.)` }];
 }
 
 async function authorizeVaultBashOutput(ui: VaultReleaseUi | undefined, grantKey: string, releases: ReleaseSecretResult[], signal?: AbortSignal): Promise<"release" | "withhold"> {
@@ -254,7 +207,7 @@ async function authorizeVaultBashOutput(ui: VaultReleaseUi | undefined, grantKey
   // an explicit release choice.
   const choice = await ui.select(
     "Release vault-protected bash output?",
-    ["No", "Yes once", "Session"],
+    [...VAULT_BASH_OUTPUT_AUTH_CHOICES],
     { signal },
   );
   if (choice === "Yes once") return "release";
@@ -281,14 +234,14 @@ async function authorizeVaultRelease(ui: VaultReleaseUi | undefined, scope: Vaul
   if (typeof ui.select === "function") {
     // Fail closed in non-interactive/API runners that may auto-return the first
     // select item: put deny choices before explicit release choices.
-    const choice = await ui.select("Vault release authorization", ["No", "Deny + remember", "Yes once", "Session"], { signal });
+    const choice = await ui.select("Vault release authorization", [...VAULT_RELEASE_AUTH_CHOICES], { signal });
     if (choice === "Yes once") return { ok: true };
     if (choice === "Session") {
       releaseSessionGrants.add(gate);
       return { ok: true };
     }
     if (choice === "Deny + remember") releaseRememberDenies.add(gate);
-    return { ok: false, reason: choice ? choice.toLowerCase().replace(/\s+/g, "_") : "cancelled" };
+    return { ok: false, reason: vaultReleaseChoiceReason(choice) };
   }
 
   if (typeof ui.confirm === "function") {
@@ -317,34 +270,11 @@ export default function activate(pi: ExtensionAPI): void {
     eventRegistry.on("tool_call", async (event, ctx) => {
       if (event.toolName !== "bash") return;
       const command = String(event.input?.command ?? "");
-      const refs = vaultVarRefs(command);
-      if (refs.length === 0) return;
-
-      const releases: ReleaseSecretResult[] = [];
-      const envVars: Array<{ varName: string; value: string }> = [];
-      for (const varName of refs) {
-        if (varName.startsWith("PVAULT_")) {
-          return { block: true, reason: "$PVAULT_* requires ADR 0014 active-project routing; only global vault injection is implemented." };
-        }
-        const key = existingGlobalVaultKey(varName);
-        if (!key) return { block: true, reason: `vault key for $${varName} not found in global vault` };
-        try {
-          const release = await releaseSecret({ abrainHome: ABRAIN_HOME, scope: "global", key });
-          releases.push(release);
-          envVars.push({ varName, value: release.value });
-        } catch (err: any) {
-          return { block: true, reason: `vault injection failed for $${varName}: ${err?.message ?? String(err)}` };
-        }
-      }
-
-      const envFile = writeVaultEnvFile(envVars);
-      const quoted = shellSingleQuote(envFile);
-      event.input.command = `__pi_vault_env=${quoted}; trap 'rm -f "$__pi_vault_env"' EXIT; . "$__pi_vault_env"; ${command}`;
-      vaultBashRuns.set(event.toolCallId, {
-        releases,
-        envFile,
-        grantKey: releases.map((r) => authKey(r.scope, r.key)).sort().join(","),
-      });
+      const prepared = await prepareGlobalVaultBashCommand(command, { abrainHome: ABRAIN_HOME, stateDir: STATE_DIR });
+      if (prepared.kind === "none") return;
+      if (prepared.kind === "block") return { block: true, reason: prepared.reason };
+      event.input.command = prepared.command;
+      vaultBashRuns.set(event.toolCallId, prepared.record);
     });
 
     eventRegistry.on("tool_result", async (event, ctx) => {
@@ -362,7 +292,7 @@ export default function activate(pi: ExtensionAPI): void {
         };
       }
       return {
-        content: redactTextContent(event.content, record.releases),
+        content: redactVaultBashContent(event.content, record.releases),
         details: { ...(event.details ?? {}), vault: { outputReleased: true, redacted: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
       };
     });

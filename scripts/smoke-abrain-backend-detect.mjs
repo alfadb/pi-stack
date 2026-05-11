@@ -446,14 +446,17 @@ const bootstrapSrc = path.join(repoRoot, "extensions/abrain/bootstrap.ts");
 const keychainSrc = path.join(repoRoot, "extensions/abrain/keychain.ts");
 const vaultWriterSrc = path.join(repoRoot, "extensions/abrain/vault-writer.ts");
 const vaultReaderSrc = path.join(repoRoot, "extensions/abrain/vault-reader.ts");
+const vaultBashSrc = path.join(repoRoot, "extensions/abrain/vault-bash.ts");
 fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), transpileTsToCjs(bootstrapSrc));
 fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-reader.cjs"), transpileTsToCjs(vaultReaderSrc));
+fs.writeFileSync(path.join(tmpDir, "vault-bash.cjs"), transpileTsToCjs(vaultBashSrc));
 // vault-reader.cjs keeps its own relative imports (./keychain, ./vault-writer),
 // so provide extensionless .js companions in the tmp dir as well.
 fs.copyFileSync(path.join(tmpDir, "keychain.cjs"), path.join(tmpDir, "keychain.js"));
 fs.copyFileSync(path.join(tmpDir, "vault-writer.cjs"), path.join(tmpDir, "vault-writer.js"));
+fs.copyFileSync(path.join(tmpDir, "vault-reader.cjs"), path.join(tmpDir, "vault-reader.js"));
 
 const indexSrc = path.join(repoRoot, "extensions/abrain/index.ts");
 let indexCompiled = transpileTsToCjs(indexSrc);
@@ -462,7 +465,8 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/bootstrap"\)/g, 'require("./bootstrap.cjs")')
   .replace(/require\("\.\/keychain"\)/g, 'require("./keychain.cjs")')
   .replace(/require\("\.\/vault-writer"\)/g, 'require("./vault-writer.cjs")')
-  .replace(/require\("\.\/vault-reader"\)/g, 'require("./vault-reader.cjs")');
+  .replace(/require\("\.\/vault-reader"\)/g, 'require("./vault-reader.cjs")')
+  .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);
 const indexModule = require(indexFile);
@@ -532,8 +536,9 @@ check("activate handles missing registerCommand gracefully", () => {
 
 check("vault authorization menus are default-deny for non-interactive runners", () => {
   const src = fs.readFileSync(indexSrc, "utf8");
-  if (!src.includes('["No", "Yes once", "Session"]')) throw new Error("bash output authorization should put No first");
-  if (!src.includes('["No", "Deny + remember", "Yes once", "Session"]')) throw new Error("vault_release authorization should put No first");
+  if (!indexModule.VAULT_RELEASE_AUTH_CHOICES || indexModule.VAULT_RELEASE_AUTH_CHOICES[0] !== "No") throw new Error("vault_release authorization should put No first");
+  const vaultBash = require(path.join(tmpDir, "vault-bash.cjs"));
+  if (!vaultBash.VAULT_BASH_OUTPUT_AUTH_CHOICES || vaultBash.VAULT_BASH_OUTPUT_AUTH_CHOICES[0] !== "No") throw new Error("bash output authorization should put No first");
 });
 
 // ── Done ────────────────────────────────────────────────────────
