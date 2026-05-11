@@ -530,6 +530,12 @@ check("activate handles missing registerCommand gracefully", () => {
   }
 });
 
+check("vault authorization menus are default-deny for non-interactive runners", () => {
+  const src = fs.readFileSync(indexSrc, "utf8");
+  if (!src.includes('["No", "Yes once", "Session"]')) throw new Error("bash output authorization should put No first");
+  if (!src.includes('["No", "Deny + remember", "Yes once", "Session"]')) throw new Error("vault_release authorization should put No first");
+});
+
 // ── Done ────────────────────────────────────────────────────────
 
 console.log("");

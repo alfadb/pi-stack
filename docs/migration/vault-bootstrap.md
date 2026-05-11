@@ -489,8 +489,8 @@ vault-bootstrap 完成后必须验证。**按 backend 分类，只验证该 host
 - [x] **sub-pi extension guard**：`scripts/smoke-abrain-backend-detect.mjs` 过（`PI_ABRAIN_DISABLED=1` 在 abrain extension activate 顶部生效，registerCommand 零次调用）
 - [x] vault git 策略对齐 v1.4.6：`.vault-backend` / `.vault-pubkey` / `.vault-master.age` / encrypted `vault/*.md.age` / `vault/_meta/*.md` 可上 git；lock/tmp/runtime state gitignored
 - [x] P0c.read core substrate：`vault-reader.ts` unlocks `.vault-master.age` via recorded backend, decrypts per-key `.md.age`, cleans temp identity files, and provides literal redaction helper (ssh-key e2e smoke)
-- [x] P0c.read LLM surface：`vault_release` tool registers only in main pi, prompts TUI authorization (`Yes once` / `Session` / `No` / `Deny + remember`), and currently supports global vault keys
-- [x] P0c.read bash path (global scope): `$VAULT_<key>` / `$GVAULT_<key>` injection via temporary 0600 env file; stdout/stderr default-withheld from LLM unless user authorizes once/session, then literal redaction runs before returning output
+- [x] P0c.read LLM surface：`vault_release` tool registers only in main pi, prompts default-deny TUI authorization (`No` / `Deny + remember` / `Yes once` / `Session`), and currently supports global vault keys
+- [x] P0c.read bash path (global scope): `$VAULT_<key>` / `$GVAULT_<key>` injection via temporary 0600 env file; stdout/stderr default-withheld from LLM unless user explicitly authorizes once/session, then literal redaction runs before returning output. Authorization menus put deny first so non-interactive/API runners fail closed.
 - [ ] P0c.read project routing: `$PVAULT_<key>` and active project vault resolution
 
 ### Tier 2 optimization 验收（仅在该 backend 上 host 实际可用时走）

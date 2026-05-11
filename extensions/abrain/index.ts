@@ -249,9 +249,12 @@ async function authorizeVaultBashOutput(ui: VaultReleaseUi | undefined, grantKey
   if (bashOutputSessionGrants.has(grantKey)) return "release";
   if (!ui?.select) return "withhold";
   const keyList = releases.map((r) => `${scopeLabel(r.scope)}:${r.key}`).join(", ");
+  // Fail closed in non-interactive/API runners that may auto-return the first
+  // select item: put the deny option first. Interactive users can still move to
+  // an explicit release choice.
   const choice = await ui.select(
     "Release vault-protected bash output?",
-    ["Yes once", "Session", "No"],
+    ["No", "Yes once", "Session"],
     { signal },
   );
   if (choice === "Yes once") return "release";
@@ -276,7 +279,9 @@ async function authorizeVaultRelease(ui: VaultReleaseUi | undefined, scope: Vaul
   ].filter(Boolean).join("\n");
 
   if (typeof ui.select === "function") {
-    const choice = await ui.select("Vault release authorization", ["Yes once", "Session", "No", "Deny + remember"], { signal });
+    // Fail closed in non-interactive/API runners that may auto-return the first
+    // select item: put deny choices before explicit release choices.
+    const choice = await ui.select("Vault release authorization", ["No", "Deny + remember", "Yes once", "Session"], { signal });
     if (choice === "Yes once") return { ok: true };
     if (choice === "Session") {
       releaseSessionGrants.add(gate);
