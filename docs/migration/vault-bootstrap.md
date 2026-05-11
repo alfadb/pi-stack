@@ -466,7 +466,7 @@ rsync -av --delete ~/.abrain/ user@deviceB:.abrain/
 
 - `/secret` 命令由 **main pi 进程内同步调用 vaultWriter library** 处理（不走 sediment IPC / 不走 agent_end 异步）。vaultWriter 是 `extensions/abrain/vault-writer.ts`，复用 sediment 的 validation/audit substrate 思路但代码共享不是进程共享。避免 daemon / socket / peer credential 三层新工程面
 - 当前 P0c.write 落盘步骤：flock(vault 目录) → age encrypt(plaintext, `~/.abrain/.vault-pubkey`) → atomic rename 到 `vault/<key>.md.age` → append `_meta/<key>.md` + fsync → append `vault-events.jsonl` + fsync → unflock
-- P0c.write 同步等待加密文件与元数据落盘后返回；下一条命令可以看到 encrypted vault artifact。`$VAULT_<key>` bash 注入属于 P0c.read，尚未实现。
+- P0c.write 同步等待加密文件与元数据落盘后返回；下一条命令可以看到 encrypted vault artifact。`$VAULT_<key>` / `$GVAULT_<key>` / `$PVAULT_<key>` bash 注入属于 P0c.read，已于 v1.4.6 (2026-05-10、2026-05-11) 交付。全部路径（release / bash inject / output authorization / read-path audit）详见 §8 checklist + ADR 0014 P0c.read 阅读顺序。
 - 写入失败（未 init/缺 `.vault-pubkey` / 加密失败 / metadata 或 audit append 失败）TUI 立刻报错；若 crash 发生在 rename 后 audit 前，`reconcile()` 在下次初始化时补 `recovered_missing_audit`。
 
 ## 8. 验收 checklist（v1.4 重写）

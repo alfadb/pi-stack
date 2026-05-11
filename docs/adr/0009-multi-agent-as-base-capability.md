@@ -1,10 +1,15 @@
 # ADR 0009 - multi-agent 作为基础能力,调用模式作为模板参考
 
-- **状态**: Accepted
+- **状态**: Accepted (revised 2026-05-11)
 - **日期**: 2026-05-05
 - **决策者**: alfadb
 - **依赖**: ADR 0001(pi-astack 定位)/ ADR 0006(组件合并)
 - **补充说明（2026-05-07）**：本 ADR 中的 "sediment voter 借 dispatch_agents 跑 3 个 model" 例子已被 ADR 0010 证伪。sediment 已转为单 agent + lookup tools（memory-architecture.md §8.2），不再是 dispatch_agents 的消费者。dispatch_agent/agents 作为主会话基础能力的设计初衷不变。
+- **补充说明（2026-05-11，实现差异 reconciliation）**：本 ADR 原文描述的组件路径与实际 v0.1 ship 状态有出入，设计原则（"基础能力 > 固定 strategy"）不变：
+  - 目录从 `extensions/multi-agent/` 重命名为 `extensions/dispatch/`；vision/imagine 同期拆出为独立扩展。下文出现的 `extensions/multi-agent/...` 请读为 `extensions/dispatch/...`。
+  - `multi_dispatch(strategy, tasks)` 始终未成 registered tool 发出。`extensions/dispatch/index.ts` 只注册 `dispatch_agent` + `dispatch_agents`。下文提到的 "`multi_dispatch` 保留作为兼容 / v0.2 下架" 一入场就省了。
+  - `extensions/multi-agent/templates/{parallel,debate,chain,ensemble}.md` 未建。代替是 `promptSnippet` + LLM 自主组合；cookbook 未来要加会作为主会话 skills (`~/.pi/agent/skills/...`) 下发。
+  - `vision` / `imagine` 由独立扩展 `extensions/vision/` `extensions/imagine/` 提供。
 
 ## 背景
 
@@ -59,7 +64,7 @@ dispatch_agents([{...}, {...}, ...]) // 数组形式
 
 `parallel` / `debate` / `chain` / `ensemble` 不消失,但**降级为模板**:
 
-- 实现位置:`pi-astack/extensions/multi-agent/templates/`
+- 实现位置（**未落地**，见顶部 2026-05-11 reconciliation）:`pi-astack/extensions/multi-agent/templates/`
 - 形式:每个 strategy 对应一份 markdown 描述("何时用、参数怎么填、如何融合结果")
 - 主会话**参考**这些模板设计自己的调用,而不是被它们限制
 
@@ -109,7 +114,7 @@ sediment 不调"ensemble strategy",而是直接 `dispatch_agents`,自己组合 q
 
 **背景实例**:调用者(主会话 LLM 或上层 RPC)生成参数时偶发会把 array / object 反序列化为 JSON 字符串,导致 `must be array` / `must be object` 的 schema 验证错误。实测出现过双重 stringify 场景(上层 RPC + 模型 prompt template 各 stringify 一次)。
 
-**决策**:`dispatch_agent` / `dispatch_agents` / `multi_dispatch` 三个 registered tool 都保持 strict `parameters` schema;兼容逻辑统一放在 pi 官方 `n(args)` 钩子(argument preparation hook)里,调用同一个 `extensions/multi-agent/input-compat.ts`。内部 typed API(sediment 调用)不走 registered tool,也不走 input compat。
+**决策**（2026-05-11 修订：`multi_dispatch` 从未 ship，实际只有下述两个）:`dispatch_agent` / `dispatch_agents` 两个 registered tool 都保持 strict `parameters` schema;兼容逻辑统一放在 pi 官方 `n(args)` 钩子(argument preparation hook)里,调用同一个 `extensions/dispatch/input-compat.ts`。内部 typed API(sediment 调用)不走 registered tool,也不走 input compat。
 
 原则:**兼容在 n(args)(argument preparation hook),契约在 parameters**。禁止用 `Type.Any()` 放宽主 schema 来绕过验证。
 
@@ -198,8 +203,8 @@ Hint: pass tasks as actual JSON array. Example:
 
 #### 适用范围
 
-- `dispatch_agent` / `dispatch_agents` / `multi_dispatch` registered tool 的 `n(args)` hook
-- multi_dispatch 兼容层内部转发 → dispatchAgents typed API 时不重复兑底(已在外层过一道)
+- `dispatch_agent` / `dispatch_agents` registered tool 的 `n(args)` hook（`multi_dispatch` 从未 ship，原文列出的第三个 hook 不存在）
+- ~~multi_dispatch 兼容层内部转发~~（从未 ship，仅作设计动机记录） → dispatchAgents typed API 时不重复兑底(已在外层过一道)
 - 子代理 / sediment 内部代码调用 → 不走兑底(代码调代码不会 stringify)
 
 ### 子代理工具安全边界
@@ -218,6 +223,8 @@ Hint: pass tasks as actual JSON array. Example:
 
 ### vision / imagine 工具不变
 
+> **2026-05-11 修订**：`vision` / `imagine` 已被拆到独立扩展 `extensions/vision/` + `extensions/imagine/`，不再随 multi-agent (现 `dispatch`) 打包。本节以下描述的 "依附 pi-multi-agent" 已 stale；委托语义 (`tools: "vision,readonly"`) 不变。
+
 `vision` 和 `imagine` 仍然是 pi-multi-agent 自带的两个 registered tool(通过 `pi.n()` 注册),主会话直接调。
 
 它们不被本 ADR 影响:
@@ -227,21 +234,25 @@ Hint: pass tasks as actual JSON array. Example:
 
 ## 实现影响
 
-### extensions/multi-agent/index.ts
+### extensions/dispatch/index.ts
 
-注册的工具集变化:
+> **2026-05-11 修订**：原标题写 `extensions/multi-agent/index.ts`。实际 ship 路径是 `extensions/dispatch/index.ts`。`multi_dispatch` 从未落地；vision/imagine 拆入独立扩展。下表修正实现状态。
 
-| 工具 | v6 之前 | v6.5 当前 |
+注册的工具集变化：
+
+| 工具 | v6 之前 | shipped (extensions/dispatch/) |
 |---|---|---|
-| `multi_dispatch(strategy, tasks)` | 固定 4 strategy | **保留**作为兼容 + 升级路径,内部即调 dispatch_agents/ dispatch_agent |
-| `dispatch_agent(opts)` | 不存在 | **新增**基础能力 |
-| `dispatch_agents(opts[])` | 不存在 | **新增**基础并发能力 |
-| `vision(prompt, image)` | 已有 | 不变 |
-| `imagine(prompt, ...)` | 已有 | 不变 |
+| `dispatch_agent(opts)` | 不存在 | **新增**基础能力（唯一路径） |
+| `dispatch_agents(opts[])` | 不存在 | **新增**基础并发能力（max 16 tasks，in-process worker pool MAX_CONCURRENCY=4） |
+| ~~`multi_dispatch(strategy, tasks)`~~ | 固定 4 strategy | **未 ship**——原计划作为兼容 surface，实际未注册 |
+| `vision(prompt, image)` | 已有 | 拆入 `extensions/vision/`（ADR 0006 reconciliation） |
+| `imagine(prompt, ...)` | 已有 | 拆入 `extensions/imagine/`（ADR 0006 reconciliation） |
 
-### extensions/multi-agent/templates/
+### ~~extensions/multi-agent/templates/~~
 
-新建目录,存放四种典型调用模式的 cookbook:
+> **2026-05-11 修订**：本节描述的 templates/ 目录从未落地。LLM 仅从 `dispatch_agent` / `dispatch_agents` 的 `promptSnippet` + `promptGuidelines` 获得指引，自主组合 parallel / debate / chain / ensemble 调用。原设计保留作为设计动机记录：
+
+原计划（**未落地**）：新建目录,存放四种典型调用模式的 cookbook:
 
 - `templates/parallel.md` - 独立并行 cookbook
 - `templates/debate.md` - 多轮辩论 cookbook
@@ -250,9 +261,11 @@ Hint: pass tasks as actual JSON array. Example:
 
 主会话的 system prompt(`promptSnippet`)说明:"如果你想用某种典型模式,参考 templates/ 下的 cookbook;也可以直接用 dispatch_agent / dispatch_agents 自由组合。"
 
-### multi_dispatch 兼容
+### ~~multi_dispatch 兼容~~
 
-老的 `multi_dispatch(strategy, tasks)` API 不立即移除(保护已存在的 skill/prompt 调用)。
+> **2026-05-11 修订**：`multi_dispatch` 从未作为 registered tool 发出，也没有任何 shipped 的 skill/prompt 依赖它。下述兼容 / deprecation timeline 仅作为设计动机记录。
+
+原计划（**未落地**）：老的 `multi_dispatch(strategy, tasks)` API 不立即移除(保护已存在的 skill/prompt 调用)。
 新代码与 sediment 直接用 `dispatch_agent` / `dispatch_agents`。
 
 老接口在 v0.2 阶段标记 deprecated,v1.0 移除。
@@ -343,11 +356,11 @@ node extensions/sediment/test/voter-concurrency.ts
 - 主会话调度自由度大幅提升
 - sediment 的多模型投票可以更精细控制 quorum、超时、重试
 - 现有四种 strategy 仍可参考(cookbook 形式)
-- 兼容老 `multi_dispatch` 调用,渐进迁移
+- ~~兼容老 `multi_dispatch` 调用,渐进迁移~~（从未落地）
 
 ### 负面
 - 主会话需要更明确的指导(system prompt 要说明"何时直接 dispatch,何时参考模板")
-- `dispatch_agent` 与 `multi_dispatch` 并存期间有 API 表面增加
+- ~~`dispatch_agent` 与 `multi_dispatch` 并存期间有 API 表面增加~~（`multi_dispatch` 从未落地，仅 dispatch_agent / dispatch_agents 两个 tool）
 - 模板维护成本(4 份 cookbook 需要随主会话理解力提升保持更新)
 
 ### 风险
@@ -358,7 +371,7 @@ node extensions/sediment/test/voter-concurrency.ts
 
 - ADR 0001: pi-astack 定位
 - ADR 0004: sediment 写入策略(§ 5 运行时纪律依赖本 ADR 的真并发保证)
-- ADR 0006: 组件合并清单(pi-multi-agent 迁入 extensions/multi-agent/)
+- ADR 0006: 组件合并清单(pi-multi-agent 迁入 extensions/dispatch/ + vision/imagine 拆为独立扩展，2026-05-11 reconciliation)
 - pi-multi-agent 现有 API 表面(`multi_dispatch`, `vision`, `imagine`)
 - pi-multi-agent 源码:`runner.ts` (in-process completeSimple)、`strategies/parallel.ts` (Promise.all fanout)
 - pi 官方 SDK docs: `docs/sdk.md`

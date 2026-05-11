@@ -184,6 +184,32 @@ ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "au
 
 [memory-architecture.md](../memory-architecture.md) 的 supersede banner 同步修正为："audit row schema → 扩展 lane 字段，见 ADR 0014"。
 
+### §vault-events.jsonl op 枚举（P0c.read audit closure, v1.4.6 / 2026-05-11）
+
+`vault-events.jsonl` 不仅记录写入，也记录 P0c.read 路径的所有鉴权决策。`VaultEventOp` 完整枚举（见 `extensions/abrain/vault-writer.ts`）：
+
+| op | 写入点 (lane) | 语义 |
+|---|---|---|
+| `create` | write path | `/secret set` 首次写入某 key |
+| `rotate` | write path | `/secret set` 在已存在 key 上重写 |
+| `forget` | write path | `/secret forget` 删除加密件（保留 _meta） |
+| `recovered_missing_audit` | reconcile | crash 后启动检查 `recoverMissingAuditRows` 补齐 |
+| `release` | vault_release | TUI 授权通过，明文已交付 LLM |
+| `release_denied` | vault_release | TUI 拒绝（`no` / `deny_remember` / `session-deny` / …） |
+| `release_blocked` | vault_release | pre-flight 拒绝在授权之前（key 不存在 / pre-flight 错 / decrypt 错） |
+| `bash_inject` | bash tool_call hook | `$VAULT_*` / `$PVAULT_*` / `$GVAULT_*` 匹配，env file 已写入 |
+| `bash_inject_block` | bash tool_call hook | bash hook 拒绝（key 缺 / `$PVAULT_*` 无 active project / decrypt 错） |
+| `bash_output_release` | bash tool_result hook | 用户授权后续补发 redacted stdout/stderr 给 LLM |
+| `bash_output_withhold` | bash tool_result hook | 用户拒绝 / 默认 withhold |
+
+**不变量**：
+1. **Plaintext NEVER enters audit rows**——`VaultEvent` 类型本身没有 `value` 槽；smoke (`smoke-abrain-vault-writer.mjs` 中 `appendVaultReadAudit` 断言) 验证任意 read-path row 不含 `value` 字段与 `"plaintext"` 字串。
+2. **`command_preview` 只含变量引用**（`$VAULT_<name>`）——bash hook 在执行前重写命令，预览才抓取，所以不会被插值后的明文污染。长命令以 `truncateForPrompt(value, 240)` 截断（保头保尾）。
+3. **`bash_inject` row 携 `variables[]`**：包含 `varName → scopeKey` 映射（例 `{varName: "VAULT_github_token", scopeKey: "global:github-token"}`）以供取证；bash multi-key row 用 `keys[]` 而非单个 `key` 字段。
+4. **入口函数**：read-path 只能走 `appendVaultReadAudit(abrainHome, evt)`；write-path 走 内部 `appendVaultEvent`。两者同一个追加点 + fsync 路径。
+5. **静态契约 smoke**：`smoke-abrain-backend-detect.mjs` 断言 7 个 read-path op 字面都出现在 `extensions/abrain/index.ts` 的 callsite——未来重构不能静默丢掉任一分支。
+6. **失败语义**：audit 写失败 best-effort——`safeAuditAppend` 不 throw，vault 决策路径不被 audit 障碍（observability != enforcement）。
+
 ## 与上游 ADR 的关系
 
 | 上游 | 关系 | 说明 |
