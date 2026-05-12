@@ -1675,13 +1675,22 @@ This is a cross-project review pipeline body with enough content.
       execFileSync("git", ["-C", rAbrain, "add", "-A"]);
       execFileSync("git", ["-C", rAbrain, "commit", "-q", "-m", "init"]);
 
-      // ADR 0017 / B4.5: no projectId means migration MUST refuse even
-      // when a git remote exists. Migration is data movement; identity
-      // selection belongs to /abrain bind and active-project strict binding.
+      const boundOther = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-bound-other-"));
+      execFileSync("git", ["-C", boundOther, "init", "-q"]);
+      execFileSync("git", ["-C", boundOther, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", boundOther, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", boundOther, "config", "commit.gpgsign", "false"]);
+      execFileSync("git", ["-C", boundOther, "commit", "-q", "--allow-empty", "-m", "init"]);
+      await bindMigrationProject(boundOther, rAbrain, "bound-other");
+
+      // ADR 0017 / B4.5: migration MUST refuse an unbound target repo even
+      // when the command cwd is another repo that is already bound. Identity
+      // is anchored on pensieveTarget's owning repo, not slash-command cwd.
       const result = await runMigrationGo({
         pensieveTarget: path.join(rParent, ".pensieve"),
         abrainHome: rAbrain,
-        cwd: rParent,
+        projectId: "bound-other",
+        cwd: boundOther,
         settings: DEFAULT_SETTINGS,
         migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
       });

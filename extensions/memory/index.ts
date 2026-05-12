@@ -151,15 +151,34 @@ function registerMemoryCommand(pi: ExtensionAPI) {
           part !== "--dry-run" && part !== "-n" && part !== "--report" && part !== "--go",
         );
         const targetArg = targetParts.join(" ").trim();
-        const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
 
         const abrainHome = process.env.ABRAIN_ROOT
           ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
           : path.join(os.homedir(), ".abrain");
-        const active = resolveActiveProject(cwd, { abrainHome });
+
+        // ADR 0017 strictness: migration target identity is anchored on the
+        // repo that owns the .pensieve target, not on the slash-command cwd.
+        // This prevents `/memory migrate /other/repo/.pensieve` from using
+        // the current repo's active binding and migrating another repo into
+        // the wrong abrain project. With no explicit target, default to the
+        // bound project root's `.pensieve`, so starting pi from a subdir works.
+        const active = targetArg
+          ? resolveActiveProject(path.dirname(path.resolve(cwd, targetArg)), { abrainHome })
+          : resolveActiveProject(cwd, { abrainHome });
         if (!active.activeProject) {
           ctx.ui.notify(
             `/memory migrate refused: project binding status=${active.reason}. Run ${active.reason === "manifest_missing" ? "/abrain bind --project=<id>" : "/abrain bind"} first.`,
+            "warning",
+          );
+          return;
+        }
+        const target = targetArg
+          ? path.resolve(cwd, targetArg)
+          : path.join(active.activeProject.projectRoot, ".pensieve");
+        const expectedTarget = path.join(active.activeProject.projectRoot, ".pensieve");
+        if (path.resolve(target) !== path.resolve(expectedTarget)) {
+          ctx.ui.notify(
+            `/memory migrate refused: target ${target} is not the bound project .pensieve (${expectedTarget}). Run the command from the target project or omit the path.`,
             "warning",
           );
           return;

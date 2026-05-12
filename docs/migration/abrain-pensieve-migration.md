@@ -1,6 +1,6 @@
 # Migration — `.pensieve/` → `~/.abrain/projects/<id>/`
 
-> **状态**：✅ B4 + B4.5 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，**18 个 smoke 场景**覆盖；[ADR 0017](../adr/0017-project-binding-strict-mode.md) strict binding 已落地：迁移前必须 `/abrain bind --project=<id>`；`/memory migrate` 从 active binding 读取 project id；`--project` 参数已废弃并拒绝；未 bound / path 未确认时拒绝迁移。接下来可按 §4 优先级表手动逐仓迁移。
+> **状态**：✅ B4 + B4.5 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，smoke 覆盖主路径 + 多轮审计回归场景；[ADR 0017](../adr/0017-project-binding-strict-mode.md) strict binding 已落地：迁移前必须 `/abrain bind --project=<id>`；`/memory migrate` 从 target repo 的 active binding 读取 project id；`--project` 参数已废弃并拒绝；未 bound / path 未确认时拒绝迁移。接下来可按 §4 优先级表手动逐仓迁移。
 > **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [ADR 0017](../adr/0017-project-binding-strict-mode.md) / [brain-redesign-spec.md](../brain-redesign-spec.md)
 > **前置**：[vault-bootstrap.md](vault-bootstrap.md)（vault 基础设施已 ship，P0a-P0c.read）
 
@@ -24,6 +24,9 @@ B4.5 后，迁移前必须先完成 strict binding：
 
 ```text
 /abrain bind --project=<id>
+# commit bind artifacts before --go, otherwise git-clean preflight will refuse:
+#   project repo: .abrain-project.json
+#   ~/.abrain repo: .gitignore (if changed) + projects/<id>/_project.json
 /memory migrate --dry-run
 /memory migrate --go
 ```
@@ -159,11 +162,11 @@ B3+B7: per-file migration substrate 剥离 (✅ shipped 2026-05-12)
 
 B4: /memory migrate --go (✅ shipped 2026-05-12)
   → extensions/memory/migrate-go.ts；preflight + frontmatter 归一化 + pipeline 路由
-  → 18 个 smoke 场景覆盖（12 主路径：happy / dirty preflight ×2 / legacy frontmatter / .index .state 预过滤 / commits / pre-SHA rollback / 幂等 / + 6 边界）
+  → smoke 覆盖 happy / dirty preflight / legacy frontmatter / .index .state 预过滤 / commits / pre-SHA rollback / 幂等 / collision / mixed batch / post-migration guard 等主路径与审计回归
 
-B4.5: Project Binding Strict Mode (accepted, pending)
+B4.5: Project Binding Strict Mode (✅ shipped 2026-05-12)
   → /abrain bind --project=<id> 写 .abrain-project.json + projects/<id>/_project.json + .state/projects/local-map.json
-  → /memory migrate 不再接受 --project；未 bound / path_unconfirmed / registry_missing 拒绝
+  → /memory migrate 不再接受 --project；未 bound / path_unconfirmed / registry_missing 拒绝；target repo 与 cwd 不能错配
   → sediment project writes 与 project vault scope 同用 strict active project 状态
 
 B5: writer cutover (pending)

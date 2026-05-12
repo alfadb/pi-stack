@@ -257,13 +257,20 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
   // .abrain-project.json + abrain registry + local-map, then uses that
   // bound project id. No git-remote/cwd fallback and no --project override:
   // typo-safe identity is a precondition.
-  const binding = resolveActiveProject(opts.cwd ?? parentRepoRoot, { abrainHome: opts.abrainHome });
+  const binding = resolveActiveProject(parentRepoRoot, { abrainHome: opts.abrainHome });
   let projectId = "";
   const projectIdSource: "strict-binding" = "strict-binding";
   if (!binding.activeProject) {
     failures.push(`project binding status=${binding.reason}: run ${binding.reason === "manifest_missing" ? "`/abrain bind --project=<id>`" : "`/abrain bind`"} first; /memory migrate no longer infers project id`);
   } else {
     projectId = binding.activeProject.projectId;
+    const expectedPensieve = path.join(binding.activeProject.projectRoot, ".pensieve");
+    if (path.resolve(pensieveAbs) !== path.resolve(expectedPensieve)) {
+      failures.push(`pensieve target ${pensieveAbs} is not the strict-bound project .pensieve (${expectedPensieve})`);
+    }
+    if (binding.activeProject.projectRoot !== path.resolve(parentRepoRoot)) {
+      failures.push(`project binding root mismatch: binding root ${binding.activeProject.projectRoot} != target repo root ${parentRepoRoot}`);
+    }
     if (opts.projectId && opts.projectId !== projectId) {
       failures.push(`project id mismatch: active binding is "${projectId}" but caller supplied "${opts.projectId}"`);
     }

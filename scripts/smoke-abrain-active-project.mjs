@@ -290,6 +290,20 @@ await check("bindAbrainProject path_conflict leaves no partial new manifest", as
   if (fs.existsSync(runtime.abrainProjectRegistryPath(abrainHome, "new-owner"))) throw new Error("registry should not be created on path_conflict");
 });
 
+await check("bindAbrainProject serializes concurrent local-map updates", async () => {
+  const root1 = fs.mkdtempSync(path.join(tmpDir, "bind-race-1-"));
+  const root2 = fs.mkdtempSync(path.join(tmpDir, "bind-race-2-"));
+  await Promise.all([
+    runtime.bindAbrainProject({ abrainHome, cwd: root1, projectId: "race-one", now: "2026-05-12T21:00:00.000+08:00" }),
+    runtime.bindAbrainProject({ abrainHome, cwd: root2, projectId: "race-two", now: "2026-05-12T21:00:00.000+08:00" }),
+  ]);
+  const local = JSON.parse(fs.readFileSync(runtime.abrainProjectLocalMapPath(abrainHome), "utf-8"));
+  const p1 = local.projects["race-one"]?.paths?.map((p) => p.path) || [];
+  const p2 = local.projects["race-two"]?.paths?.map((p) => p.path) || [];
+  if (!p1.includes(path.resolve(root1))) throw new Error(`race-one path lost: ${JSON.stringify(local.projects["race-one"])}`);
+  if (!p2.includes(path.resolve(root2))) throw new Error(`race-two path lost: ${JSON.stringify(local.projects["race-two"])}`);
+});
+
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log("");

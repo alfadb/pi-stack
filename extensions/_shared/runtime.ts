@@ -391,6 +391,35 @@ async function atomicWriteText(file: string, content: string): Promise<void> {
   }
 }
 
+async function withAbrainProjectStateLock<T>(abrainHome: string, fn: () => Promise<T>): Promise<T> {
+  const fsPromises = await import("node:fs/promises");
+  const lockPath = path.join(abrainStateDir(abrainHome), "projects", "local-map.lock");
+  await fsPromises.mkdir(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + 5000;
+  let fd: import("node:fs/promises").FileHandle | null = null;
+  while (!fd) {
+    try {
+      fd = await fsPromises.open(lockPath, "wx");
+      await fd.writeFile(JSON.stringify({ pid: process.pid, created_at: formatLocalIsoTimestamp() }) + "\n", "utf-8");
+      break;
+    } catch (err: any) {
+      if (err?.code !== "EEXIST") throw err;
+      try {
+        const stat = await fsPromises.stat(lockPath);
+        if (Date.now() - stat.mtimeMs > 30_000) await fsPromises.unlink(lockPath);
+      } catch {}
+      if (Date.now() >= deadline) throw new Error(`local_map_lock_timeout: ${lockPath}`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await fd?.close().catch(() => {});
+    await fsPromises.unlink(lockPath).catch(() => {});
+  }
+}
+
 export interface BindAbrainProjectResult {
   projectId: string;
   projectRoot: string;
@@ -450,46 +479,48 @@ export async function bindAbrainProject(opts: {
     registryCreated = true;
   }
 
-  const localMapPath = abrainProjectLocalMapPath(opts.abrainHome);
-  let localMap = emptyAbrainLocalProjectMap();
-  if (exists(localMapPath)) localMap = parseAbrainLocalProjectMap(read(localMapPath, "utf-8"));
+  return await withAbrainProjectStateLock(opts.abrainHome, async () => {
+    const localMapPath = abrainProjectLocalMapPath(opts.abrainHome);
+    let localMap = emptyAbrainLocalProjectMap();
+    if (exists(localMapPath)) localMap = parseAbrainLocalProjectMap(read(localMapPath, "utf-8"));
 
-  const normalizedPath = path.resolve(projectRoot);
-  for (const [otherProjectId, info] of Object.entries(localMap.projects)) {
-    if (otherProjectId === projectId) continue;
-    if (info.paths.some((p) => path.resolve(p.path) === normalizedPath)) {
-      throw new Error(`path_conflict: ${normalizedPath} is already confirmed for project ${otherProjectId}`);
+    const normalizedPath = path.resolve(projectRoot);
+    for (const [otherProjectId, info] of Object.entries(localMap.projects)) {
+      if (otherProjectId === projectId) continue;
+      if (info.paths.some((p) => path.resolve(p.path) === normalizedPath)) {
+        throw new Error(`path_conflict: ${normalizedPath} is already confirmed for project ${otherProjectId}`);
+      }
     }
-  }
 
-  const entry = localMap.projects[projectId!] ?? { paths: [] };
-  const existingPath = entry.paths.find((p) => path.resolve(p.path) === normalizedPath);
-  let localPathAdded = false;
-  if (existingPath) {
-    existingPath.last_seen = now;
-  } else {
-    entry.paths.push({ path: normalizedPath, first_seen: now, last_seen: now, confirmed_at: now });
-    localPathAdded = true;
-  }
-  localMap.projects[projectId!] = entry;
+    const entry = localMap.projects[projectId!] ?? { paths: [] };
+    const existingPath = entry.paths.find((p) => path.resolve(p.path) === normalizedPath);
+    let localPathAdded = false;
+    if (existingPath) {
+      existingPath.last_seen = now;
+    } else {
+      entry.paths.push({ path: normalizedPath, first_seen: now, last_seen: now, confirmed_at: now });
+      localPathAdded = true;
+    }
+    localMap.projects[projectId!] = entry;
 
-  const abrainGitignorePath = path.join(path.resolve(opts.abrainHome), ".gitignore");
-  const gitignoreRaw = exists(abrainGitignorePath) ? read(abrainGitignorePath, "utf-8") : "";
-  const abrainGitignoreUpdated = !/(^|\n)\.state\/?(\n|$)/.test(gitignoreRaw);
-  const gitignoreToWrite = abrainGitignoreUpdated
-    ? `${gitignoreRaw}${gitignoreRaw && !gitignoreRaw.endsWith("\n") ? "\n" : ""}.state/\n`
-    : null;
+    const abrainGitignorePath = path.join(path.resolve(opts.abrainHome), ".gitignore");
+    const gitignoreRaw = exists(abrainGitignorePath) ? read(abrainGitignorePath, "utf-8") : "";
+    const abrainGitignoreUpdated = !/(^|\n)\.state\/?(\n|$)/.test(gitignoreRaw);
+    const gitignoreToWrite = abrainGitignoreUpdated
+      ? `${gitignoreRaw}${gitignoreRaw && !gitignoreRaw.endsWith("\n") ? "\n" : ""}.state/\n`
+      : null;
 
-  if (gitignoreToWrite !== null) {
-    await atomicWriteText(abrainGitignorePath, gitignoreToWrite);
-  }
-  if (manifestToWrite) {
-    await atomicWriteText(manifestPath, JSON.stringify(manifestToWrite, null, 2) + "\n");
-  }
-  await atomicWriteText(registryPath, JSON.stringify(registryToWrite, null, 2) + "\n");
-  await atomicWriteText(localMapPath, JSON.stringify(localMap, null, 2) + "\n");
+    if (gitignoreToWrite !== null) {
+      await atomicWriteText(abrainGitignorePath, gitignoreToWrite);
+    }
+    if (manifestToWrite) {
+      await atomicWriteText(manifestPath, JSON.stringify(manifestToWrite, null, 2) + "\n");
+    }
+    await atomicWriteText(registryPath, JSON.stringify(registryToWrite, null, 2) + "\n");
+    await atomicWriteText(localMapPath, JSON.stringify(localMap, null, 2) + "\n");
 
-  return { projectId: projectId!, projectRoot, manifestPath, registryPath, localMapPath, abrainGitignorePath, manifestCreated, registryCreated, localPathAdded, abrainGitignoreUpdated };
+    return { projectId: projectId!, projectRoot, manifestPath, registryPath, localMapPath, abrainGitignorePath, manifestCreated, registryCreated, localPathAdded, abrainGitignoreUpdated };
+  });
 }
 
 function findGitRoot(cwd: string, opts: ResolveActiveProjectOptions): string | undefined {

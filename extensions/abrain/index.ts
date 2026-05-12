@@ -524,8 +524,9 @@ export default function activate(pi: ExtensionAPI): void {
   if (process.env[PI_ABRAIN_DISABLED] === "1") return;
 
   // Boot-time snapshot per ADR 0017: active project identity comes from
-  // strict binding, not bash `cd`. /abrain bind/status may refresh it
-  // explicitly, but ordinary shell directory changes do not.
+  // strict binding, not bash `cd`. Only /abrain bind may refresh it
+  // explicitly; /abrain status is read-only and ordinary shell directory
+  // changes do not switch project vault scope.
   bootActiveProject = snapshotBootActiveProject();
   bootActiveProjectAt = Date.now();
 
@@ -1197,9 +1198,8 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
   const tokens = rawArgs.split(/\s+/).filter(Boolean);
   const sub = tokens.shift() ?? "status";
   if (sub === "status") {
-    bootActiveProject = snapshotBootActiveProject(commandCwd);
-    bootActiveProjectAt = Date.now();
-    ui.notify(formatBindingStatus(bootActiveProject), bootActiveProject.activeProject ? "info" : "warning");
+    const current = snapshotBootActiveProject(commandCwd);
+    ui.notify(formatBindingStatus(current), current.activeProject ? "info" : "warning");
     return;
   }
   if (sub === "bind") {

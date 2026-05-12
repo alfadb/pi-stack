@@ -446,7 +446,7 @@ export default function (pi: ExtensionAPI) {
       // happens during our async work; touching ctx after invalidation
       // throws "Extension error: stale ctx". Capturing values upfront makes
       // the rest of the handler ctx-independent.
-      const cwd = path.resolve(ctx.cwd || process.cwd());
+      let cwd = path.resolve(ctx.cwd || process.cwd());
       if (!ctx.sessionManager?.getBranch) return;
       let branch: unknown[];
       try {
@@ -596,6 +596,12 @@ export default function (pi: ExtensionAPI) {
         applySedimentStatus(setStatus, sessionId, "completed", `project_not_bound:${binding.reason}`);
         return;
       }
+      // From this point on, all checkpoint/audit/writer paths must use the
+      // bound project root, not the launch subdirectory. Otherwise starting
+      // pi from <repo>/subdir would pass strict binding via git root but
+      // write split-brain state into <repo>/subdir/.pensieve and bypass the
+      // root-level MIGRATED_TO_ABRAIN guard.
+      cwd = binding.activeProject.projectRoot;
 
       const tStart = Date.now();
       const checkpoint = await loadSessionCheckpoint(cwd, sessionId);

@@ -157,8 +157,15 @@ check("secretDefaultRejection covers strict binding failure paths", () => {
 
 check("boot-time snapshot helpers expose getter+reset", () => {
   if (typeof indexModule.getBootActiveProject !== "function") throw new Error("getBootActiveProject missing");
-  if (typeof indexModule.getBootActiveProjectSnapshotAt !== "function") throw new Error("getBootActiveProjectSnapshotAt missing");
+  if (typeof indexModule.getBootActiveProjectSnapshotAt !== "function") throw new Error("snapshot timestamp missing");
   if (typeof indexModule.__resetBootActiveProjectForTests !== "function") throw new Error("reset helper missing");
+});
+
+check("/abrain status is read-only and does not mutate boot active project", () => {
+  const src = fs.readFileSync(path.join(repoRoot, "extensions/abrain/index.ts"), "utf-8");
+  const statusBranch = src.match(/if \(sub === "status"\) \{[\s\S]*?\n  \}/)?.[0] || "";
+  if (!statusBranch.includes("const current = snapshotBootActiveProject")) throw new Error(`status branch should compute a local snapshot: ${statusBranch}`);
+  if (/bootActiveProject\s*=/.test(statusBranch)) throw new Error(`status branch must not assign bootActiveProject: ${statusBranch}`);
 });
 
 check("__resetBootActiveProjectForTests round-trips an active project value", () => {
