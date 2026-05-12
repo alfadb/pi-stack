@@ -490,6 +490,7 @@ export async function acquireFileLock(lockPath: string, opts: FileLockOptions): 
   while (true) {
     try {
       const handle = await fsPromises.open(lockPath, "wx");
+      let acquired = false;
       try {
         await handle.writeFile(JSON.stringify({
           pid: process.pid,
@@ -497,12 +498,20 @@ export async function acquireFileLock(lockPath: string, opts: FileLockOptions): 
           created_at: formatLocalIsoTimestamp(),
           label: opts.label,
         }) + "\n", "utf-8");
-      } catch (err) {
-        await handle.close().catch(() => {});
-        await releaseFileLockIfOwner(lockPath, token);
-        throw err;
+        await handle.close();
+        acquired = true;
+      } finally {
+        if (!acquired) {
+          await handle.close().catch(() => {});
+          // We just created this path via O_EXCL and have not returned an
+          // acquired handle to callers yet, so no successor can legitimately
+          // own this lock. Unlink directly instead of token-matching: write
+          // failures can leave an empty/partial JSON record with no token,
+          // and close failures can leave a live-pid token that nobody can
+          // release.
+          await fsPromises.unlink(lockPath).catch(() => {});
+        }
       }
-      await handle.close();
       return {
         lockPath,
         token,

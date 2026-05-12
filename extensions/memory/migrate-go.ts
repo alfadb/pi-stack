@@ -245,11 +245,23 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
   const inferredParent = path.dirname(pensieveAbs);
   const parentRepoRoot = (await gitToplevel(inferredParent)) ?? inferredParent;
 
+  let pensieveTargetUsable = true;
   if (path.basename(pensieveAbs) !== ".pensieve") {
     failures.push(`pensieve target must be the project .pensieve directory: ${pensieveAbs}`);
+    pensieveTargetUsable = false;
   }
-  if (!fsSync.existsSync(pensieveAbs)) {
+  try {
+    const targetStat = fsSync.lstatSync(pensieveAbs);
+    if (targetStat.isSymbolicLink()) {
+      failures.push(`pensieve target must be a real project .pensieve directory, not a symlink: ${pensieveAbs}`);
+      pensieveTargetUsable = false;
+    } else if (!targetStat.isDirectory()) {
+      failures.push(`pensieve target must be a directory: ${pensieveAbs}`);
+      pensieveTargetUsable = false;
+    }
+  } catch {
     failures.push(`pensieve target not found: ${pensieveAbs}`);
+    pensieveTargetUsable = false;
   }
   if (!fsSync.existsSync(opts.abrainHome)) {
     failures.push(`abrain home not found: ${opts.abrainHome}`);
@@ -287,18 +299,20 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
     if (!parentClean) {
       failures.push(`parent repo not clean: ${parentRepoRoot} (commit or stash before migrating)`);
     }
-    // .pensieve must have tracked files; untracked .pensieve has no git
-    // undo trail and would lose history if migrated.
-    const tracked = await gitTrackedCount(parentRepoRoot, path.relative(parentRepoRoot, pensieveAbs));
-    if (tracked === 0) {
-      failures.push(`pensieve has no git-tracked files in ${parentRepoRoot}; run \`git add .pensieve && git commit\` first to preserve undo`);
-    }
-    // .pensieve must contain at least one user-facing .md entry (derived
-    // .state/.index files don't count). Without this, --go would commit
-    // an empty migration and confuse the operator into thinking it ran.
-    const userEntries = await markdownFilesForTarget(pensieveAbs, opts.settings, opts.signal);
-    if (userEntries.length === 0) {
-      failures.push(`pensieve has no user entries to migrate at ${pensieveAbs} (only derived .state/.index files remain; migration is likely already complete)`);
+    if (pensieveTargetUsable) {
+      // .pensieve must have tracked files; untracked .pensieve has no git
+      // undo trail and would lose history if migrated.
+      const tracked = await gitTrackedCount(parentRepoRoot, path.relative(parentRepoRoot, pensieveAbs));
+      if (tracked === 0) {
+        failures.push(`pensieve has no git-tracked files in ${parentRepoRoot}; run \`git add .pensieve && git commit\` first to preserve undo`);
+      }
+      // .pensieve must contain at least one user-facing .md entry (derived
+      // .state/.index files don't count). Without this, --go would commit
+      // an empty migration and confuse the operator into thinking it ran.
+      const userEntries = await markdownFilesForTarget(pensieveAbs, opts.settings, opts.signal);
+      if (userEntries.length === 0) {
+        failures.push(`pensieve has no user entries to migrate at ${pensieveAbs} (only derived .state/.index files remain; migration is likely already complete)`);
+      }
     }
   } else {
     failures.push(`parent repo root not found: ${parentRepoRoot}`);
@@ -869,13 +883,23 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   // pre-R7-P0-D behavior anyway.
   let guardPath: string | null = null;
   let guardError: string | null = null;
-  try {
-    guardPath = await writePostMigrationGuard(parentRepoRoot, {
-      migratedAt: migrationTimestamp,
-      projectId,
-    });
-  } catch (e: any) {
-    guardError = e instanceof Error ? e.message : String(e);
+  let guardSkippedReason: string | null = null;
+  if (failedCount > 0) {
+    // A partial migration is intentionally resumable: successfully moved
+    // entries are committed, failed entries remain in .pensieve for retry.
+    // Do NOT write the forward-only post-migration guard until every user
+    // entry migrated cleanly, otherwise the remaining legacy entries would
+    // be stranded behind MIGRATED_TO_ABRAIN.
+    guardSkippedReason = "entry_failures";
+  } else {
+    try {
+      guardPath = await writePostMigrationGuard(parentRepoRoot, {
+        migratedAt: migrationTimestamp,
+        projectId,
+      });
+    } catch (e: any) {
+      guardError = e instanceof Error ? e.message : String(e);
+    }
   }
   // Round 8 P1 (sonnet R8 audit fix): write a single migration audit row
   // to the abrain-side sediment audit log so post-migration forensics
@@ -917,9 +941,10 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       entries_total: entries.length,
       entries_truncated: entries.length > 200,
       // R9 P1: record whether the post-migration guard was successfully
-      // written. Operators can grep audit for `guard_write_failed` rows
-      // to find partial migrations.
+      // written. Operators can grep guard_error / guard_skipped_reason to
+      // distinguish write failures from intentionally resumable partials.
       guard_written: guardPath !== null,
+      ...(guardSkippedReason ? { guard_skipped_reason: guardSkippedReason } : {}),
       ...(guardError ? { guard_error: guardError.slice(0, 200) } : {}),
     };
     await fs.appendFile(auditPath, JSON.stringify(row) + "\n", "utf-8");
@@ -939,7 +964,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   );
 
   return {
-    ok: true,
+    ok: failedCount === 0,
     projectId,
     projectIdSource: pre.projectIdSource,
     parentRepoRoot,
@@ -963,13 +988,14 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
 
 export function formatMigrationGoSummary(result: MigrationGoResult, cwd: string = process.cwd()): string {
   const lines: string[] = [];
-  if (!result.ok) {
+  if (!result.ok && result.preconditionFailures.length > 0 && result.entries.length === 0) {
     lines.push(`Migration aborted: ${result.preconditionFailures.length} precondition(s) failed.`);
     for (const f of result.preconditionFailures) lines.push(`  - ${f}`);
     return lines.join("\n");
   }
+  const partial = result.failedCount > 0 || !result.ok;
   lines.push(
-    `Migration complete: projectId=${result.projectId} (${result.projectIdSource})`,
+    `${partial ? "Migration partially completed" : "Migration complete"}: projectId=${result.projectId} (${result.projectIdSource})`,
     `  moved (knowledge): ${result.movedCount}`,
     `  routed (workflow): ${result.workflowCount}`,
     `  skipped: ${result.skippedCount}`,
@@ -977,6 +1003,9 @@ export function formatMigrationGoSummary(result: MigrationGoResult, cwd: string 
     `  parent commit: ${result.parentCommitSha ?? "(none — no changes staged)"}`,
     `  abrain commit: ${result.abrainCommitSha ?? "(none — no changes staged)"}`,
   );
+  if (partial) {
+    lines.push(`  ⚠️  post-migration guard was not written; failed entries remain in .pensieve for retry.`);
+  }
   if (result.failedCount > 0) {
     lines.push("", "Failures:");
     for (const entry of result.entries.filter((e) => e.action === "failed").slice(0, 10)) {

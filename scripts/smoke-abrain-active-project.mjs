@@ -331,6 +331,44 @@ await check("file lock does not steal stale lock from a live pid", async () => {
   fs.rmSync(lockPath, { force: true });
 });
 
+await check("file lock cleans up if record write fails before acquire returns", async () => {
+  const fsp = await import("node:fs/promises");
+  const protoProbe = path.join(tmpDir, "locks", "proto-write.tmp");
+  fs.mkdirSync(path.dirname(protoProbe), { recursive: true });
+  const probe = await fsp.open(protoProbe, "w");
+  const proto = Object.getPrototypeOf(probe);
+  await probe.close();
+  fs.rmSync(protoProbe, { force: true });
+
+  const originalWriteFile = proto.writeFile;
+  let failNext = true;
+  proto.writeFile = async function (...args) {
+    if (failNext) {
+      failNext = false;
+      throw new Error("injected lock record write failure");
+    }
+    return originalWriteFile.apply(this, args);
+  };
+
+  const lockPath = path.join(tmpDir, "locks", "write-fails.lock");
+  try {
+    let threw = false;
+    try {
+      await runtime.acquireFileLock(lockPath, { timeoutMs: 500, staleMs: 30_000, retryMs: 10, label: "smoke-write-fail" });
+    } catch (err) {
+      threw = /injected lock record write failure/.test(String(err?.message || err));
+    }
+    if (!threw) throw new Error("expected injected write failure");
+    if (fs.existsSync(lockPath)) throw new Error("failed acquisition must remove partial lock record immediately");
+    const handle = await runtime.acquireFileLock(lockPath, { timeoutMs: 500, staleMs: 30_000, retryMs: 10, label: "smoke-write-fail" });
+    await handle.release();
+  } finally {
+    proto.writeFile = originalWriteFile;
+    fs.rmSync(lockPath, { force: true });
+  }
+});
+
+
 fs.rmSync(tmpDir, { recursive: true, force: true });
 
 console.log("");

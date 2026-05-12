@@ -1641,12 +1641,16 @@ This is a cross-project review pipeline body with enough content.
         settings: DEFAULT_SETTINGS,
         migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
       });
-      assert(result.ok, `collision-case migration should still complete (one failure inside): ${JSON.stringify(result.preconditionFailures)}`);
+      assert(result.ok === false, `collision-case migration must be partial/failed, got ok=true`);
       assert(result.failedCount === 1, `expected 1 failure on collision, got ${result.failedCount} (entries=${JSON.stringify(result.entries)})`);
       const failed = result.entries.find((e) => e.action === "failed");
       assert(failed, `must have a failed entry report`);
       assert(/already exists|exists/i.test(failed.reason || ""), `collision reason should mention existing target: ${failed.reason}`);
       assert(result.movedCount === 0, `no entry should move when its sole entry collides`);
+      assert(!fs.existsSync(path.join(cParent, ".pensieve", "MIGRATED_TO_ABRAIN")), `partial migration must not write MIGRATED_TO_ABRAIN guard`);
+      const summary = formatMigrationGoSummary(result, cParent);
+      assert(/partially completed/.test(summary), `partial summary should not say complete-only: ${summary}`);
+      assert(/guard was not written/.test(summary), `partial summary should explain guard omission: ${summary}`);
       // Pre-existing entry is untouched (no overwrite of existing data).
       const existingText = fs.readFileSync(path.join(cAbrain, "projects", "collide-test", "maxims", "shared-rule.md"), "utf-8");
       assert(/Shared Rule \(existing\)/.test(existingText), `pre-existing entry must not be overwritten by collision case`);
@@ -1718,7 +1722,47 @@ This is a cross-project review pipeline body with enough content.
       );
     }
 
-    // (c) strict-bound projectId succeeds; HTTPS remote is ignored
+    // (c) .pensieve must be a real directory, not a symlink to another repo.
+    {
+      const sParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-symlink-parent-"));
+      execFileSync("git", ["-C", sParent, "init", "-q"]);
+      execFileSync("git", ["-C", sParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", sParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", sParent, "config", "commit.gpgsign", "false"]);
+      const sForeign = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-symlink-foreign-"));
+      writeFile(path.join(sForeign, ".pensieve", "maxims", "foreign.md"), makeEntry({ title: "Foreign Symlink Entry", kind: "maxim" }));
+      fs.symlinkSync(path.join(sForeign, ".pensieve"), path.join(sParent, ".pensieve"), "dir");
+      execFileSync("git", ["-C", sParent, "add", "-A"]);
+      execFileSync("git", ["-C", sParent, "commit", "-q", "-m", "init symlink pensieve"]);
+
+      const sAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-symlink-abrain-"));
+      execFileSync("git", ["-C", sAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", sAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", sAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", sAbrain, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(sAbrain, "README.md"), "# abrain (symlink smoke)\n");
+      execFileSync("git", ["-C", sAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", sAbrain, "commit", "-q", "-m", "init"]);
+      await bindMigrationProject(sParent, sAbrain, "symlink-test");
+
+      const result = await runMigrationGo({
+        pensieveTarget: path.join(sParent, ".pensieve"),
+        abrainHome: sAbrain,
+        projectId: "symlink-test",
+        cwd: sParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
+      });
+      assert(!result.ok, `symlink .pensieve must fail, got ok=true`);
+      assert(
+        result.preconditionFailures.some((f) => /not a symlink/.test(f)),
+        `symlink failure should be explicit, got: ${result.preconditionFailures.join("; ")}`,
+      );
+      assert(fs.existsSync(path.join(sForeign, ".pensieve", "maxims", "foreign.md")), `foreign entry must not be removed through symlink`);
+      assert(!fs.existsSync(path.join(sAbrain, "projects", "symlink-test", "maxims", "foreign-symlink-entry.md")), `foreign entry must not migrate through symlink`);
+    }
+
+    // (d) strict-bound projectId succeeds; HTTPS remote is ignored
     {
       const rParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-https-parent-"));
       execFileSync("git", ["-C", rParent, "init", "-q"]);
@@ -1757,7 +1801,7 @@ This is a cross-project review pipeline body with enough content.
       );
     }
 
-    // (d) parent-side commit narrowing (pathspec=".pensieve"): unrelated
+    // (e) parent-side commit narrowing (pathspec=".pensieve"): unrelated
     //     `.pi-astack/` working-tree changes (mimics sediment auto-commit
     //     staging that's been gitignored) must NOT be swept into the
     //     migration commit. This is the regression guard for the
@@ -1816,7 +1860,7 @@ This is a cross-project review pipeline body with enough content.
       );
     }
 
-    // (e) abrain side starts as brand-new `git init`; ADR 0017 binding
+    // (f) abrain side starts as brand-new `git init`; ADR 0017 binding
     //     bootstrap creates the first abrain HEAD (registry commit) before
     //     migration, so preflight must capture a concrete abrainPreSha.
     {
@@ -1856,7 +1900,7 @@ This is a cross-project review pipeline body with enough content.
       assert(!/pre-migration SHA not captured|HEAD~1.*⚠|⚠.*HEAD~1|abrain.*not captured/i.test(summary), `summary should not warn about missing abrainPreSha after binding, got: ${summary}`);
     }
 
-    // (f) mixed batch: 2 entries where 1 collides on abrain side and 1
+    // (g) mixed batch: 2 entries where 1 collides on abrain side and 1
     //     succeeds. Verify movedCount=1 / failedCount=1 simultaneously,
     //     parent commit still happens (the survivor was git rm'd), and
     //     the colliding entry stays in .pensieve untouched (sonnet C7 #3).
@@ -1893,11 +1937,12 @@ This is a cross-project review pipeline body with enough content.
         settings: DEFAULT_SETTINGS,
         migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
       });
-      assert(result.ok, `mixed case should still complete: ${JSON.stringify(result.preconditionFailures)}`);
+      assert(result.ok === false, `mixed partial case must report ok=false when failedCount>0`);
       assert(result.movedCount === 1, `expected movedCount=1, got ${result.movedCount}`);
       assert(result.failedCount === 1, `expected failedCount=1, got ${result.failedCount}`);
       assert(result.parentCommitSha, `parent commit must still happen for the survivor, got ${result.parentCommitSha}`);
       assert(result.abrainCommitSha, `abrain commit must still happen for the survivor, got ${result.abrainCommitSha}`);
+      assert(!fs.existsSync(path.join(fParent, ".pensieve", "MIGRATED_TO_ABRAIN")), `mixed partial migration must not write MIGRATED_TO_ABRAIN guard`);
       // Survivor: removed from .pensieve, present in abrain.
       assert(
         !fs.existsSync(path.join(fParent, ".pensieve", "maxims", "will-succeed.md")),
@@ -1917,7 +1962,7 @@ This is a cross-project review pipeline body with enough content.
       assert(/Will Collide \(existing\)/.test(existingText), `pre-existing colliding entry must not be overwritten: ${existingText.slice(0, 120)}`);
     }
 
-    // (g) Stale-lock reclaim: verify both writer locks recover when the
+    // (h) Stale-lock reclaim: verify both writer locks recover when the
     //     previous holder crashed without releasing. Round 5 audit
     //     (deepseek-v4-pro) found that acquireLock + acquireAbrainWorkflow-
     //     Lock had no reclaim path — a kill -9 mid-write caused permanent

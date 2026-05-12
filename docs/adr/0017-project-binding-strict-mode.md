@@ -242,7 +242,7 @@ Run: /abrain bind
 与 R7 `MIGRATED_TO_ABRAIN` guard 的关系：
 
 - strict binding guard 是 B4.5 的全局前置条件，防止未绑定项目产生任何 project-scoped 写入。
-- `MIGRATED_TO_ABRAIN` 是 B4 完成迁移后的 forward-only guard，防止已迁项目重新写回 `.pensieve`。
+- `MIGRATED_TO_ABRAIN` 是 B4 **所有 user entry 无失败迁移后**的 forward-only guard，防止已迁项目重新写回 `.pensieve`；partial migration（任一 entry failed）不会写 guard，失败条目保留在 `.pensieve` 供重试。
 - B5 writer cutover 后，strict binding 决定写到哪个 `~/.abrain/projects/<id>/`；post-migration guard 作为迁移期防 split-brain 保护仍有效。
 
 ## vault strict project scope
@@ -273,7 +273,7 @@ project vault 与 memory 使用同一 active project 状态。若状态不是 `b
 2. `/abrain bind` + `/abrain status` 已落在 `extensions/abrain/index.ts`，写三处并展示 strict binding 状态。
 3. `/memory migrate` strict 已落在 `extensions/memory/index.ts` / `migrate-go.ts`：拒绝 `--project`，要求 active project `bound`。
 4. sediment/vault strict guards 已落地：未 bound 时 sediment hook 记录 `project_not_bound` audit 并拒绝；project vault scope 通过 strict active project gate。
-5. Smoke 覆盖：`smoke-abrain-active-project` 覆盖 strict resolver / bind happy / duplicate path / manifest conflict / path conflict / no-partial-on-path-conflict / concurrent local-map update / owner-token lock release 与 live-pid stale lock；`smoke-memory-sediment` 覆盖 unbound target repo refused、cwd/target 错配拒绝与 migrate 主路径；`smoke-abrain-secret-scope` 覆盖 `/secret` project-scope 拒绝与 `/abrain status` read-only；`smoke-abrain-backend-detect` 覆盖 `vault_release(scope='project')` 注册/拒绝路径。
+5. Smoke 覆盖：`smoke-abrain-active-project` 覆盖 strict resolver / bind happy / duplicate path / manifest conflict / path conflict / no-partial-on-path-conflict / concurrent local-map update / owner-token lock release、live-pid stale lock、lock record write failure cleanup；`smoke-memory-sediment` 覆盖 unbound target repo refused、cwd/target 错配拒绝、symlink `.pensieve` 拒绝、partial migration 不写 guard 与 migrate 主路径；`smoke-abrain-secret-scope` 覆盖 `/secret` project-scope 拒绝与 `/abrain status` read-only；`smoke-abrain-backend-detect` 覆盖 `vault_release(scope='project')` 注册/拒绝路径。
 
 ## 后果
 
