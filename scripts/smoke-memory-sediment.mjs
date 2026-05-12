@@ -1374,6 +1374,96 @@ This is a cross-project review pipeline body with enough content.
       );
     }
 
+    // === per-repo migration --go: boundary scenarios (sonnet audit P2) ====
+    //
+    // Two extra scenarios on top of the main 12 happy/preflight/idempotency
+    // assertions: (a) slug collision on the abrain side surfaces in
+    // failedCount + a clear reason, and (b) projectId inference from a real
+    // git remote (covers the canonicalizeGitRemote SSH path that the main
+    // smoke skipped by passing projectId explicitly).
+
+    // (a) slug collision: abrain already has a maxim with the same slug.
+    {
+      const cParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-collide-parent-"));
+      execFileSync("git", ["-C", cParent, "init", "-q"]);
+      execFileSync("git", ["-C", cParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", cParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", cParent, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(cParent, ".pensieve", "maxims", "shared-rule.md"), makeEntry({ title: "Shared Rule", kind: "maxim" }));
+      execFileSync("git", ["-C", cParent, "add", "-A"]);
+      execFileSync("git", ["-C", cParent, "commit", "-q", "-m", "init"]);
+
+      const cAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-collide-abrain-"));
+      execFileSync("git", ["-C", cAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", cAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", cAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", cAbrain, "config", "commit.gpgsign", "false"]);
+      // Seed abrain with a pre-existing entry at the migration target path.
+      writeFile(
+        path.join(cAbrain, "projects", "collide-test", "maxims", "shared-rule.md"),
+        makeEntry({ title: "Shared Rule (existing)", kind: "maxim" }),
+      );
+      execFileSync("git", ["-C", cAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", cAbrain, "commit", "-q", "-m", "init w/ collision"]);
+
+      const result = await runMigrationGo({
+        pensieveTarget: path.join(cParent, ".pensieve"),
+        abrainHome: cAbrain,
+        projectId: "collide-test",
+        cwd: cParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
+      });
+      assert(result.ok, `collision-case migration should still complete (one failure inside): ${JSON.stringify(result.preconditionFailures)}`);
+      assert(result.failedCount === 1, `expected 1 failure on collision, got ${result.failedCount} (entries=${JSON.stringify(result.entries)})`);
+      const failed = result.entries.find((e) => e.action === "failed");
+      assert(failed, `must have a failed entry report`);
+      assert(/already exists|exists/i.test(failed.reason || ""), `collision reason should mention existing target: ${failed.reason}`);
+      assert(result.movedCount === 0, `no entry should move when its sole entry collides`);
+      // Pre-existing entry is untouched (no overwrite of existing data).
+      const existingText = fs.readFileSync(path.join(cAbrain, "projects", "collide-test", "maxims", "shared-rule.md"), "utf-8");
+      assert(/Shared Rule \(existing\)/.test(existingText), `pre-existing entry must not be overwritten by collision case`);
+    }
+
+    // (b) projectId from real git remote (SSH form via canonicalizeGitRemote)
+    {
+      const rParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-remote-parent-"));
+      execFileSync("git", ["-C", rParent, "init", "-q"]);
+      execFileSync("git", ["-C", rParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", rParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", rParent, "config", "commit.gpgsign", "false"]);
+      // SSH-form remote: should canonicalize to host/path then take last 2 path segments.
+      execFileSync("git", ["-C", rParent, "remote", "add", "origin", "git@github.com:alfadb/uamp.git"]);
+      writeFile(path.join(rParent, ".pensieve", "maxims", "remote-test.md"), makeEntry({ title: "Remote ID Test", kind: "maxim" }));
+      execFileSync("git", ["-C", rParent, "add", "-A"]);
+      execFileSync("git", ["-C", rParent, "commit", "-q", "-m", "init"]);
+
+      const rAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-remote-abrain-"));
+      execFileSync("git", ["-C", rAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", rAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", rAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", rAbrain, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(rAbrain, "README.md"), "# abrain (remote-id smoke)\n");
+      execFileSync("git", ["-C", rAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", rAbrain, "commit", "-q", "-m", "init"]);
+
+      // No explicit projectId — force git-remote inference path.
+      const result = await runMigrationGo({
+        pensieveTarget: path.join(rParent, ".pensieve"),
+        abrainHome: rAbrain,
+        cwd: rParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
+      });
+      assert(result.ok, `remote-id case should succeed: ${JSON.stringify(result.preconditionFailures)}`);
+      assert(result.projectIdSource === "git-remote", `projectIdSource must be git-remote, got ${result.projectIdSource}`);
+      assert(result.projectId === "alfadb-uamp", `projectId from SSH remote git@github.com:alfadb/uamp.git must be 'alfadb-uamp', got '${result.projectId}'`);
+      assert(
+        fs.existsSync(path.join(rAbrain, "projects", "alfadb-uamp", "maxims", "remote-test.md")),
+        `entry must land under projects/alfadb-uamp/`,
+      );
+    }
+
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));
   } finally {
     if (process.env.PI_ASTACK_KEEP_SMOKE_TMP !== "1") fs.rmSync(outRoot, { recursive: true, force: true });

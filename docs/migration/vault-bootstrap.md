@@ -66,7 +66,7 @@ pi 启动时按以下顺序探测，第一个成功的为该 host 的 backend：
 | `~/.abrain/vault/_meta.md` | 仍可读（未加密的元数据） |
 | `~/.abrain/projects/<id>/vault/_meta.md` | 仍可读 |
 | 加密文件 `*.md.age` | **不解密**（保持密文） |
-| bash 注入 `$VAULT_<key>` | **拒绝执行**，返回错误："vault locked, run `pi vault unlock` first" |
+| bash 注入 `$VAULT_<key>` | **拒绝执行**，返回错误："vault locked; restart pi or check `~/.abrain/.vault-master.age`"（注：`/vault unlock` 命令尚未实现，当前 unlock 路径走启动时 backend auto-detect → master decrypt）|
 | `vault_release` 工具调用 | **拒绝**，返回错误 |
 | `/secret <key>` 写入 | **拒绝**（因为加密需要 master key） |
 | memory_search 命中 vault `_meta.md` | 正常返回元数据，但 LLM 看到的内容会标记 `🔒 vault locked` |
@@ -75,7 +75,7 @@ pi 启动时按以下顺序探测，第一个成功的为该 host 的 backend：
 
 ## 3. Master key 生成 + 注册流程（v1.4 重写）
 
-首次安装 abrain 后跑 `pi vault init`。**所有 backend 共享同一 install 临时目录语义**，不同仅在加密路径：
+首次安装 abrain 后跑 `/vault init`（pi slash 命令，注册在 `extensions/abrain/index.ts`）。**所有 backend 共享同一 install 临时目录语义**，不同仅在加密路径：
 
 ```bash
 # 0. 创建 install 临时目录（v1.2 修正，Round 4 Opus P1 3-5）——
@@ -142,7 +142,7 @@ rm -rf "$INSTALL_TMP"
 ```
 
 **v1.4 设计决定**：
-- **写 `~/.abrain/.vault-backend`**（v1.4 新）：记录 init 时选的 backend，未来启动时不重新探测——避免用户后加入 GPG key 导致检测跳到不同 backend。主动切 backend 需 `pi vault migrate-backend <new>`。
+- **写 `~/.abrain/.vault-backend`**（v1.4 新）：记录 init 时选的 backend，未来启动时不重新探测——避免用户后加入 GPG key 导致检测跳到不同 backend。主动切 backend 需 `/vault migrate-backend <new>`（P0d 待实施；当前手动迁移：mv `~/.abrain/.vault-master.age` 备份后重跑 `/vault init`）。
 - **ssh-key 与 gpg-file 共用 `~/.abrain/.vault-master.age`**：两者都是加密文件路径，区别仅在 recipient。这让子系统代码卷一样，unlock helper 读 `.vault-backend` 选解密工具。
 - **passphrase-only 不能 sub-pi**：age scrypt 要 /dev/tty，sub-pi 无 tty。但 sub-pi 本就 PI_ABRAIN_DISABLED=1 看不到 vault，没事。
 
@@ -168,7 +168,7 @@ rm -rf "$INSTALL_TMP"
 
 **failure point 处理**：
 - (1) fail → 走 cleanup、不产生任何产出。**Idempotent**。
-- (2) fail → 走 cleanup、不写 backend/pubkey 文件。**Idempotent**：只要 vault 目录里没出现 .vault-master.age 部分写入，下次重跑 init 干净。危险点：keychain backend（macOS/secret-service/pass）在 (2) 中成功写 keychain 后后续 (3) fail → keychain 里有孤儿 master key。补救：重跑 `pi vault init` 时先检查 keychain，有同 name 则 prompt 覆写。
+- (2) fail → 走 cleanup、不写 backend/pubkey 文件。**Idempotent**：只要 vault 目录里没出现 .vault-master.age 部分写入，下次重跑 init 干净。危险点：keychain backend（macOS/secret-service/pass）在 (2) 中成功写 keychain 后后续 (3) fail → keychain 里有孤儿 master key。补救：重跑 `/vault init` 时先检查 keychain，有同 name 则 prompt 覆写。
 - (3a) write pubkey fail → 状态不一致（vault dst 存在但无 pubkey）。cleanup 仍跑，报错。重跑 init 要求用户 `rm ~/.abrain/.vault-master.age` 后重来。
 - (3b) write backend file fail → 同 (3a)
 - (4) cleanup fail → **不应该入 sleep**——secret 可能残留。cleanup 不应报错中断主流程，但要 log warn，指示用户手动 `shred -u ~/.abrain/.state/install/init-*/master.age`。
@@ -319,7 +319,7 @@ pi 启动时首次未检测到初始化过的 vault（`~/.abrain/.vault-backend`
 | macOS Keychain 用户 | `[1] ssh-key` + `[macos]` + `[3] passphrase` |
 | 全新环境（无 ssh 无 gpg） | `[3] passphrase` 一项 + `[s]` |
 
-选任一 backend → 跑 §3 流程对应路径 + 写 `~/.abrain/.vault-backend`，结束后 `pi vault status` 显示 `unlocked`。
+选任一 backend → 跑 §3 流程对应路径 + 写 `~/.abrain/.vault-backend`，结束后 `/vault status` 显示 `unlocked`。
 选 [s] → 写 `~/.abrain/.state/vault-disabled` flag，pi 继续运行。
 选 [i] → 跨设备导入流程（§6）。
 ### 4.1 `/vault status` 语义（v1.4.2 补，dogfood 发现）
@@ -455,8 +455,8 @@ rsync -av --delete ~/.abrain/ user@deviceB:.abrain/
 
 # 设备 B：
 # 1. 把 master key 注册到本设备 keychain（按 §3 流程）
-# 2. 验证：pi vault status → unlocked
-# 3. 验证：pi vault list → 看到 A 上写过的所有 keys
+# 2. 验证：/vault status → unlocked
+# 3. 验证：/secret list → 看到 A 上写过的所有 keys（注：vault 不直接列 secrets，走 /secret list）
 ```
 
 **已知 trade-off**：
@@ -478,10 +478,10 @@ vault-bootstrap 完成后必须验证。**按 backend 分类，只验证该 host
 
 ### Tier 1 主要验收（必须走）
 
-- [ ] `pi vault init` 在容器 (Linux + ssh-key 可用) 进行 → 选 [1] ssh-key → init 成功 → `~/.abrain/.vault-master.age` + `~/.abrain/.vault-backend` 生成
-- [ ] init 后 `pi vault status` 返回 `unlocked` (backend=ssh-key, identity=...)
-- [ ] **fail-closed 场景**：ab init 后手动 `mv ~/.abrain/.vault-master.age{,.bak}` → `pi vault status` 返回 `locked`而非 crash
-- [ ] **fail-closed 场景 2**：init 后 `chmod 000 ~/.ssh/id_ed25519` → `pi vault status` 返回 `locked` (decrypt failed)
+- [ ] `/vault init` 在容器 (Linux + ssh-key 可用) 进行 → 选 [1] ssh-key → init 成功 → `~/.abrain/.vault-master.age` + `~/.abrain/.vault-backend` 生成
+- [ ] init 后 `/vault status` 返回 `unlocked` (backend=ssh-key, identity=...)
+- [ ] **fail-closed 场景**：init 后手动 `mv ~/.abrain/.vault-master.age{,.bak}` → `/vault status` 返回 `locked`而非 crash
+- [ ] **fail-closed 场景 2**：init 后 `chmod 000 ~/.ssh/id_ed25519` → `/vault status` 返回 `locked` (decrypt failed)
 
 ### 公共验收（与 backend 无关，必须走）
 
@@ -501,11 +501,11 @@ vault-bootstrap 完成后必须验证。**按 backend 分类，只验证该 host
 
 ### Tier 2 optimization 验收（仅在该 backend 上 host 实际可用时走）
 
-- [ ] macOS host：`pi vault init` 选 [macos] → `security find-generic-password -s alfadb-abrain-master` 返回 加密 secret
-- [ ] Linux desktop + secret-tool host：`pi vault init` 选 [secret-service] → `secret-tool lookup service abrain key master` 返回 secret
-- [ ] pass user host：`pi vault init` 选 [pass] → `pass show abrain/master` 返回 secret
+- [ ] macOS host：`/vault init --backend=macos` → `security find-generic-password -s alfadb-abrain-master` 返回 加密 secret
+- [ ] Linux desktop + secret-tool host：`/vault init --backend=secret-service` → `secret-tool lookup service abrain key master` 返回 secret
+- [ ] pass user host：`/vault init --backend=pass` → `pass show abrain/master` 返回 secret
 
 ### 容器 / CI 场景验收（v1.4 新加）
 
-- [ ] **容器 ssh-key 路径 e2e**：worker container 上跑 `pi vault init` 选 ssh-key → init 成功 → `pi vault status = unlocked`。这是 alfadb 主场景。
+- [ ] **容器 ssh-key 路径 e2e**：worker container 上跑 `/vault init --backend=ssh-key` → init 成功 → `/vault status = unlocked`。这是 alfadb 主场景。
 - [ ] **CI 场景**（无 ssh-key 无 GPG）：detection 跳到 passphrase-only。CI 推荐主动 disable：`touch ~/.abrain/.state/vault-disabled`。

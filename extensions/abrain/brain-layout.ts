@@ -8,8 +8,8 @@
  *   ├── identity/     # Lane G: about-me declarations
  *   ├── skills/       # Lane G: skill definitions
  *   ├── habits/       # Lane G: habit/preference tracking
- *   ├── workflows/    # Lane G: workflow definitions
- *   ├── projects/     # Lane C target: per-project memory (migration P5-P6)
+ *   ├── workflows/    # workflow lane (B1, 2026-05-12): writeAbrainWorkflow
+ *   ├── projects/     # Lane C target: per-project memory (B4 /memory migrate --go)
  *   ├── knowledge/    # Lane A: cross-project world knowledge
  *   └── vault/        # Lane V: encrypted secrets (created by /vault init)
  *
@@ -34,15 +34,22 @@ const BRAIN_ZONES = [
   "vault",
 ] as const;
 
-/** Per-zone metadata: which lane owns it, whether it holds markdown entries. */
+/** Per-zone metadata: which lane owns it, whether it holds markdown entries.
+ *
+ *  Note: workflows is its own lane (writer = `writeAbrainWorkflow`, audit
+ *  row carries `lane: "workflow"`). It used to be grouped under Lane G
+ *  (about-me) in early ADR 0014 drafts, but B1 (2026-05-12) shipped it as
+ *  an independent lane with its own lock + audit + commit path. ZONE_META
+ *  is documentation-only (referenced by `/sediment status`); the writer
+ *  enum is the source of truth. */
 const ZONE_META: Record<string, { lane: string; description: string }> = {
-  identity:  { lane: "G (about-me)", description: "user identity declarations, /about-me output" },
-  skills:    { lane: "G (about-me)", description: "skill definitions and proficiency" },
-  habits:    { lane: "G (about-me)", description: "habit tracking and preferences" },
-  workflows: { lane: "G (about-me)", description: "workflow and pipeline definitions" },
-  projects:  { lane: "C (curator)", description: "per-project memory (migration target from .pensieve/)" },
-  knowledge: { lane: "A (agent)",   description: "cross-project world knowledge" },
-  vault:     { lane: "V (vault)",   description: "age-encrypted secrets (managed by /vault init)" },
+  identity:  { lane: "G (about-me)",        description: "user identity declarations, /about-me output" },
+  skills:    { lane: "G (about-me)",        description: "skill definitions and proficiency" },
+  habits:    { lane: "G (about-me)",        description: "habit tracking and preferences" },
+  workflows: { lane: "workflow (auto+user)", description: "workflow / pipeline definitions; written by writeAbrainWorkflow (B1)" },
+  projects:  { lane: "C (curator)",         description: "per-project memory (migration target from .pensieve/, see B4 /memory migrate --go)" },
+  knowledge: { lane: "A (agent)",           description: "cross-project world knowledge" },
+  vault:     { lane: "V (vault)",           description: "age-encrypted secrets (managed by /vault init)" },
 };
 
 /**

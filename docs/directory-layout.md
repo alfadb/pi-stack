@@ -1,7 +1,7 @@
 # pi-astack 目录布局与所有权
 
 > **v7 更新提示**（[memory-architecture.md](./memory-architecture.md)）：记忆基础设施从 gbrain (postgres+pgvector) 整
-> 体替换为纯 markdown+git。本文件反映 **当前实际实现状态**（2026-05-11）。标注 `[计划]` 的目录尚未实现。
+> 体替换为纯 markdown+git。本文件反映 **当前实际实现状态**（2026-05-12，含 B1 abrain workflows lane writer + B3+B7 per-file migration substrate 剥离 + B4 `/memory migrate --go`）。标注 `[计划]` 的目录尚未实现。
 
 ## 实际文件树
 

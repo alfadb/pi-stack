@@ -712,11 +712,14 @@ export default function activate(pi: ExtensionAPI): void {
       const items = [
         "set ",
         "set --global ",
+        "set --project=",
         "list",
         "list --global",
         "list --all-projects",
+        "list --project=",
         "forget ",
         "forget --global ",
+        "forget --project=",
       ];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
@@ -733,12 +736,16 @@ export default function activate(pi: ExtensionAPI): void {
   registry.registerCommand("vault", {
     description: "Vault status / control: /vault status | /vault init [--backend=<name>]",
     getArgumentCompletions(prefix: string) {
+      // Keep aligned with parseInitArgs() backend whitelist below.
       const items = [
         "status",
         "init",
         "init --backend=ssh-key",
         "init --backend=gpg-file",
         "init --backend=passphrase-only",
+        "init --backend=macos",
+        "init --backend=secret-service",
+        "init --backend=pass",
       ];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
@@ -794,14 +801,19 @@ function parseInitArgs(args: string): InitOptions {
 }
 
 async function handleInit(rawArgs: string, ui: { notify(message: string, type?: string): void }): Promise<void> {
-  // Idempotent guard: if vault already initialized, refuse without --force.
+  // Idempotent guard: if vault already initialized, refuse re-init.
+  //
+  // `--force` is parsed (parseInitArgs) but not honored here: actually
+  // wiping a live vault requires migrating existing secrets and reseating
+  // the master key, which is the `vault migrate-backend` flow (P0d). Until
+  // that lands, --force is a no-op and we keep the warning message neutral
+  // (no "use --force to re-init" promise we can't fulfill).
   const existing = readBackendFile(ABRAIN_HOME);
   if (existing) {
     ui.notify(
-      `vault already initialized (backend=${existing.backend}). Use \`/vault init --force\` to re-init.`,
+      `vault already initialized (backend=${existing.backend}). To switch backends, wait for \`/vault migrate-backend\` (P0d) or manually move ~/.abrain/.vault-master.age and rerun.`,
       "warning",
     );
-    // Note: --force not yet supported; intentional minimum scope for P0b.
     return;
   }
 

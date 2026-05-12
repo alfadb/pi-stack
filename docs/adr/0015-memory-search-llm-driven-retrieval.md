@@ -159,7 +159,7 @@ ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment curator 在 c
 
 **实现位置**：
 - Stage 1：`extensions/memory/llm-search.ts` `makeStage1Prompt`——instructions 块及 `_index.md` 放在 query 之前。
-- Stage 2：`extensions/memory/llm-search.ts` `makeStage2Prompt:242-275`——instructions 块（约 1K tokens）固定列首，candidates 和 query 可变但 prefix 仍可被缓存。
+- Stage 2：`extensions/memory/llm-search.ts` `makeStage2Prompt:389-417`——instructions 块（约 1K tokens）固定列首，candidates 和 query 可变但 prefix 仍可被缓存。Stage 1 对应 `makeStage1Prompt:322`。
 
 **与 D6 的关系**：
 - D6 关的是 **result cache**（“5 分钟内同 query 复用上次返回的 slug 列表”）——锁闭，避免 sediment 刚写入的条目不被召回。
@@ -170,7 +170,7 @@ ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment curator 在 c
 
 ### D10. search-metrics.jsonl 可观测性
 
-**决策**：每次 `memory_search` 调用追加一行 JSON 到 `<project>/.pi-astack/memory/search-metrics.jsonl`（`extensions/memory/llm-search.ts` `logSearchMetrics:9-18` + `extensions/_shared/runtime.ts` `memorySearchMetricsPath:94-96`）。
+**决策**：每次 `memory_search` 调用追加一行 JSON 到 `<project>/.pi-astack/memory/search-metrics.jsonl`（`extensions/memory/llm-search.ts` `logSearchMetrics:9-18` + `extensions/_shared/runtime.ts` `memorySearchMetricsPath:80-82`）。
 
 **状态**：experimental。schema 未冻结，以 `llm-search.ts` `logSearchMetrics` 实际写入字段为准。当前实现（`llm-search.ts:514-521`）：
 

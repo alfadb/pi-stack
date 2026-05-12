@@ -508,10 +508,10 @@ CLI 命令（全部只读，写操作由 sediment 代理）——2026-05-11 修�
 
 ```text
 /memory lint                # frontmatter 与结构 lint
-/memory migrate [--dry-run] # 旧格式迁移
+/memory migrate [--dry-run|--go] [--project=<id>] [--report]  # dry-run 或 per-repo 一次性迁移到 ~/.abrain/projects/<id>/
 /memory doctor-lite         # 快速健康报告
 /memory check-backlinks     # 反向链接完整性检查
-/memory rebuild --graph|--index   # 重建派生索引 artifact
+/memory rebuild --graph | --index | --graph --index   # 重建派生索引 artifact（两个可同时给，顺序执行）
 ```
 
 ---
@@ -538,7 +538,7 @@ memory_list(filters: { kind?, status?, limit?, cursor? })
   //  不变量。当前实现静默忽略 LLM 传入的 `scope` key。
 
 memory_neighbors(slug: string, options?: { hop?: number, max?: number })
-  → { slug, neighbors: Array<{ slug, title, kind, status, confidence, direction, edge_type, distance }> }
+  → { slug, neighbors: Array<{ slug, title, kind, status, confidence, summary, direction, edge_type, distance }> }
   // 返回 envelope，不是 bare array——便于未来加话题 / cursor。选项 hop 默认 1 (clamp 1..3)，max 默认 20 (clamp 1..100)。
   // 只读图遍历，不写任何关系（替代原名 memory_relate 的读语义）
 ```

@@ -35,17 +35,27 @@ dry-run（`/memory migrate` 默认 / `/memory migrate --dry-run`）仅列出 leg
 ```
 1. 验证 precondition（§2）
 2. 读取 .pensieve/ 所有 entry 的 frontmatter
-3. frontmatter normalize：178 条 legacy entry（无 kind 字段）自动补 kind
+3. frontmatter normalize：legacy entry（无 kind 字段）自动补 kind
    - pipelines/run-when-*.md → kind: pipeline（read-only legacy alias）
-   - 其他无 kind → 按目录推断（maxims/decisions/.../staging/）
+   - 其他无 kind → 按目录推断（maxims/ → maxim、decisions/ → decision、staging/ → smell、其余 → fact）
+   - 数字注：~/.pi Phase 1 历史扫到 178 条候选；其中 5 条是 .index/.state 派生文件被 migrate-go 预过滤掉，实际计入 lint 报告与 apply-checklist 的「173 → 0 pending」是同一批用户 entry。
 4. pipeline-型条目路由：
-   - frontmatter cross_project: true 或文件名 run-when-* + 跨项目语义 → ~/.abrain/workflows/
-   - 其他 pipeline → ~/.abrain/projects/<id>/workflows/
+   - **唯一权威信号是 frontmatter `cross_project: true`**（文件名 `run-when-*` 不再做隐式启发——多项目可能撞名，2026-05-12 决策）
+   - cross_project: true → ~/.abrain/workflows/（写 `writeAbrainWorkflow({crossProject: true})`）
+   - 缺省 → ~/.abrain/projects/<id>/workflows/
    - 调用 writeAbrainWorkflow (B1 已 ship)
 5. 其他 7 kind entry 物理 mv：
    .pensieve/<kind-dir>/<slug>.md → ~/.abrain/projects/<id>/<kind-dir>/<slug>.md
    - 用 git mv 保留 .pensieve 仓内的 add+delete 记录
    - abrain 仓内 git add
+   - **kind → 子目录映射**（与 `extensions/memory/migrate-go.ts` 中 `KNOWLEDGE_KIND_DIR` 严格一致）：
+     | kind | 子目录 | 备注 |
+     |---|---|---|
+     | `maxim` | `maxims/` | 强约束 · 高权重 |
+     | `decision` | `decisions/` | ADR-类深思熟虑 |
+     | `anti-pattern` `pattern` `fact` `preference` | `knowledge/` | 一般知识合集 |
+     | `smell` | `staging/` | 低信心待提纯 |
+     | (any) status=archived | `archive/` | 已 supersede / 退役 |
 6. 索引重建：
    - .pensieve/.index/graph.json 在原仓内删除（或保留作历史，gitignore）
    - ~/.abrain/projects/<id>/.index/graph.json 重建
@@ -118,7 +128,7 @@ cd ~/.abrain && git log --oneline -10 # 找第一个 "workflow:" / "migrate(in):
 B1: workflows lane writer (✅ shipped 2026-05-12)
   → writeAbrainWorkflow API 可用；为 /memory migrate --go 提供 pipeline routing target
 
-B3+B7: per-file migration substrate 剩离 (✅ shipped 2026-05-12)
+B3+B7: per-file migration substrate 剥离 (✅ shipped 2026-05-12)
   → 删除 sediment/migration.ts + /sediment migrate-one + /sediment migration-backups
 
 B4: /memory migrate --go (✅ shipped 2026-05-12)

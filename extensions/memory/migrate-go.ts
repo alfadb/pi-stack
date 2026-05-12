@@ -154,10 +154,28 @@ function deriveProjectIdFromRemote(remote: string | undefined | null): string | 
   return sanitizeProjectIdCandidate(candidate);
 }
 
+/**
+ * Generic basenames that collide trivially across multi-project trees. When
+ * the cwd ends in one of these we prepend the parent so e.g.
+ * `~/work/teamA/myproject/src` becomes `myproject-src` instead of a bare
+ * `src` that conflicts with every other `src` checkout. Trade-off: over-
+ * inclusion just produces longer-but-unique ids; under-inclusion (the
+ * original full/src/main triple) produced silent collisions across repos
+ * sharing the same basename. List is conservative — only names we've seen
+ * used as monorepo segments or worktree conventions.
+ */
+const GENERIC_BASENAMES = new Set<string>([
+  "full", "src", "main", "master", "app", "core", "repo", "root",
+  "dist", "build", "pkg", "packages", "project", "workspace",
+  "client", "server", "backend", "frontend", "web", "api",
+]);
+
 function deriveProjectIdFromCwd(cwd: string): string {
-  // Use the last two path components if available to disambiguate
-  // ~/work/uamp/full vs ~/work/kihh/full → "uamp-full" / "kihh-full".
-  // Falls back to just the basename when cwd has no useful parent.
+  // Use the last two path components when the basename is in
+  // GENERIC_BASENAMES (~/work/uamp/full → uamp-full) to disambiguate repos
+  // that share a generic last segment. Otherwise the basename alone is
+  // unique enough. Falls back to "project" sentinel when cwd has no
+  // useful structure.
   const norm = path.resolve(cwd).replace(/\/+$/, "");
   if (norm === "/" || norm === "") return "project";
   const parts = norm.split(path.sep).filter(Boolean);
@@ -165,8 +183,7 @@ function deriveProjectIdFromCwd(cwd: string): string {
   if (parts.length === 1) return sanitizeProjectIdCandidate(parts[0]!);
   const last = parts[parts.length - 1]!;
   const parent = parts[parts.length - 2]!;
-  // Skip generic parent names that would still collide.
-  const candidate = (last === "full" || last === "src" || last === "main")
+  const candidate = GENERIC_BASENAMES.has(last)
     ? `${parent}-${last}`
     : last;
   return sanitizeProjectIdCandidate(candidate);

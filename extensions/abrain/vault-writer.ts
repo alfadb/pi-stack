@@ -101,7 +101,14 @@ export function validateKey(key: string): void {
 //   - poll-based with 50–150ms jitter; fine for low-frequency vault writes
 //   - same-host pid reuse window: pathological recovery delay up to MAX_LOCK_AGE_MS
 
-const MAX_LOCK_AGE_MS = 5 * 60 * 1000; // 5 minutes — consistent with vault-bootstrap §6 quiescence drain timeout
+// 5 minutes — stale-lock grace period. After this, a lock with no live
+// owning process (pid probe via signal 0) is treated as abandoned and
+// reclaimable. Long enough that a slow legit writer won't be evicted;
+// short enough that crashes / killed processes don't strand the vault
+// for hours. (Originally documented as "quiescence drain timeout" which
+// was a leftover term from the 8-phase migration model that ADR 0014
+// v7.1 retired.)
+const MAX_LOCK_AGE_MS = 5 * 60 * 1000;
 
 interface LockHandle {
   release(): void;
