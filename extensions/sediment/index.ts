@@ -540,7 +540,14 @@ export default function (pi: ExtensionAPI) {
           session_id: sessionId,
           branch_size: branch.length,
           stop_reason: lastAssistant?.stopReason,
-          error_message: lastAssistant?.errorMessage,
+          // Round 9 P1 (sonnet R9-4 fix): cap error_message at 500 chars
+          // to avoid leaking provider-side error spew that may echo back
+          // request body (which can contain pasted secrets) into
+          // audit.jsonl. Other audit rows (drain failures, checkpoint
+          // save) already cap; main bg path was the lone exception.
+          error_message: lastAssistant?.errorMessage
+            ? String(lastAssistant.errorMessage).slice(0, 500)
+            : undefined,
           settings_snapshot: settingsSnapshot,
           extractor: "explicit_marker",
           parser_version: PARSER_VERSION,
@@ -685,6 +692,7 @@ export default function (pi: ExtensionAPI) {
                           llm: auto.llmAuditSummary,
                           raw_text: auto.rawTextStored,
                           raw_text_truncated: auto.rawTextTruncated,
+                          raw_text_redacted: auto.rawTextRedacted,
                           checkpoint_advanced: true,
                           background_async: true,
                           drain: true,
@@ -844,6 +852,7 @@ export default function (pi: ExtensionAPI) {
                 llm: auto.llmAuditSummary,
                 raw_text: auto.rawTextStored,
                 raw_text_truncated: auto.rawTextTruncated,
+                raw_text_redacted: auto.rawTextRedacted,
                 stage_ms: {
                   window_build: tWindowBuilt - tStart,
                   parse: tParseEnd - tParseStart,
@@ -929,6 +938,10 @@ export default function (pi: ExtensionAPI) {
                 auto.kind === "llm_error" || auto.kind === "llm_skip"
                   ? auto.rawTextTruncated
                   : undefined,
+              raw_text_redacted:
+                auto.kind === "llm_error" || auto.kind === "llm_skip"
+                  ? auto.rawTextRedacted
+                  : undefined,
               stage_ms: {
                 window_build: tWindowBuilt - tStart,
                 parse: tParseEnd - tParseStart,
@@ -980,7 +993,8 @@ export default function (pi: ExtensionAPI) {
                 settings_snapshot: settingsSnapshot,
                 entry_breakdown: entryBreakdown,
                 correlation_id: autoCorrelationId,
-                error: err?.message ?? String(err),
+                // Round 9 P1 (sonnet R9-4 fix): cap at 500 chars.
+                error: (err?.message ?? String(err)).slice(0, 500),
                 checkpoint_advanced: true,
                 background_async: true,
               });
@@ -1159,6 +1173,7 @@ type AutoWriteLaneOutcome =
       llmDurationMs: number;
       rawTextStored?: string;
       rawTextTruncated?: boolean;
+      rawTextRedacted?: boolean;
     }
   | {
       kind: "llm_error";
@@ -1166,6 +1181,7 @@ type AutoWriteLaneOutcome =
       llmDurationMs: number;
       rawTextStored?: string;
       rawTextTruncated?: boolean;
+      rawTextRedacted?: boolean;
     }
   | {
       kind: "wrote";
@@ -1177,6 +1193,7 @@ type AutoWriteLaneOutcome =
       writeStart: number;
       rawTextStored?: string;
       rawTextTruncated?: boolean;
+      rawTextRedacted?: boolean;
     };
 
 function truncateRawForAudit(
@@ -1186,6 +1203,35 @@ function truncateRawForAudit(
   if (!raw || cap <= 0) return {};
   if (raw.length <= cap) return { text: raw, truncated: false };
   return { text: raw.slice(0, cap), truncated: true };
+}
+
+/**
+ * Round 9 P0 (sonnet R9-2 fix): sanitize the raw_text field before it
+ * lands in audit.jsonl. The LLM's response (or its error spew) may
+ * echo back credentials from the window. truncateRawForAudit only caps
+ * length — it does not redact secrets. This wrapper adds the redaction
+ * step. Because credential regex matches are anchored to a substring
+ * but don't tell us WHERE the match was, the floor-safe action is to
+ * replace the whole stored text with a placeholder identifying which
+ * pattern fired. operators still have rawTextSha256 to correlate to
+ * the model's response if they need to inspect it (separately, with
+ * stricter access controls).
+ */
+function sanitizeAndTruncateRawForAudit(
+  raw: string | undefined,
+  cap: number,
+): { text?: string; truncated?: boolean; redacted?: boolean; redactionReason?: string } {
+  const t = truncateRawForAudit(raw, cap);
+  if (t.text === undefined) return t;
+  const { sanitizeForMemory } = require("./sanitizer") as typeof import("./sanitizer");
+  const s = sanitizeForMemory(t.text);
+  if (s.ok) return t;
+  return {
+    text: `[redacted: ${s.error}]`,
+    truncated: t.truncated,
+    redacted: true,
+    redactionReason: s.error,
+  };
 }
 
 /**
@@ -1252,8 +1298,8 @@ async function tryAutoWriteLane(args: {
     rawPreviewChars: settings.extractorAuditRawChars,
   });
 
-  const { text: rawTextStored, truncated: rawTextTruncated } =
-    truncateRawForAudit(llmResult.rawText, settings.autoWriteRawAuditChars);
+  const { text: rawTextStored, truncated: rawTextTruncated, redacted: rawTextRedacted } =
+    sanitizeAndTruncateRawForAudit(llmResult.rawText, settings.autoWriteRawAuditChars);
 
   if (!llmResult.ok) {
     return {
@@ -1262,6 +1308,7 @@ async function tryAutoWriteLane(args: {
       llmDurationMs,
       rawTextStored,
       rawTextTruncated,
+      rawTextRedacted,
     };
   }
 
@@ -1285,6 +1332,7 @@ async function tryAutoWriteLane(args: {
       llmDurationMs,
       rawTextStored,
       rawTextTruncated,
+      rawTextRedacted,
     };
   }
 
@@ -1446,6 +1494,7 @@ async function tryAutoWriteLane(args: {
     writeStart,
     rawTextStored,
     rawTextTruncated,
+    rawTextRedacted,
   };
 }
 

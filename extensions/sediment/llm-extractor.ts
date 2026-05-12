@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import type { SedimentSettings } from "./settings";
 import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
+import { sanitizeForMemory } from "./sanitizer";
 
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
@@ -14,11 +15,20 @@ export interface LlmExtractorResult {
   error?: string;
   rawText?: string;
   extraction?: ReturnType<typeof previewExtraction>;
+  // Round 9 P0 (sonnet R9-1): set when sanitizer pre-scan refused to
+  // forward the window to the LLM provider. Distinguishes "failed before
+  // network call" from "model error".
+  preSanitizeAborted?: boolean;
+  preSanitizeReason?: string;
 }
 
 export interface LlmExtractorQualityGate {
   passed: boolean;
-  reason: "skip" | "valid_candidates" | "model_error" | "unparseable_output" | "validation_errors" | "too_many_candidates";
+  // Round 9 P0 (sonnet R9-1): added "credential_in_window" for the
+  // pre-sanitize abort path — distinguishes "refused to send to LLM
+  // provider because window contained a secret" from "model_error"
+  // (network/auth) and from "unparseable_output" (model gibberish).
+  reason: "skip" | "valid_candidates" | "model_error" | "unparseable_output" | "validation_errors" | "too_many_candidates" | "credential_in_window";
   candidateCount: number;
   validationErrorCount: number;
   invalidCandidateCount: number;
@@ -130,15 +140,29 @@ export function summarizeLlmExtractorResult(
 
   let reason: LlmExtractorQualityGate["reason"];
   let passed = false;
-  if (!result.ok) reason = "model_error";
+  if (result.preSanitizeAborted) reason = "credential_in_window";
+  else if (!result.ok) reason = "model_error";
   else if (!raw || raw === "SKIP") { reason = "skip"; passed = true; }
   else if (candidateCount === 0) reason = "unparseable_output";
   else if (candidateCount > opts.maxCandidates) reason = "too_many_candidates";
   else if (validationErrorCount > 0) reason = "validation_errors";
   else { reason = "valid_candidates"; passed = true; }
 
-  const rawTextPreview = opts.rawPreviewChars > 0 && raw
+  // Round 9 P0 (sonnet R9-3 fix): rawTextPreview is the LLM's raw
+  // response, persisted in audit.jsonl via llmAuditSummary.rawTextPreview.
+  // If the model echoed back any credential pattern from the window
+  // (instruction-following models love to repeat what they were given),
+  // it persists to disk unredacted. Sanitize before storing; replace
+  // with placeholder if a pattern is detected so we don't leak the
+  // first N chars of a token (the regex doesn't tell us where in the
+  // string the match was — redacting the whole preview is the safe
+  // floor).
+  const rawSlice = opts.rawPreviewChars > 0 && raw
     ? raw.slice(0, opts.rawPreviewChars)
+    : undefined;
+  const previewSanitized = rawSlice !== undefined ? sanitizeForMemory(rawSlice) : null;
+  const rawTextPreview = previewSanitized
+    ? (previewSanitized.ok ? rawSlice : `[redacted: ${previewSanitized.error}]`)
     : undefined;
 
   return {
@@ -168,6 +192,27 @@ export async function runLlmExtractor(
     signal?: AbortSignal;
   },
 ): Promise<LlmExtractorResult> {
+  // Round 9 P0 (sonnet R9-1 fix): sanitizer was an OUTPUT-only gate —
+  // it ran at writeProjectEntry time on the LLM's response, but the
+  // window text (user's full conversation, possibly containing secrets
+  // pasted from terminal, curl output, .env dumps) was sent verbatim to
+  // the third-party LLM provider via streamSimple. By the time the
+  // sanitizer ran on the LLM's response, the conversation had ALREADY
+  // left the local machine. This is a fail-loud input gate: if any
+  // credential pattern is detected in the window, we refuse to call
+  // the LLM provider at all. quality.reason = "credential_in_window"
+  // tells the operator what happened.
+  const windowSanitize = sanitizeForMemory(windowText);
+  if (!windowSanitize.ok) {
+    return {
+      ok: false,
+      model: deps.settings.extractorModel,
+      error: `pre-sanitize aborted: ${windowSanitize.error}`,
+      preSanitizeAborted: true,
+      preSanitizeReason: windowSanitize.error,
+    };
+  }
+
   const parsed = parseModelRef(deps.settings.extractorModel);
   if (!parsed) {
     return { ok: false, model: deps.settings.extractorModel, error: "invalid extractorModel; expected provider/model" };

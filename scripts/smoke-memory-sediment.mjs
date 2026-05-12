@@ -946,6 +946,57 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         modelRegistry: mockModelRegistry,
       });
       assert(r1.ok && r1.rawText && r1.rawText.includes("A2 Mock Extracted Insight"), `r1 mock should return valid block: ${JSON.stringify(r1)}`);
+      // Round 9 P0 (sonnet R9-1 fix): sanitizer must run as an INPUT
+      // gate. windowText containing a credential MUST NOT reach the LLM
+      // provider; runLlmExtractor must short-circuit before streamSimple.
+      // Failure mode: bug case would call mockLLM and r.ok=true; here
+      // the mock is observable via globalThis.__A2_LAST_PROMPT__ —
+      // assert that AFTER the pre-sanitize call, the mock prompt cache
+      // does NOT change.
+      const promptBefore = globalThis.__A2_LAST_PROMPT__;
+      const rSecret = await runLlmExtractor(
+        "--- ENTRY X t1 message/user ---\nMy github token is ghp_1234567890abcdefghijklmnopqrstuv. Help me debug.",
+        { settings: a2Settings, modelRegistry: mockModelRegistry },
+      );
+      assert(
+        rSecret.ok === false && rSecret.preSanitizeAborted === true,
+        `R9 P0: window with credential must abort BEFORE LLM call, got: ${JSON.stringify(rSecret)}`,
+      );
+      assert(
+        /github_token/.test(rSecret.preSanitizeReason || "") || /credential/.test(rSecret.preSanitizeReason || ""),
+        `R9 P0: preSanitizeReason should identify credential pattern, got: ${rSecret.preSanitizeReason}`,
+      );
+      assert(
+        globalThis.__A2_LAST_PROMPT__ === promptBefore,
+        `R9 P0: mock LLM was called despite credential in window — sanitize gate is leaking the conversation`,
+      );
+      // R9 P0 sonnet R9-3: summarize must mark quality.reason="credential_in_window"
+      const sumSecret = summarizeLlmExtractorResult(rSecret, { maxCandidates: 3, rawPreviewChars: 100 });
+      assert(
+        sumSecret.quality.reason === "credential_in_window" && sumSecret.quality.passed === false,
+        `R9 P0: summary should classify pre-sanitize abort, got: ${JSON.stringify(sumSecret.quality)}`,
+      );
+
+      // Round 9 P0 (sonnet R9-3 fix): rawTextPreview on an LLM response
+      // that echoes back a credential must redact (replace whole preview
+      // with placeholder), not store the secret in audit.jsonl.
+      const sumEcho = summarizeLlmExtractorResult(
+        { ok: true, model: "x/y", rawText: "I see your key sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv", extraction: { count: 0, drafts: [] } },
+        { maxCandidates: 3, rawPreviewChars: 200 },
+      );
+      assert(
+        sumEcho.quality.rawTextPreview && /^\[redacted:/.test(sumEcho.quality.rawTextPreview),
+        `R9 P0: rawTextPreview echoing a credential must be replaced with [redacted: ...], got: ${sumEcho.quality.rawTextPreview}`,
+      );
+      // Benign preview is preserved (no false positive)
+      const sumBenign = summarizeLlmExtractorResult(
+        { ok: true, model: "x/y", rawText: "MEMORY:\ntitle: ok\n---\nnothing secret here at all\nEND_MEMORY", extraction: { count: 0, drafts: [] } },
+        { maxCandidates: 3, rawPreviewChars: 100 },
+      );
+      assert(
+        sumBenign.quality.rawTextPreview && !/^\[redacted:/.test(sumBenign.quality.rawTextPreview),
+        `R9 P0: benign preview must NOT be redacted (false positive), got: ${sumBenign.quality.rawTextPreview}`,
+      );
       // Verify the prompt contained the Trust Boundary directive.
       assert(globalThis.__A2_LAST_PROMPT__.includes("Trust boundary"), "prompt to mock LLM missing Trust boundary directive");
       // Parse + schema-only validation. Semantic hard gates are gone.
@@ -2334,31 +2385,67 @@ This is a cross-project review pipeline body with enough content.
         //   Scenario A (delete wins lock first): file gone + update rejected
         //   Scenario B (update wins lock first): file present with NEW BODY +
         //                                         delete then sees file gone or hard-deletes
-        // The bug case (file present with stale body) is forbidden.
-        if (!fs.existsSync(targetPath)) {
-          // file deleted — update must report rejection (either entry_not_found
-          // when delete won, or success then post-delete when update won)
+        // Round 9 P0 (opus R9-3 fix): the original h.6 assertion was
+        // too loose. It accepted `updRes.status === "updated"` whenever
+        // the file existed at end-of-race — BUT the bug fingerprint is
+        // exactly that: when delete reports deleted, file should NOT
+        // exist. Resurrection bug: delete unlinks → update lock acquired
+        // after delete → atomicWrite reapplies stale-read merge → file
+        // reappears with NEW BODY. The old smoke read "NEW BODY present"
+        // as proof of "update won lock first", but it's equally
+        // consistent with resurrection. Tighten: enforce that delete
+        // status and file existence are MUTUALLY EXCLUSIVE.
+        const fileExists = fs.existsSync(targetPath);
+        const onDisk = fileExists ? fs.readFileSync(targetPath, "utf-8") : null;
+
+        // Invariant 1: delete reporting "deleted" + file existing = resurrection
+        if (delRes.status === "deleted" && fileExists) {
+          throw new Error(
+            `RMW resurrection: delete reported status=deleted but file STILL EXISTS at ${targetPath}\n` +
+            `disk content: ${onDisk?.slice(0, 300)}\n` +
+            `updRes=${JSON.stringify(updRes)}\ndelRes=${JSON.stringify(delRes)}`,
+          );
+        }
+
+        // Invariant 2: when file deleted, update must have status "rejected"
+        // (delete-won-first; update saw missing file inside lock) OR
+        // "updated" (update-won-first; lock-internal atomicWrite happened
+        // before delete grabbed lock and unlinked).
+        if (!fileExists) {
           if (updRes.status !== "rejected" && updRes.status !== "updated") {
             throw new Error(`unexpected update status when file deleted: ${updRes.status}/${updRes.reason}`);
           }
-          // Critical: no resurrection — nothing on disk.
+          // Stronger: if updRes is "rejected", reason must be entry_not_found
+          if (updRes.status === "rejected" && updRes.reason !== "entry_not_found") {
+            throw new Error(
+              `update rejected for unexpected reason in race: ${updRes.reason} ` +
+              `(expected entry_not_found when delete-won-first)`,
+            );
+          }
         } else {
-          // file exists — update must have won lock first, body must be NEW
-          const onDisk = fs.readFileSync(targetPath, "utf-8");
+          // File exists. Two valid cases:
+          //   (a) update-won-first, then delete saw missing file in its
+          //       merge step — delete should be status="absent" or have
+          //       not reached its lock yet. delRes.status === "deleted"
+          //       with file present is invariant-1 violation, already caught.
+          //   (b) update-won-first, delete genuinely failed (e.g. lock
+          //       contention timed out). Body must be NEW (merge applied).
           assert(
             /NEW BODY/.test(onDisk),
-            `file exists post-race but body is STALE (resurrection bug): ${onDisk.slice(0, 300)}`,
+            `file exists post-race but body is not the merged NEW BODY: ${onDisk.slice(0, 300)}`,
           );
-          assert(updRes.status === "updated", `if file exists, update must have status=updated, got: ${updRes.status}`);
-        }
-
-        // The forbidden case: stale resurrection — file exists with ORIGINAL
-        // body (no NEW BODY marker, no merge).
-        if (fs.existsSync(targetPath)) {
-          const onDisk = fs.readFileSync(targetPath, "utf-8");
           assert(
             !/original body content for race test/.test(onDisk),
-            `RMW race resurrected entry from stale read: file exists with original (pre-update) body`,
+            `file exists with original (pre-update) body — update never ran: ${onDisk.slice(0, 200)}`,
+          );
+          assert(
+            updRes.status === "updated",
+            `if file exists with NEW BODY, update must have status=updated, got: ${updRes.status}`,
+          );
+          // R9: delete should NOT report "deleted" — file is there.
+          assert(
+            delRes.status !== "deleted",
+            `file present but delete reported status=deleted: invariant violation`,
           );
         }
 
