@@ -164,16 +164,21 @@ function registerMemoryCommand(pi: ExtensionAPI) {
           return;
         }
 
-        // Dry-run path: --project is meaningless (no abrain write happens).
-        // Warn so users who typed `--project=foo --dry-run` know it's a no-op.
-        if (projectIdFlag) {
-          ctx.ui.notify(
-            `/memory migrate --dry-run: --project=${projectIdFlag} is ignored in dry-run mode ` +
-              `(only affects --go). Run '/memory migrate --go --project=${projectIdFlag}' to execute.`,
-            "warning",
-          );
-        }
-        const report = await planMigrationDryRun(target, settings, undefined, cwd);
+        // Round 7 P0-C (opus audit fix): dry-run now feeds projectId + abrainHome
+        // through to the planner so target_path values reflect where `--go` would
+        // actually route each entry. Previously `--project=<id>` was rejected
+        // outright with a "ignored" warning, and pipelines were lied about as
+        // "unsupported". When --project is omitted we still run the dry-run; the
+        // planner will render `<unresolved — pass --project=<id>>` in target_path
+        // so users see explicitly that they need to add the flag to lock the
+        // destination preview.
+        const abrainHome = process.env.ABRAIN_ROOT
+          ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+          : path.join(os.homedir(), ".abrain");
+        const report = await planMigrationDryRun(target, settings, undefined, cwd, {
+          abrainHome,
+          projectId: projectIdFlag,
+        });
         const messages = [formatMigrationPlan(report)];
         if (writeReport) {
           const written = await writeMigrationReport(target, report, cwd);

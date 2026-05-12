@@ -16,6 +16,7 @@ import {
   splitFrontmatter,
 } from "./parser";
 import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_FIELDS } from "./lint";
+import { writePostMigrationGuard } from "../sediment/writer";
 import { clamp, normalizeBareSlug, prettyPath, slugify, titleFromSlug, throwIfAborted } from "./utils";
 import {
   abrainProjectDir,
@@ -900,6 +901,17 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   // staging files in `.pi-astack/`). pensieveAbs may be the canonical
   // `.pensieve` or a custom path; relativize against parentRepoRoot.
   const parentPensieveRel = path.relative(parentRepoRoot, pensieveAbs) || ".pensieve";
+  // Round 7 P0-D (opus audit fix): drop a post-migration flag inside
+  // `.pensieve/` BEFORE the parent-side commit, so the flag is captured
+  // as part of the migration commit (and rolled back atomically when the
+  // user runs `git reset --hard <parentPreSha>`). The flag tells sediment
+  // writer entry points to reject further .pensieve mutations until B5
+  // cutover ships; it carries the projectId so audit rows identify the
+  // canonical abrain destination for future writes.
+  await writePostMigrationGuard(parentRepoRoot, {
+    migratedAt: migrationTimestamp,
+    projectId,
+  });
   const parentCommitSha = await gitCommitAll(
     parentRepoRoot,
     `chore: migrate .pensieve → ~/.abrain/projects/${projectId} (${movedCount + workflowCount} entries)`,

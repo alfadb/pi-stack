@@ -13,7 +13,13 @@ import {
 } from "./parser";
 import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_FIELDS } from "./lint";
 import { clamp, normalizeBareSlug, prettyPath, stableUnique, titleFromSlug, throwIfAborted } from "./utils";
-import { formatLocalIsoTimestamp, memoryMigrationReportPath } from "../_shared/runtime";
+import {
+  abrainProjectDir,
+  abrainProjectWorkflowsDir,
+  abrainWorkflowsDir,
+  formatLocalIsoTimestamp,
+  memoryMigrationReportPath,
+} from "../_shared/runtime";
 
 export interface MigrationPlanItem {
   source_path: string;
@@ -71,28 +77,82 @@ function normalizeLegacyKind(kindOrType: string): string {
   return k || "fact";
 }
 
+/** Round 7 P0-C (opus audit fix): pipelines used to be flagged `unsupported`
+ *  here, which made `/memory migrate --dry-run` print them under "skipped".
+ *  But `/memory migrate --go` (migrate-go.ts:550+) actually routes pipelines
+ *  to `~/.abrain/workflows/<slug>.md` or `~/.abrain/projects/<id>/workflows/<slug>.md`.
+ *  The dry-run was systematically lying about pipelines. Now pipelines are
+ *  a first-class area; the destination is computed by `legacyTargetPath` to
+ *  match --go's actual routing. */
 function inferLegacyArea(relPath: string): { area: string; shortTerm: boolean; unsupported?: string } {
   const parts = relPath.split(/[\\/]+/).filter(Boolean);
   const shortTerm = parts[0] === "short-term";
   const head = shortTerm ? parts[1] : parts[0];
 
   if (!head || head === "state.md") return { area: "", shortTerm, unsupported: "support file outside memory entry directories" };
-  if (head === "pipelines") return { area: head, shortTerm, unsupported: "pipeline resources are not migrated by memory schema v1" };
+  if (head === "pipelines") return { area: head, shortTerm };
   if (["maxims", "decisions", "knowledge", "staging", "archive"].includes(head)) {
     return { area: head, shortTerm };
   }
   return { area: head, shortTerm, unsupported: `unsupported memory directory: ${head}` };
 }
 
-function legacyTargetPath(sourcePath: string, projectRoot: string, relPath: string, slug: string): string {
+export interface MigrationDryRunOptions {
+  abrainHome?: string;
+  /** Pre-resolved abrain projectId. Pass through the same value you would pass
+   *  to `/memory migrate --go --project=<id>`; pass `undefined` if you want
+   *  dry-run to render `<unresolved>` markers in target_path. */
+  projectId?: string;
+  /** Defaults to inferring crossProject from frontmatter `cross_project: true`. */
+  isCrossProject?: (relPath: string, frontmatter: Record<string, unknown>) => boolean;
+}
+
+/** Round 7 P0-C: target_path now reflects where `--go` will actually move
+ *  the entry (abrain projects substrate / abrain workflows dir / abrain
+ *  project-scoped workflows dir). When `abrainHome` or `projectId` is
+ *  unresolved at dry-run time, returns a `<unresolved — ...>` sentinel
+ *  so users see explicitly that dry-run can't pin the destination without
+ *  the same flags `--go` would receive. */
+function legacyTargetPath(
+  sourcePath: string,
+  projectRoot: string,
+  relPath: string,
+  slug: string,
+  kind: string,
+  status: string,
+  frontmatter: Record<string, unknown>,
+  opts: MigrationDryRunOptions,
+): string {
   const { area, shortTerm } = inferLegacyArea(relPath);
   if (!area) return sourcePath;
-  const targetDir = path.join(projectRoot, area);
-  const basename = path.basename(sourcePath);
 
-  if (basename === "content.md") return path.join(targetDir, `${slug}.md`);
-  if (shortTerm) return path.join(targetDir, `${slug}.md`);
-  return sourcePath;
+  const abrainHome = opts.abrainHome;
+  const projectId = opts.projectId;
+  if (!abrainHome || !projectId) {
+    return `<unresolved — pass --project=<id> (or run from a repo with a git remote) to see destination>`;
+  }
+
+  if (area === "pipelines") {
+    const crossProject = opts.isCrossProject
+      ? opts.isCrossProject(relPath, frontmatter)
+      : scalarString(frontmatter.cross_project) === "true";
+    const wfDir = crossProject ? abrainWorkflowsDir(abrainHome) : abrainProjectWorkflowsDir(abrainHome, projectId);
+    return path.join(wfDir, `${slug}.md`);
+  }
+
+  // knowledge kinds: maxim/decision/anti-pattern/pattern/fact/preference/smell
+  // archive remains in `archive/` zone when status is archived.
+  const KIND_DIR: Record<string, string> = {
+    maxim: "maxims",
+    decision: "decisions",
+    "anti-pattern": "knowledge",
+    pattern: "knowledge",
+    fact: "knowledge",
+    preference: "knowledge",
+    smell: "staging",
+  };
+  const subdir = status === "archived" ? "archive" : (KIND_DIR[kind] || "knowledge");
+  return path.join(abrainProjectDir(abrainHome, projectId), subdir, `${slug}.md`);
 }
 
 async function planMigrationForFile(
@@ -100,6 +160,7 @@ async function planMigrationForFile(
   projectRoot: string,
   cwd: string,
   settings: MemorySettings,
+  opts: MigrationDryRunOptions,
 ): Promise<{ item?: MigrationPlanItem; skipped?: MigrationSkipItem }> {
   const relPath = path.relative(projectRoot, file);
   const area = inferLegacyArea(relPath);
@@ -128,9 +189,9 @@ async function planMigrationForFile(
     10,
   );
   const created = scalarString(frontmatter.created);
-  const targetPath = legacyTargetPath(file, projectRoot, relPath, slug);
+  const targetPath = legacyTargetPath(file, projectRoot, relPath, slug, kind, status, frontmatter, opts);
   const sourceDisplay = prettyPath(file, cwd);
-  const targetDisplay = prettyPath(targetPath, cwd);
+  const targetDisplay = targetPath.startsWith("<unresolved") ? targetPath : prettyPath(targetPath, cwd);
 
   const reasons: string[] = [];
   const actions: string[] = [];
@@ -188,6 +249,7 @@ export async function planMigrationDryRun(
   settings: MemorySettings,
   signal?: AbortSignal,
   cwd = process.cwd(),
+  opts: MigrationDryRunOptions = {},
 ): Promise<MigrationPlanReport> {
   const absTarget = path.resolve(target);
   const files = await markdownFilesForTarget(absTarget, settings, signal);
@@ -199,7 +261,7 @@ export async function planMigrationDryRun(
   for (const file of files) {
     throwIfAborted(signal);
     try {
-      const planned = await planMigrationForFile(file, projectRoot, cwd, settings);
+      const planned = await planMigrationForFile(file, projectRoot, cwd, settings, opts);
       if (planned.item) items.push(planned.item);
       if (planned.skipped) skipped.push(planned.skipped);
     } catch (e: unknown) {
@@ -331,6 +393,7 @@ export function formatMigrationPlan(report: MigrationPlanReport, maxItems = 12):
     // run `/memory migrate --go [--project=<id>]`. See migrate-go.ts and
     // docs/migration/abrain-pensieve-migration.md §3 for the apply path.
     "Read-only plan (no writes). To execute migration: `/memory migrate --go [--project=<id>]` (B4 shipped 2026-05-12).",
+    "target_path values below show where `--go` would route each entry into ~/.abrain/.",
   ];
 
   if (report.items.length === 0) return lines.join("\n");

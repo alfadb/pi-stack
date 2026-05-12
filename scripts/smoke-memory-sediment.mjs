@@ -378,16 +378,41 @@ created: 2026-05-08
 Body.
 `);
     // === Memory migrate dry-run (read-only planner) ========================
-    // Per-file `/sediment migrate-one` substrate retired 2026-05-12 — backup /
-    // apply / restore commands removed; per-repo migration via `/memory migrate
-    // --go` is pending (ADR 0014 「待实施」). dry-run remains useful as a
-    // legacy-data inventory; smoke now only covers the planner + report writer.
-    const migration = await planMigrationDryRun(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
-    assert(migration.migrateCount >= 1, "migration dry-run found no pending entries");
+    // Round 7 P0-C (opus audit fix): dry-run now reflects --go's actual
+    // routing in target_path, including pipelines (previously lied about
+    // as "unsupported"). Without --project=<id>, target_path renders an
+    // explicit `<unresolved>` sentinel; with --project=<id> it resolves
+    // to the abrain projects/workflows substrate path.
+    const migrationNoProj = await planMigrationDryRun(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
+    assert(migrationNoProj.migrateCount >= 1, "migration dry-run found no pending entries");
+    const legacyPlanNoProj = migrationNoProj.items.find((item) => item.source_path === ".pensieve/short-term/maxims/legacy.md");
+    assert(legacyPlanNoProj, "migration plan should include legacy.md");
+    assert(
+      /^<unresolved/.test(legacyPlanNoProj.target_path),
+      `dry-run without --project should render <unresolved> sentinel, got: ${legacyPlanNoProj.target_path}`,
+    );
+    assert(legacyPlanNoProj.plan_command === undefined && legacyPlanNoProj.apply_command === undefined, "plan/apply command fields must be retired");
+
+    // With --project=<id>, target_path resolves to the abrain destination.
+    const fakeAbrainHome = path.join(root, ".abrain-fake");
+    const migration = await planMigrationDryRun(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root, {
+      abrainHome: fakeAbrainHome,
+      projectId: "smoke-proj",
+    });
+    assert(migration.migrateCount >= 1, "migration dry-run with --project found no pending entries");
     const legacyPlan = migration.items.find((item) => item.source_path === ".pensieve/short-term/maxims/legacy.md");
-    assert(legacyPlan, "migration plan should include legacy.md");
-    assert(legacyPlan.target_path === ".pensieve/maxims/legacy.md", `legacy plan target mismatch: ${legacyPlan.target_path}`);
-    assert(legacyPlan.plan_command === undefined && legacyPlan.apply_command === undefined, "plan/apply command fields must be retired");
+    assert(legacyPlan, "migration plan should include legacy.md (with --project)");
+    // legacy.md is kind=maxim, status=active → abrain projects/<id>/maxims/<slug>.md
+    assert(
+      /\.abrain-fake\/projects\/smoke-proj\/maxims\/legacy\.md$/.test(legacyPlan.target_path),
+      `legacy plan target should be abrain projects path, got: ${legacyPlan.target_path}`,
+    );
+    // Round 7 P0-C: pipelines must NOT be in `skipped` with reason "unsupported".
+    // (The fixture in this section may not have pipelines; the migrate-go
+    // section already tests pipeline routing. We verify here only that
+    // the schema flag is gone.)
+    const stillUnsupported = migration.skipped.find((s) => /pipeline.*not migrated/i.test(s.reason));
+    assert(!stillUnsupported, `pipelines must no longer be flagged 'unsupported' in dry-run, found: ${stillUnsupported?.reason}`);
     const migrationReport = await writeMigrationReport(path.join(root, ".pensieve"), migration, root);
     const migrationReportText = fs.readFileSync(path.join(root, ".pi-astack", "memory", "migration-report.md"), "utf-8");
     assert(fs.existsSync(path.join(root, ".pi-astack", "memory", "migration-report.md")), "migration report not written");
@@ -2097,6 +2122,93 @@ This is a cross-project review pipeline body with enough content.
         assert(entry.action === "migrated", `unparseable entry should still be migrated (notes is informational), got action=${entry.action}`);
         fs.rmSync(parent, { recursive: true, force: true });
         fs.rmSync(abrain, { recursive: true, force: true });
+      }
+
+      // --- Case h.4: post-migration guard blocks sediment writes ---
+      //
+      // Round 7 P0-D (opus audit fix): after `/memory migrate --go` succeeds,
+      // writeProjectEntry / updateProjectEntry / deleteProjectEntry must
+      // refuse to write into `.pensieve/` until B5 cutover ships. Verify:
+      //   (1) migrate-go writes `.pensieve/MIGRATED_TO_ABRAIN` flag with
+      //       { migratedAt, projectId } JSON
+      //   (2) flag is captured in the parent migration commit (so rollback
+      //       via `git reset --hard parentPreSha` removes it atomically)
+      //   (3) writeProjectEntry on a flagged repo returns
+      //       status="rejected", reason="post_migration_pensieve_writes_disabled",
+      //       writes an audit row with the same reason + post_migration_guard
+      //       field, and does NOT create the entry file
+      {
+        const gParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-guard-parent-"));
+        const gAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-guard-abrain-"));
+        for (const r of [gParent, gAbrain]) {
+          execFileSync("git", ["-C", r, "init", "-q"]);
+          execFileSync("git", ["-C", r, "config", "user.email", "smoke@pi-astack.local"]);
+          execFileSync("git", ["-C", r, "config", "user.name", "pi-astack smoke"]);
+          execFileSync("git", ["-C", r, "config", "commit.gpgsign", "false"]);
+          execFileSync("git", ["-C", r, "commit", "-q", "--allow-empty", "-m", "init"]);
+        }
+        // Seed a real user entry so preflight passes.
+        const pensieve = path.join(gParent, ".pensieve");
+        fs.mkdirSync(path.join(pensieve, "maxims"), { recursive: true });
+        fs.writeFileSync(path.join(pensieve, "maxims", "x.md"), makeEntry({ title: "X", kind: "maxim" }));
+        execFileSync("git", ["-C", gParent, "add", "."]);
+        execFileSync("git", ["-C", gParent, "commit", "-q", "-m", "seed"]);
+        const goRes = await runMigrationGo({
+          pensieveTarget: pensieve,
+          abrainHome: gAbrain,
+          projectId: "guard-proj",
+          cwd: gParent,
+          settings: DEFAULT_SETTINGS,
+          migrationTimestamp: "2026-05-12T12:00:00.000+08:00",
+        });
+        assert(goRes.ok === true, `guard setup migrate-go must succeed: ${JSON.stringify(goRes.preconditionFailures)}`);
+
+        // (1) Flag file exists with expected JSON shape
+        const flagPath = path.join(gParent, ".pensieve", "MIGRATED_TO_ABRAIN");
+        assert(fs.existsSync(flagPath), `post-migration flag must exist at ${flagPath}`);
+        const flag = JSON.parse(fs.readFileSync(flagPath, "utf-8"));
+        assert(flag.projectId === "guard-proj", `flag.projectId mismatch: ${flag.projectId}`);
+        assert(flag.migratedAt === "2026-05-12T12:00:00.000+08:00", `flag.migratedAt mismatch: ${flag.migratedAt}`);
+
+        // (2) Flag is git-tracked in the parent commit (so rollback wipes it)
+        const trackedLs = execFileSync("git", ["-C", gParent, "ls-files", ".pensieve/MIGRATED_TO_ABRAIN"], { encoding: "utf-8" }).trim();
+        assert(trackedLs === ".pensieve/MIGRATED_TO_ABRAIN", `flag must be git-tracked, got ls-files: '${trackedLs}'`);
+
+        // (3) writeProjectEntry on flagged repo rejects with structured reason
+        const guardRes = await writeProjectEntry(
+          {
+            title: "Post-migration probe",
+            kind: "maxim",
+            status: "provisional",
+            confidence: 5,
+            compiledTruth: "# Post-migration probe\n\nshould be rejected.",
+            timelineNote: "smoke-guard",
+            sessionId: "smoke-guard",
+          },
+          { projectRoot: gParent, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+        );
+        assert(guardRes.status === "rejected", `writeProjectEntry on flagged repo must be rejected, got: ${guardRes.status}`);
+        assert(
+          guardRes.reason === "post_migration_pensieve_writes_disabled",
+          `rejection reason mismatch: ${guardRes.reason}`,
+        );
+        // Entry file must NOT exist (writer did not even reach buildMarkdown).
+        assert(
+          !fs.existsSync(path.join(gParent, ".pensieve", "maxims", "post-migration-probe.md")),
+          `flagged write must not create entry file on disk`,
+        );
+        // Audit row was written with the same reason + post_migration_guard payload.
+        const auditRows = fs.readFileSync(path.join(gParent, ".pi-astack", "sediment", "audit.jsonl"), "utf-8")
+          .trim().split("\n").map(JSON.parse);
+        const guardAudit = auditRows.find((r) => r.operation === "reject" && r.reason === "post_migration_pensieve_writes_disabled");
+        assert(guardAudit, `expected reject audit row with reason=post_migration_pensieve_writes_disabled; got ${auditRows.length} rows`);
+        assert(
+          guardAudit.post_migration_guard?.projectId === "guard-proj",
+          `guard audit row should embed flag info, got post_migration_guard=${JSON.stringify(guardAudit.post_migration_guard)}`,
+        );
+
+        fs.rmSync(gParent, { recursive: true, force: true });
+        fs.rmSync(gAbrain, { recursive: true, force: true });
       }
     }
 

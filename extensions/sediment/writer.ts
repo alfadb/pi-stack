@@ -200,6 +200,62 @@ async function ensureProjectPensieveRoot(projectRoot: string): Promise<string> {
   return pensieveRoot;
 }
 
+/** Round 7 P0-D (opus audit fix): `/memory migrate --go` writes a flag
+ *  file at `<projectRoot>/.pi-astack/sediment/migrated-to-abrain.flag`
+ *  with the abrain projectId + migration timestamp. While B5 (sediment
+ *  writer cutover to ~/.abrain/projects/<id>/) is pending, any mutation
+ *  call into the project's .pensieve substrate after a successful migration
+ *  would silently rebuild `.pensieve/` and split memory across two stores
+ *  (.pensieve fragment + ~/.abrain/projects/<id>/). This helper detects
+ *  the flag and lets writer entry points return a structured `rejected`
+ *  audit row instead of writing.
+ *
+ *  Returns `{ migratedAt, projectId }` when the flag is present,
+ *  `null` otherwise. Bad / unreadable flag files are ignored (returns
+ *  null) so a hand-corrupted flag doesn't permanently brick the writer. */
+export interface PostMigrationGuardInfo {
+  migratedAt: string;
+  projectId: string;
+}
+
+// Round 7 P0-D: flag lives INSIDE `.pensieve/` so that:
+//   1. migrate-go's parent-side commit (`git add .pensieve && git commit`)
+//      automatically captures it as part of the migration commit.
+//   2. `git reset --hard <parentPreSha>` rolls it back atomically with the
+//      .pensieve restoration — no manual cleanup needed for re-apply.
+//   3. `.pensieve/` is in the user's git tracking by design, so the flag
+//      becomes part of the durable migration audit trail.
+// File name uses ALL_CAPS + no extension to make it stand out in `ls`
+// output, mirroring the convention of MIGRATING/COMMIT_EDITMSG/etc.
+const POST_MIGRATION_FLAG_REL = path.join(".pensieve", "MIGRATED_TO_ABRAIN");
+
+export async function readPostMigrationGuard(projectRoot: string): Promise<PostMigrationGuardInfo | null> {
+  const flagPath = path.join(projectRoot, POST_MIGRATION_FLAG_REL);
+  try {
+    const raw = await fs.readFile(flagPath, "utf-8");
+    const parsed = JSON.parse(raw) as Partial<PostMigrationGuardInfo>;
+    if (typeof parsed.migratedAt !== "string" || typeof parsed.projectId !== "string") return null;
+    return { migratedAt: parsed.migratedAt, projectId: parsed.projectId };
+  } catch {
+    return null;
+  }
+}
+
+export async function writePostMigrationGuard(
+  projectRoot: string,
+  info: PostMigrationGuardInfo,
+): Promise<string> {
+  const flagPath = path.join(projectRoot, POST_MIGRATION_FLAG_REL);
+  await fs.mkdir(path.dirname(flagPath), { recursive: true });
+  await fs.writeFile(flagPath, JSON.stringify(info, null, 2) + "\n", "utf-8");
+  return flagPath;
+}
+
+export async function clearPostMigrationGuard(projectRoot: string): Promise<void> {
+  const flagPath = path.join(projectRoot, POST_MIGRATION_FLAG_REL);
+  try { await fs.unlink(flagPath); } catch { /* idempotent */ }
+}
+
 function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: string; markdown: string } {
   const timestamp = nowIso();
   const status = draft.status ?? "provisional";
@@ -569,6 +625,26 @@ export async function deleteProjectEntry(
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
+  const guard = await readPostMigrationGuard(projectRoot);
+  if (guard) {
+    const slug = slugify(slugRaw);
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
+      operation: "reject",
+      reason: "post_migration_pensieve_writes_disabled",
+      target: `project:${slug}`,
+      post_migration_guard: guard,
+      duration_ms: Date.now() - started,
+    }));
+    return {
+      slug,
+      path: path.join(projectRoot, ".pensieve", `${slug}.md`),
+      status: "rejected",
+      reason: "post_migration_pensieve_writes_disabled",
+      auditPath,
+      deleteMode: opts.mode === "hard" ? "hard" : "soft",
+      ...resultAuditFields(opts, opts.sessionId),
+    };
+  }
   const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
   const slug = slugify(slugRaw);
   const mode: DeleteMode = opts.mode === "hard" ? "hard" : "soft";
@@ -645,6 +721,25 @@ export async function updateProjectEntry(
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
+  const guard = await readPostMigrationGuard(projectRoot);
+  if (guard) {
+    const slug = slugify(slugRaw);
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+      operation: "reject",
+      reason: "post_migration_pensieve_writes_disabled",
+      target: `project:${slug}`,
+      post_migration_guard: guard,
+      duration_ms: Date.now() - started,
+    }));
+    return {
+      slug,
+      path: path.join(projectRoot, ".pensieve", `${slug}.md`),
+      status: "rejected",
+      reason: "post_migration_pensieve_writes_disabled",
+      auditPath,
+      ...resultAuditFields(opts, patch.sessionId),
+    };
+  }
   const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
   const slug = slugify(slugRaw);
   const resultCtx = resultAuditFields(opts, patch.sessionId);
@@ -760,6 +855,26 @@ export async function writeProjectEntry(
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
+  const guard = await readPostMigrationGuard(projectRoot);
+  if (guard) {
+    const slug = slugify(draft.title);
+    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
+      operation: "reject",
+      reason: "post_migration_pensieve_writes_disabled",
+      target: `project:${slug}`,
+      title: draft.title,
+      post_migration_guard: guard,
+      duration_ms: Date.now() - started,
+    }));
+    return {
+      slug,
+      path: path.join(projectRoot, ".pensieve", `${slug}.md`),
+      status: "rejected",
+      reason: "post_migration_pensieve_writes_disabled",
+      auditPath,
+      ...resultAuditFields(opts, draft.sessionId),
+    };
+  }
   const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
   const resultCtx = resultAuditFields(opts, draft.sessionId);
 
