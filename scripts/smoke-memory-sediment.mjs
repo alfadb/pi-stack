@@ -2210,6 +2210,47 @@ This is a cross-project review pipeline body with enough content.
         fs.rmSync(gParent, { recursive: true, force: true });
         fs.rmSync(gAbrain, { recursive: true, force: true });
       }
+
+      // --- Case h.5: compareTimestamps TZ-aware semantics ---
+      //
+      // Round 7 P1 (sonnet audit fix): three call sites (parser dedup
+      // tiebreak, llm-search sortForIndex, lint T5) used to lexicographically
+      // compare timestamp strings. That breaks across two common cases:
+      //   (a) mixed precision: "2026-05-13" (date-only, UTC midnight) vs
+      //       "2026-05-13T00:30:00.000+08:00" (= UTC 2026-05-12T16:30,
+      //       actually OLDER). String compare returns date-only < full-ISO
+      //       => abrain entry wins, but it's actually 7.5h older.
+      //   (b) cross-TZ: "2026-05-13T12:00:00.000+08:00" (= UTC 04:00) vs
+      //       "2026-05-13T06:00:00.000-05:00" (= UTC 11:00, newer).
+      //       String compare puts the +08:00 first; UTC time says -05:00
+      //       is newer.
+      //
+      // Verify compareTimestamps fixes both, and that lexicographic compare
+      // would have given the wrong answer (so we know the test is
+      // actually exercising the fix path).
+      {
+        const { compareTimestamps } = req("./memory/utils.js");
+        // Case (a): date-only is UTC midnight, full-ISO with +08:00
+        // at 00:30 local is UTC 16:30 prior day — older.
+        const a1 = "2026-05-13";
+        const a2 = "2026-05-13T00:30:00.000+08:00";
+        assert(a1.localeCompare(a2) < 0, `precondition: string compare should sort date-only < full-ISO`);
+        assert(compareTimestamps(a1, a2) > 0, `compareTimestamps should know date-only UTC midnight > UTC 16:30 prior day, got: ${compareTimestamps(a1, a2)}`);
+
+        // Case (b): cross-TZ — +08:00 noon vs -05:00 morning.
+        const b1 = "2026-05-13T12:00:00.000+08:00";  // UTC 04:00
+        const b2 = "2026-05-13T06:00:00.000-05:00";  // UTC 11:00 (newer)
+        assert(b1.localeCompare(b2) > 0, `precondition: string compare should sort +08:00 noon > -05:00 morning`);
+        assert(compareTimestamps(b1, b2) < 0, `compareTimestamps should know -05:00 morning is newer, got: ${compareTimestamps(b1, b2)}`);
+
+        // Identity / undefined handling
+        assert(compareTimestamps("2026-05-13", "2026-05-13") === 0, `equal timestamps should compare 0`);
+        assert(compareTimestamps(undefined, "2026-05-13") > 0, `undefined should sort last (positive)`);
+        assert(compareTimestamps("2026-05-13", undefined) < 0, `defined < undefined`);
+        assert(compareTimestamps(undefined, undefined) === 0, `both undefined equal`);
+        // Unparseable garbage shouldn't NaN-pollute the sort — garbage should sort last.
+        assert(compareTimestamps("not-a-date", "2026-05-13") > 0, `unparseable should sort last (positive)`);
+      }
     }
 
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));

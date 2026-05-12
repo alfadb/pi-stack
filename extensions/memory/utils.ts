@@ -116,6 +116,41 @@ export function prettyPath(absPath: string, cwd: string): string {
   return absPath;
 }
 
+/** Round 7 P1 (sonnet audit fix): compare two ISO-ish timestamp strings
+ *  semantically rather than lexicographically. Plain string compare
+ *  is wrong in two common cases:
+ *
+ *  1. **Mixed precision**: `"2026-05-13"` (date-only) lexicographically
+ *     sorts as less than `"2026-05-13T00:30:00.000+08:00"`, but the
+ *     former is UTC midnight while the latter is UTC 16:30 the day
+ *     before — actually older.
+ *  2. **Different timezones**: `"2026-05-13T12:00:00.000+08:00"` sorts
+ *     greater than `"2026-05-13T06:00:00.000-05:00"`, but the former
+ *     is UTC 04:00 and the latter is UTC 11:00 (the latter is newer).
+ *
+ *  Affects:
+ *  - `loadEntries` dedup tiebreak when same slug appears in multiple
+ *    stores (parser.ts) — wrong winner across .pensieve / abrain
+ *  - `sortForIndex` LLM stage-1 candidate ordering (llm-search.ts) —
+ *    wrong freshness signal for cross-TZ users
+ *  - `lint.ts` T5 chronological check — false-positive warnings for
+ *    cross-TZ timeline appends
+ *
+ *  Returns negative if `a < b`, positive if `a > b`, 0 if equal.
+ *  Unparseable values are treated as Infinity-sort-last to avoid
+ *  silently demoting valid timestamps below garbage. */
+export function compareTimestamps(a: string | undefined, b: string | undefined): number {
+  if (!a && !b) return 0;
+  if (!a) return 1;  // missing sorts last
+  if (!b) return -1;
+  const ta = Date.parse(a);
+  const tb = Date.parse(b);
+  if (Number.isNaN(ta) && Number.isNaN(tb)) return a.localeCompare(b);
+  if (Number.isNaN(ta)) return 1;
+  if (Number.isNaN(tb)) return -1;
+  return ta - tb;
+}
+
 export function isAbort(signal?: AbortSignal): boolean {
   return !!signal?.aborted;
 }

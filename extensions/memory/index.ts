@@ -103,6 +103,12 @@ function registerMemoryCommand(pi: ExtensionAPI) {
       const trimmed = args.trim();
       const [subcommand = "lint", ...rest] = trimmed ? trimmed.split(/\s+/) : [];
       const settings = resolveSettings();
+      // Round 7 P1 (gpt-5.5 audit fix): outer try/catch barrier. Any
+      // fs / parse / git / rebuild exception bubbling out of subcommand
+      // handlers should be presented to the user as a typed notify
+      // (subcommand + root cause), not leak as an unhandled rejection
+      // to pi's main process.
+      try {
 
       if (subcommand === "lint") {
         const targetArg = rest.join(" ").trim();
@@ -231,6 +237,10 @@ function registerMemoryCommand(pi: ExtensionAPI) {
       }
 
       ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate [--dry-run|--go] [--report] [--project=<id>] [path] OR /memory doctor-lite [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]", "warning");
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(`/memory ${subcommand} failed: ${message}`, "error");
+      }
     },
   });
 }

@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { promisify } from "node:util";
 import type { MemorySettings } from "./settings";
 import type { Jsonish, MemoryEntry, RelationEdge, StoreRef, Scope } from "./types";
-import { normalizeBareSlug, prettyPath, stableUnique, titleFromSlug, throwIfAborted } from "./utils";
+import { compareTimestamps, normalizeBareSlug, prettyPath, stableUnique, titleFromSlug, throwIfAborted } from "./utils";
 import { resolveActiveProject, abrainProjectDir } from "../_shared/runtime";
 
 const execFileAsync = promisify(execFile);
@@ -494,8 +494,15 @@ export async function loadEntries(
   const stores = resolveStores(cwd, settings);
   if (stores.length === 0) return [];
 
+  // Round 7 P1 (gpt-5.5 audit fix): identify abort errors and rethrow.
+  // Previously `.catch(() => [])` swallowed AbortError too, turning user
+  // cancellation into "no memory found" — LLMs and humans then misread
+  // the empty result as evidence of fact.
   const batches = await Promise.all(
-    stores.map((store) => scanStore(store, cwd, settings, signal).catch(() => [])),
+    stores.map((store) => scanStore(store, cwd, settings, signal).catch((err: unknown) => {
+      if (signal?.aborted || (err instanceof Error && err.name === "AbortError")) throw err;
+      return [];
+    })),
   );
   const flat = batches.flat();
 
@@ -514,9 +521,13 @@ export async function loadEntries(
     if (entry.confidence > existing.confidence) {
       seen.set(entry.slug, entry);
     } else if (entry.confidence === existing.confidence) {
-      const eu = entry.updated || entry.created || "";
-      const xu = existing.updated || existing.created || "";
-      if (eu > xu) seen.set(entry.slug, entry);
+      // Round 7 P1 (sonnet audit fix): use compareTimestamps (Date.parse-
+      // based, TZ aware) instead of string compare. Date-only vs full ISO
+      // / cross-TZ-offset values used to break tiebreak ordering across
+      // .pensieve and abrain stores.
+      const eu = entry.updated || entry.created;
+      const xu = existing.updated || existing.created;
+      if (compareTimestamps(eu, xu) > 0) seen.set(entry.slug, entry);
     }
   }
 

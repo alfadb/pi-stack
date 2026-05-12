@@ -753,15 +753,24 @@ export default function activate(pi: ExtensionAPI): void {
     async handler(args: string, ctx: { ui: { notify(message: string, type?: string): void } }): Promise<void> {
       const trimmed = args.trim();
       const sub = trimmed.split(/\s+/)[0] || "status";
-      switch (sub) {
-        case "status":
-          handleStatus(ctx.ui);
-          return;
-        case "init":
-          await handleInit(trimmed.slice("init".length).trim(), ctx.ui);
-          return;
-        default:
-          ctx.ui.notify(`/vault: unknown subcommand '${sub}'. Available: status, init`, "warning");
+      // Round 7 P1 (gpt-5.5 audit fix): outer try/catch barrier so any
+      // async throw from handleInit (gpg-file errors, age write failures,
+      // keychain access errors, fs permission errors) is presented as a
+      // user-readable notify instead of leaking as unhandled rejection.
+      try {
+        switch (sub) {
+          case "status":
+            handleStatus(ctx.ui);
+            return;
+          case "init":
+            await handleInit(trimmed.slice("init".length).trim(), ctx.ui);
+            return;
+          default:
+            ctx.ui.notify(`/vault: unknown subcommand '${sub}'. Available: status, init`, "warning");
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(`/vault ${sub} failed: ${message}`, "error");
       }
     },
   });

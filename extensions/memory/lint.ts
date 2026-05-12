@@ -11,7 +11,7 @@ import {
   listFilesWithRg,
   walkMarkdownFiles,
 } from "./parser";
-import { prettyPath, throwIfAborted } from "./utils";
+import { compareTimestamps, prettyPath, throwIfAborted } from "./utils";
 
 export type LintSeverity = "error" | "warning";
 
@@ -185,7 +185,13 @@ export function lintMarkdown(raw: string, file?: string): LintIssue[] {
     }
 
     for (let i = 1; i < dates.length; i++) {
-      if (dates[i].date < dates[i - 1].date) {
+      // Round 7 P1 (sonnet audit fix): use compareTimestamps so cross-TZ
+      // timeline appends don't trigger false-positive T5 warnings. A user
+      // who travels UTC+8 → UTC-5 and appends a row will produce string
+      // `"2026-05-12T15:30:00.000-05:00"` which lexicographically sorts
+      // less than `"2026-05-12T23:00:00.000+08:00"` (the earlier row),
+      // but is actually 5.5h newer in UTC.
+      if (compareTimestamps(dates[i].date, dates[i - 1].date) < 0) {
         pushIssue(issues, {
           rule: "T5 timeline-chronological",
           severity: "warning",

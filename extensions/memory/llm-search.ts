@@ -3,7 +3,7 @@ import type { MemorySettings, ThinkingLevel } from "./settings";
 import type { MemoryEntry, SearchFilters, SearchParams } from "./types";
 import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
-import { clamp, normalizeBareSlug, stableUnique } from "./utils";
+import { clamp, compareTimestamps, normalizeBareSlug, stableUnique } from "./utils";
 import { memorySearchMetricsPath } from "../_shared/runtime";
 
 function logSearchMetrics(entry: Record<string, unknown>, projectRoot?: string): void {
@@ -171,7 +171,11 @@ function sortForIndex(a: MemoryEntry, b: MemoryEntry): number {
   if (a.confidence !== b.confidence) return b.confidence - a.confidence;
   const ad = entryDate(a);
   const bd = entryDate(b);
-  if (ad !== bd) return bd.localeCompare(ad);
+  // Round 7 P1 (sonnet audit fix): use compareTimestamps for TZ-aware
+  // ordering. Cross-TZ-offset and date-only-vs-full-ISO comparisons used
+  // to silently reverse freshness signals to LLM stage-1 ranking.
+  // Note `bd, ad` order: we want newer entries first (descending).
+  if (ad !== bd) return compareTimestamps(bd, ad);
   return a.slug.localeCompare(b.slug);
 }
 
