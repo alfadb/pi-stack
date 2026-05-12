@@ -49,8 +49,9 @@ alfadb/pi-astack/
 │   │   ├── 0013-asymmetric-trust-three-lanes.md          # Lane A/B/C/D trust tier (2026-05-08)；Lane B/D 被 ADR 0014 失效
 │   │   ├── 0014-abrain-as-personal-brain.md              # ✅ ~/.abrain 重定位为数字孪生七区结构 (2026-05-09, v1.4)
 │   │   ├── 0015-memory-search-llm-driven-retrieval.md    # ✅ memory_search 双阶段 LLM rerank (2026-05-10, Accepted; Phase 0/1 implemented)
-│   │   └── 0016-sediment-as-llm-curator.md               # ✅ sediment 从 gate-heavy extractor 转向 LLM curator (2026-05-10)
-│   ├── brain-redesign-spec.md         # ✅ ADR 0014 详细规范 (v1.3) — abrain 七区拓扑/vault 双层/Lane G/V
+│   │   ├── 0016-sediment-as-llm-curator.md               # ✅ sediment 从 gate-heavy extractor 转向 LLM curator (2026-05-10)
+│   │   └── 0017-project-binding-strict-mode.md           # ✅ B4.5 设计接受：.abrain-project.json + registry + local-map strict binding（待实施）
+│   ├── brain-redesign-spec.md         # ✅ ADR 0014/0017 详细规范 — abrain 七区拓扑/vault 双层/Lane G/V + strict project binding
 │   └── migration/
 │       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6（Phase 2 起部分被 ADR 0014 重新规划）
 │       ├── apply-checklist.md         # 单文件 migration apply/restore 操作手册
@@ -112,7 +113,7 @@ alfadb/pi-astack/
 │   │   └── vault-bash.ts              # boot-aware `$VAULT_` / `$PVAULT_` / `$GVAULT_` 注入（0600 env file + `trap rm -f` 自清理，stdout 默认不回流 LLM）
 │   ├── _shared/                       # ✅ 跨扩展 helpers
 │   │   ├── footer-status.ts           # 统一 footer status keys（ordered, dispatch state machine, model-curator total count）
-│   │   └── runtime.ts                 # local-tz timestamp / .pi-astack/<module>/ path / appendAudit
+│   │   └── runtime.ts                 # local-tz timestamp / .pi-astack/<module>/ path / appendAudit / active-project resolver（B4.5 后迁至 strict manifest+registry+local-map）
 │   └── browse/                        # [计划] from pi-gstack
 │
 ├── skills/                            # [计划] pi 技能（19 gstack skills + memory-wand）
@@ -160,7 +161,7 @@ v7 markdown+git 记忆架构的只读 Facade。注册 4 个 LLM-facing 工具：
 Human-facing 命令：
 - `/memory lint [path]`：执行 T1-T10 Timeline/frontmatter lint，不注册为 LLM tool
 - `/memory doctor-lite [path]`：汇总 lint / graph / index / migration / sediment auto-write audit 状态
-- `/memory migrate --dry-run [--report] [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划；`--report` 写 `.pi-astack/memory/migration-report.md`
+- `/memory migrate --dry-run [--report] [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划；`--report` 写 `.pi-astack/memory/migration-report.md`。B4.5（ADR 0017）后，迁移必须先 `/abrain bind --project=<id>`，`/memory migrate` 不再接受 `--project`。
 - `/memory check-backlinks [path]`：in-memory 构建 graph snapshot，报告 dead links 与缺失 symmetric backlinks
 - `/memory rebuild --graph [path]`：写入 derived graph index（project: `.index/graph.json`；world: `.state/index/graph.json`）
 - `/memory rebuild --index [path]`：写入 generated markdown index（`_index.md`）

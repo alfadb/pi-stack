@@ -1,7 +1,7 @@
 # Migration — `.pensieve/` → `~/.abrain/projects/<id>/`
 
-> **状态**：✅ B4 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，**18 个 smoke 场景**覆盖（12 个 B4 主路径 + 6 个边界场景：slug collision / SSH git remote 推断 / HTTPS git remote 推断 / parent commit pathspec 窄化 / abrainPreSha=null fallback / 部分失败混合）。另外 sediment 写入锁 stale-lock reclaim 另有 4 个 smoke 场景（g.1-g.4）不计入本表。接下来是手动逐仓迁移（§4 优先级表）。
-> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [brain-redesign-spec.md](../brain-redesign-spec.md)
+> **状态**：✅ B4 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，**18 个 smoke 场景**覆盖。**B4.5 Project Binding Strict Mode 已接受、待实施**（[ADR 0017](../adr/0017-project-binding-strict-mode.md)）：迁移前必须 `/abrain bind --project=<id>`；`/memory migrate` 从 active binding 读取 project id；`--project` 参数将被废弃；未 bound / path 未确认时拒绝迁移。接下来是先实施 B4.5，再手动逐仓迁移（§4 优先级表）。
+> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [ADR 0017](../adr/0017-project-binding-strict-mode.md) / [brain-redesign-spec.md](../brain-redesign-spec.md)
 > **前置**：[vault-bootstrap.md](vault-bootstrap.md)（vault 基础设施已 ship，P0a-P0c.read）
 
 ## 1. 模型：per-repo 一次性迁移
@@ -13,20 +13,28 @@
 | 维度 | 决策 | 理由 |
 |---|---|---|
 | **粒度** | 单仓一次性（不 per-file，不全局批处理） | 14 仓挨个迁，每仓单一 commit，逆向只看那个 commit |
-| **触发** | 用户在仓 cwd 内主动 `/memory migrate --go` | 不预定 migration window，不锁所有仓，按用户节奏 |
+| **触发** | 用户在仓 cwd 内先 `/abrain bind --project=<id>`，再主动 `/memory migrate --go` | 不预定 migration window，不锁所有仓，按用户节奏；身份决定不由 migrate 负责 |
 | **回滚网** | git working tree clean 作为 precondition + `git checkout HEAD --` 作为唯一逆向路径 | 13/14 仓已 git tracked，数据天然有逆向网；自定义 backup 反而与 git 重复 |
 | **symlink** | 不留 | runtime resolver 在 sediment writer 内部定位新路径；symlink 是另一种 split-brain 风险源 |
 | **dual-read 期** | memory facade 长期 dual-read `.pensieve/` + `~/.abrain/projects/<id>/`（已 ship） | 单仓迁完即 forward-only；其他仓未迁仍读旧路径，无需统一切换 |
 
-## 2. precondition（`--go` 强制检查，dry-run 跳过）
+## 2. precondition（`--go` 强制检查，dry-run 也必须能解析 target project）
+
+B4.5 后，迁移前必须先完成 strict binding：
+
+```text
+/abrain bind --project=<id>
+/memory migrate --dry-run
+/memory migrate --go
+```
 
 执行 `/memory migrate --go` 验证：
 
-1. **父仓 git working tree clean**（`git status --porcelain` 为空）—— dirty 时阻止，提示先 commit
-2. **`.pensieve/` 内文件 tracked > 0** —— sub2api 这种 untracked 仓需要先 `git add .pensieve && git commit` 否则失去 git 回滚网
-3. **`.pensieve/` 内有至少 1 个用户 entry­**（排除 `.state/`/`.index/` 下的派生文件）——避免幂等双迁时跟仓中只剩 derived 文件仍提交一个空迁移 commit
-4. **`~/.abrain` working tree clean** —— 确保 abrain 一侧 mv 后能干净 commit、出问题能用 preflight 捕获的 `abrainPreSha` 精确 rollback（详 §5；不是 `HEAD~1` —— abrain 有 N+1 commits）
-5. **projectId 可推断**。优先级：`--project=<id>` 显式 override > git remote origin（`github.com/alfadb/pi` → `alfadb-pi`）> 父仓 cwd 末二段拼接（`~/work/uamp/full` → `uamp-full`，避免多个 `full` 冲突）。最终 id 走 `validateAbrainProjectId`，不过则 `--go` 拒绝。
+1. **active project binding 状态为 `bound`** —— 当前仓必须有合法 `.abrain-project.json`，`~/.abrain/projects/<id>/_project.json` 必须存在且匹配，当前 path 必须已登记在 `~/.abrain/.state/projects/local-map.json`。未 bound / path_unconfirmed / registry_missing 均拒绝。`/memory migrate --project=<id>` 被废弃并拒绝。
+2. **父仓 git working tree clean**（`git status --porcelain` 为空）—— dirty 时阻止，提示先 commit
+3. **`.pensieve/` 内文件 tracked > 0** —— sub2api 这种 untracked 仓需要先 `git add .pensieve && git commit` 否则失去 git 回滚网
+4. **`.pensieve/` 内有至少 1 个用户 entry­**（排除 `.state/`/`.index/` 下的派生文件）——避免幂等双迁时跟仓中只剩 derived 文件仍提交一个空迁移 commit
+5. **`~/.abrain` working tree clean** —— 确保 abrain 一侧 mv 后能干净 commit、出问题能用 preflight 捕获的 `abrainPreSha` 精确 rollback（详 §5；不是 `HEAD~1` —— abrain 有 N+1 commits）
 
 **隐藏 hard-fail（代码 sanity check，不被上述 5 项覆盖）**：preflightMigrationGo 另外还会拒绝以下场景——这些项不可能被用户 bypass，不列为独立 preflight，但调试时需要知道它们存在：
 
@@ -35,9 +43,9 @@
 - 父仓 root 不存在（`gitToplevel(parentRepoRoot)` 返回 null，表明 cwd 不在 git 仓内）
 - `abrainHome` 是普通目录而非 git repo（`gitIsClean` 不能判定，后续 commit/rollback 会失败）
 
-加上这 4 项，`/memory migrate --go` 实际运行时总共检查 9 项。spec 上面只列 5 项是因为那五项是「用户可能遇到 + 能够手工修复」的路径，这四项是 sanity guard。
+加上这 4 项，B4.5 后 `/memory migrate --go` 实际运行时总共检查 9 项。spec 上面只列 5 项是因为那五项是「用户可能遇到 + 能够手工修复」的路径，这四项是 sanity guard。
 
-dry-run（`/memory migrate` 默认 / `/memory migrate --dry-run`）仅列出 legacy entry、不检 precondition；它是护栏前的调查工具，不是迁移预览。要看 per-repo 迁移的 dry-run，要么手动检查上述 5 项，要么直接 `--go` 让它 fail-fast。
+dry-run（`/memory migrate` 默认 / `/memory migrate --dry-run`）也必须先解析到 `bound` active project，否则无法可靠渲染 target_path。它仍不执行 git clean / tracked 等写前 precondition，但不会在未绑定项目上展示猜测出来的目标目录。
 
 ## 3. 迁移动作（`/memory migrate --go` 内部步骤）
 
@@ -151,11 +159,16 @@ B3+B7: per-file migration substrate 剥离 (✅ shipped 2026-05-12)
 
 B4: /memory migrate --go (✅ shipped 2026-05-12)
   → extensions/memory/migrate-go.ts；preflight + frontmatter 归一化 + pipeline 路由
-  → 18 个 smoke 场景覆盖（12 主路径：happy / dirty preflight ×2 / legacy frontmatter / .index .state 预过滤 / commits / pre-SHA rollback / 幂等 / + 6 边界：slug collision / SSH remote / HTTPS remote / pathspec 窄化 / abrainPreSha=null / 部分失败混合）
+  → 18 个 smoke 场景覆盖（12 主路径：happy / dirty preflight ×2 / legacy frontmatter / .index .state 预过滤 / commits / pre-SHA rollback / 幂等 / + 6 边界）
+
+B4.5: Project Binding Strict Mode (accepted, pending)
+  → /abrain bind --project=<id> 写 .abrain-project.json + projects/<id>/_project.json + .state/projects/local-map.json
+  → /memory migrate 不再接受 --project；未 bound / path_unconfirmed / registry_missing 拒绝
+  → sediment project writes 与 project vault scope 同用 strict active project 状态
 
 B5: writer cutover (pending)
   → sediment writeProjectEntry 走 abrain projects 路径而非 <cwd>/.pensieve。
-  → ­14 仓完成迁移后拍板。
+  → B4.5 strict binding + 14 仓完成迁移后拍板。
 
 P0d: vault wizard / mask input / .env import (pending)
   → 与 B5 独立，可并行
