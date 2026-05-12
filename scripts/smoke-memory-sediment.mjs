@@ -1828,6 +1828,85 @@ This is a cross-project review pipeline body with enough content.
         );
         fs.rmSync(gAbrain2, { recursive: true, force: true });
       }
+
+      // --- Case g.5: writeAbrainWorkflow TOCTOU race — lock-held dedupe re-check ---
+      // Round 6 deepseek-v4-pro P0: simulate two concurrent writers that both
+      // pass the pre-lock existsSync, then the file is created before the
+      // second writer takes the lock. The second writer MUST detect the
+      // duplicate inside the lock and reject with reason="duplicate_slug_race",
+      // not silently overwrite via atomicWrite → fs.rename.
+      {
+        const gAbrain3 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-workflow-toctou-abrain-"));
+        execFileSync("git", ["-C", gAbrain3, "init", "-q"]);
+        execFileSync("git", ["-C", gAbrain3, "config", "user.email", "smoke@pi-astack.local"]);
+        execFileSync("git", ["-C", gAbrain3, "config", "user.name", "pi-astack smoke"]);
+        execFileSync("git", ["-C", gAbrain3, "config", "commit.gpgsign", "false"]);
+        execFileSync("git", ["-C", gAbrain3, "commit", "-q", "--allow-empty", "-m", "init"]);
+
+        // Pre-create target so the lock-held existsSync trips on entry.
+        const slug = "run-when-toctou-race";
+        const wfDir = path.join(gAbrain3, "workflows");
+        fs.mkdirSync(wfDir, { recursive: true });
+        const target = path.join(wfDir, `${slug}.md`);
+        const preExisting = `---\nid: ${slug}\nkind: pipeline\n---\n# pre-existing\n`;
+        fs.writeFileSync(target, preExisting);
+
+        // To exercise the *lock-held* path (not the cheap pre-lock check),
+        // we patch writer-internal file existence visibility by removing the
+        // target *just before* the pre-lock check sees it, then putting it
+        // back. The simplest way to do that in a JS smoke is to use a slug
+        // the pre-lock check won't see: we re-rename pre and post.
+        const stash = target + ".stash";
+        fs.renameSync(target, stash);
+
+        // Schedule re-creation right at lock-acquire time. Since writer's
+        // pre-lock existsSync runs synchronously before any awaits in this
+        // smoke loop, we manually re-create the target right after kicking
+        // off the write but before the lock-held check by yielding once.
+        const writePromise = writeAbrainWorkflow(
+          {
+            title: "TOCTOU race second writer",
+            slug,
+            trigger: "smoke trigger phrase for race",
+            body: "## Task Blueprint\n\nSecond writer for TOCTOU race.",
+            crossProject: true,
+            tags: ["smoke"],
+            sessionId: "smoke-workflow-toctou",
+          },
+          { abrainHome: gAbrain3, settings: { ...lockSettings, gitCommit: false } },
+        );
+        // Yield to the microtask queue so writer reaches lint/normalize
+        // phase, then place the file back so the lock-held existsSync trips.
+        await new Promise((r) => setImmediate(r));
+        fs.renameSync(stash, target);
+
+        const r = await writePromise;
+        assert(
+          r.status === "rejected",
+          `writeAbrainWorkflow TOCTOU race must reject second writer; got status=${r.status}`,
+        );
+        // The reason may be either "duplicate_slug" (pre-lock check caught it)
+        // or "duplicate_slug_race" (lock-held re-check caught it). Both are
+        // correct — dedupe MUST trigger somewhere. What we explicitly assert
+        // against is silent overwrite.
+        // Either "duplicate_slug" (pre-lock check caught it) or
+        // "duplicate_slug_race" (lock-held re-check caught it) is correct.
+        // In practice this smoke exercises the *race* path because the
+        // target is renamed away before the pre-lock existsSync and put
+        // back during the lock-acquire await window. The byte-identical
+        // file assert below is the canonical guarantee.
+        assert(
+          /duplicate_slug/.test(r.reason || ""),
+          `TOCTOU race rejection should mention duplicate_slug, got reason=${r.reason}`,
+        );
+        // Verify the pre-existing file is byte-identical — i.e., NOT overwritten.
+        const onDisk = fs.readFileSync(target, "utf-8");
+        assert(
+          onDisk === preExisting,
+          `TOCTOU race: pre-existing workflow file was overwritten! diff length original=${preExisting.length} after=${onDisk.length}`,
+        );
+        fs.rmSync(gAbrain3, { recursive: true, force: true });
+      }
     }
 
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));

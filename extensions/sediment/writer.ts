@@ -1324,6 +1324,34 @@ export async function writeAbrainWorkflow(
   let lock: LockHandle | undefined;
   try {
     lock = await acquireAbrainWorkflowLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
+    // Lock-held duplicate re-check (mirror writeProjectEntry @ ~882).
+    //
+    // The first existsSync above is best-effort and cheap, but it runs
+    // *outside* the lock — two concurrent writers can both pass it,
+    // then race past the lock barrier and silently overwrite each other
+    // via atomicWrite → fs.rename. Re-checking here under the lock is
+    // the only correct dedupe surface. Round 6 deepseek-v4-pro P0:
+    // discovered by cross-file pattern audit (writeProjectEntry had the
+    // re-check, writeAbrainWorkflow did not).
+    if (fsSync.existsSync(target)) {
+      const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
+        operation: "reject",
+        reason: "duplicate_slug_race",
+        target: crossProject ? `workflow:${slug}` : `project:${projectId}:workflow:${slug}`,
+        duration_ms: Date.now() - started,
+        ...resultCtx,
+      });
+      return {
+        slug,
+        path: target,
+        status: "rejected",
+        reason: "duplicate_slug_race",
+        auditPath,
+        crossProject,
+        projectId,
+        ...resultCtx,
+      };
+    }
     await atomicWrite(target, markdown);
     const git = await gitCommitAbrain(abrainHome, target, slug);
     const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
