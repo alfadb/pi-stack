@@ -915,10 +915,29 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   // writer entry points to reject further .pensieve mutations until B5
   // cutover ships; it carries the projectId so audit rows identify the
   // canonical abrain destination for future writes.
-  await writePostMigrationGuard(parentRepoRoot, {
-    migratedAt: migrationTimestamp,
-    projectId,
-  });
+  // Round 9 P1 (deepseek R9 P2-1 fix): wrap writePostMigrationGuard in
+  // try/catch. If `fs.writeFile` to `.pensieve/MIGRATED_TO_ABRAIN` fails
+  // (ENOSPC, EROFS), the migration is already past per-entry writes and
+  // git rm — throwing here strands the user in a half-state with no
+  // commits made (deletions staged, abrain entries written, no guard,
+  // no rollback hint).
+  //
+  // Guard is a convenience for B5 sediment cutover (rejects post-
+  // migration .pensieve writes). NOT a data integrity invariant — the
+  // abrain side has canonical truth. Best-effort failure: log to audit
+  // and proceed to commits. If guard is missing, post-migration
+  // sediment writes go to old .pensieve until B5 ships, which is the
+  // pre-R7-P0-D behavior anyway.
+  let guardPath: string | null = null;
+  let guardError: string | null = null;
+  try {
+    guardPath = await writePostMigrationGuard(parentRepoRoot, {
+      migratedAt: migrationTimestamp,
+      projectId,
+    });
+  } catch (e: any) {
+    guardError = e instanceof Error ? e.message : String(e);
+  }
   // Round 8 P1 (sonnet R8 audit fix): write a single migration audit row
   // to the abrain-side sediment audit log so post-migration forensics
   // can reconstruct "which entries came from which project's .pensieve
@@ -958,6 +977,11 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       })),
       entries_total: entries.length,
       entries_truncated: entries.length > 200,
+      // R9 P1: record whether the post-migration guard was successfully
+      // written. Operators can grep audit for `guard_write_failed` rows
+      // to find partial migrations.
+      guard_written: guardPath !== null,
+      ...(guardError ? { guard_error: guardError.slice(0, 200) } : {}),
     };
     await fs.appendFile(auditPath, JSON.stringify(row) + "\n", "utf-8");
   } catch {

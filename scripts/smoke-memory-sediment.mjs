@@ -2489,6 +2489,13 @@ This is a cross-project review pipeline body with enough content.
       // ENTRY_STATUSES.
       {
         const wfRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-wf-enum-"));
+        // R9 P1 (opus P2-5 + deepseek P1-3 surface): smoke fixture needs
+        // either git init OR settings.gitCommit=false. The new R9 P1
+        // orphan-cleanup behavior rejects writes whose gitCommit returns
+        // null (orphan file is unlinked + audit row written), so wfRoot
+        // without .git was previously "created" with gitCommit=null and
+        // now correctly returns rejected/git_commit_failed.
+        const wfSettings = { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false };
         const wfBad = await writeAbrainWorkflow(
           {
             title: "Bad Status Workflow",
@@ -2497,7 +2504,7 @@ This is a cross-project review pipeline body with enough content.
             crossProject: true,
             status: "deleted",  // not in ENTRY_STATUSES
           },
-          { abrainHome: wfRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "workflow" } },
+          { abrainHome: wfRoot, settings: wfSettings, auditContext: { lane: "workflow" } },
         );
         assert(wfBad.status === "rejected", `bad workflow status must reject, got: ${wfBad.status}`);
         assert(
@@ -2514,9 +2521,48 @@ This is a cross-project review pipeline body with enough content.
             crossProject: true,
             status: "active",
           },
-          { abrainHome: wfRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "workflow" } },
+          { abrainHome: wfRoot, settings: wfSettings, auditContext: { lane: "workflow" } },
         );
         assert(wfOk.status === "created", `good workflow status should create: ${wfOk.status} / ${wfOk.reason}`);
+
+        // --- R9 P1 (deepseek P1-3): gitCommit null -> orphan cleanup ---
+        // Init wfRoot as a git repo so gitCommit attempts run. But there
+        // is no remote and the repo is fresh, so git commit will succeed.
+        // To force gitCommitAbrain to return null, point gitCommit to a
+        // non-git path — simulate by writing into a directory missing .git
+        // BUT enabling gitCommit so gitCommitAbrain's `git add` will fail.
+        const wfFailRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-wf-orphan-"));
+        // do NOT git init: gitCommitAbrain's `git -C <root> add ...` will
+        // fail because <root> is not a git repo.
+        const wfFailSettings = { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: true };
+        const wfOrphan = await writeAbrainWorkflow(
+          {
+            title: "Orphan Cleanup Probe",
+            trigger: "on test",
+            body: "this body is long enough for workflow validation gate",
+            crossProject: true,
+            status: "active",
+          },
+          { abrainHome: wfFailRoot, settings: wfFailSettings, auditContext: { lane: "workflow" } },
+        );
+        assert(
+          wfOrphan.status === "rejected" && wfOrphan.reason === "git_commit_failed",
+          `R9 P1: gitCommit-null path must reject + cleanup, got: ${JSON.stringify(wfOrphan)}`,
+        );
+        // R9 P1: file must be unlinked (no orphan on disk)
+        const orphanTarget = path.join(wfFailRoot, "workflows", "orphan-cleanup-probe.md");
+        assert(
+          !fs.existsSync(orphanTarget),
+          `R9 P1: orphan file must be cleaned, but still exists: ${orphanTarget}`,
+        );
+        // R9 P1: audit row must record the orphan cleanup
+        const wfAuditPath = path.join(wfFailRoot, ".state", "sediment", "audit.jsonl");
+        if (fs.existsSync(wfAuditPath)) {
+          const rows = fs.readFileSync(wfAuditPath, "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
+          const orphanRow = rows.find((r) => r.reason === "git_commit_failed_orphan_cleaned");
+          assert(orphanRow, `R9 P1: audit must contain git_commit_failed_orphan_cleaned row, got: ${rows.map((r) => r.operation + "/" + (r.reason || "")).join(",")}`);
+        }
+        fs.rmSync(wfFailRoot, { recursive: true, force: true });
         fs.rmSync(wfRoot, { recursive: true, force: true });
       }
 

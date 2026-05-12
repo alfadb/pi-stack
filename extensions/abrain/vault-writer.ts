@@ -452,6 +452,15 @@ export async function writeSecret(opts: WriteSecretOptions): Promise<{ encrypted
   }
 }
 
+// Round 9 P1 (deepseek R9 P1-1 fix): all vault subprocesses (age,
+// shred, decrypt, keygen) used to have NO timeout. If age blocks on a
+// /dev/tty read (e.g. passphrase-only backend without TTY) or shred
+// stalls on a slow disk, pi's main thread hangs forever in `await`.
+// 30s is generous for age/shred on local fs, fail-loud beats infinite
+// hang. SIGKILL is intentional: SIGTERM may not interrupt a stalled
+// /dev/tty read.
+const VAULT_SUBPROCESS_TIMEOUT_MS = 30_000;
+
 /** Run `age -r <pubkey>` with input via stdin, writing envelope to outPath. */
 function runAgeEncryptToFile(pubkey: string, input: Buffer, outPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -462,10 +471,17 @@ function runAgeEncryptToFile(pubkey: string, input: Buffer, outPath: string): Pr
       stdio: ["pipe", "ignore", "pipe"],
     });
     let stderr = "";
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+    }, VAULT_SUBPROCESS_TIMEOUT_MS);
     child.stderr?.on("data", (b: Buffer) => (stderr += b.toString("utf8")));
-    child.on("error", reject);
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
     child.on("close", (code) => {
-      if (code === 0) resolve();
+      clearTimeout(timer);
+      if (timedOut) reject(new Error(`age -r timed out after ${VAULT_SUBPROCESS_TIMEOUT_MS}ms (no TTY? backend misconfigured?)`));
+      else if (code === 0) resolve();
       else reject(new Error(`age -r failed: ${stderr.trim() || `exit ${code}`}`));
     });
     if (child.stdin) {
@@ -575,8 +591,21 @@ export async function forgetSecret(abrainHome: string, scope: VaultScope, key: s
       try {
         await new Promise<void>((res, rej) => {
           const c = spawn("shred", ["-u", encryptedPath], { stdio: "ignore" });
-          c.on("error", rej);
-          c.on("close", (code) => code === 0 ? res() : rej(new Error(`shred exit ${code}`)));
+          // R9 P1: 30s timeout (above). shred on a huge file or slow
+          // disk could theoretically take this long; if so it's better
+          // to fall through to unlink than hang the user.
+          let timedOut = false;
+          const timer = setTimeout(() => {
+            timedOut = true;
+            try { c.kill("SIGKILL"); } catch { /* already exited */ }
+          }, VAULT_SUBPROCESS_TIMEOUT_MS);
+          c.on("error", (e) => { clearTimeout(timer); rej(e); });
+          c.on("close", (code) => {
+            clearTimeout(timer);
+            if (timedOut) rej(new Error(`shred timed out after ${VAULT_SUBPROCESS_TIMEOUT_MS}ms—falling back to unlink`));
+            else if (code === 0) res();
+            else rej(new Error(`shred exit ${code}`));
+          });
         });
       } catch (e: unknown) {
         shredErr = e instanceof Error ? e.message : String(e);

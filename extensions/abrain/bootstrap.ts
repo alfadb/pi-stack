@@ -44,21 +44,44 @@ export interface KeyGenResult {
  * Resolves with { stdout, stderr, code } on exit. Rejects on spawn error.
  * Does NOT reject on non-zero exit — caller decides how to handle.
  */
+// Round 9 P1 (deepseek R9 P1-1 fix): execCapture is the injected exec
+// behind keychain.ts — it runs age / gpg / security / secret-tool /
+// pass during /vault init. Any of these can hang indefinitely:
+//   - gpg without GPG_TTY set prompts for passphrase (blocks)
+//   - age -p (passphrase backend) reads /dev/tty (blocks without TTY)
+//   - secret-tool waits for unlocked D-Bus secret service
+//   - macOS `security add-generic-password` prompts on first use
+// 60s timeout: longer than vault-writer/reader (30s) because keychain
+// bootstrap is interactive-first-use and some backends need real time
+// for cryptographic generation (age-keygen / gpg --gen-key).
+const BOOTSTRAP_SUBPROCESS_TIMEOUT_MS = 60_000;
+
 export function execCapture(
   cmd: string,
   args: string[],
-  opts: SpawnOptions & { input?: Buffer | string } = {},
+  opts: SpawnOptions & { input?: Buffer | string; timeoutMs?: number } = {},
 ): Promise<{ stdout: Buffer; stderr: Buffer; code: number | null }> {
   return new Promise((resolve, reject) => {
-    const { input, ...spawnOpts } = opts;
+    const { input, timeoutMs, ...spawnOpts } = opts;
     const stdio: SpawnOptions["stdio"] = input != null ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"];
     const child = spawn(cmd, args, { ...spawnOpts, stdio });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    const limit = timeoutMs ?? BOOTSTRAP_SUBPROCESS_TIMEOUT_MS;
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+    }, limit);
     child.stdout?.on("data", (b: Buffer) => stdout.push(b));
     child.stderr?.on("data", (b: Buffer) => stderr.push(b));
-    child.on("error", reject);
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
     child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        reject(new Error(`${cmd} timed out after ${limit}ms (no TTY for passphrase prompt? backend unavailable?)`));
+        return;
+      }
       resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code });
     });
     if (input != null && child.stdin) {

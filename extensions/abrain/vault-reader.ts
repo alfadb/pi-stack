@@ -50,6 +50,13 @@ export function vaultFilePath(abrainHome: string, scope: VaultScope, key: string
   return path.join(vaultDirForScope(abrainHome, scope), `${key}.md.age`);
 }
 
+// Round 9 P1 (deepseek R9 P1-1 fix): default decrypt exec previously
+// had no timeout. Backends like gpg / secret-tool / pass / age may
+// stall on gpg-agent prompts when GPG_TTY isn't set, or on
+// secret-service when D-Bus is wedged. 30s fail-loud beats infinite
+// hang on pi main thread.
+const VAULT_READ_SUBPROCESS_TIMEOUT_MS = 30_000;
+
 function defaultExec(cmd: string, args: string[], opts?: { input?: Buffer | string; cwd?: string }): Promise<{ stdout: Buffer; stderr: Buffer; code: number | null }> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, {
@@ -58,10 +65,19 @@ function defaultExec(cmd: string, args: string[], opts?: { input?: Buffer | stri
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill("SIGKILL"); } catch { /* already exited */ }
+    }, VAULT_READ_SUBPROCESS_TIMEOUT_MS);
     child.stdout?.on("data", (b: Buffer) => stdout.push(b));
     child.stderr?.on("data", (b: Buffer) => stderr.push(b));
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code }));
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (timedOut) reject(new Error(`${cmd} timed out after ${VAULT_READ_SUBPROCESS_TIMEOUT_MS}ms (gpg-agent prompt? D-Bus wedged?)`));
+      else resolve({ stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code });
+    });
     if (opts?.input !== undefined && child.stdin) child.stdin.end(opts.input);
   });
 }

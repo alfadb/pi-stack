@@ -1566,6 +1566,40 @@ export async function writeAbrainWorkflow(
     }
     await atomicWrite(target, markdown);
     const git = await gitCommitAbrain(abrainHome, target, slug);
+    // Round 9 P1 (deepseek R9 P1-3 fix): gitCommitAbrain swallows all
+    // exceptions and returns null on any git failure (index.lock race,
+    // commit hook fail, EACCES). Before this fix, a null git left an
+    // orphan untracked file on disk. Subsequent writeAbrainWorkflow on
+    // the same slug saw the file via fsSync.existsSync(target) and
+    // returned status="rejected" reason="duplicate_slug_race" — the
+    // entry was forever wedged. Detect null git + treat as a write
+    // failure: unlink the orphan, emit audit row with reason, and
+    // return rejected so caller can retry.
+    if (git === null && opts.settings.gitCommit) {
+      try { await fs.unlink(target); } catch { /* file may already be gone */ }
+      const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
+        operation: "error",
+        target: path.relative(abrainHome, target),
+        cross_project: crossProject,
+        project_id: projectId,
+        reason: "git_commit_failed_orphan_cleaned",
+        lint_result: "pass",
+        lint_warnings: lintWarnings,
+        git_commit: null,
+        duration_ms: Date.now() - started,
+        ...resultCtx,
+      });
+      return {
+        slug,
+        path: target,
+        status: "rejected",
+        reason: "git_commit_failed",
+        auditPath,
+        crossProject,
+        projectId,
+        ...resultCtx,
+      };
+    }
     const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
       operation: "create",
       target: path.relative(abrainHome, target),
