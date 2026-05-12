@@ -92,7 +92,6 @@ alfadb/pi-astack/
 │   │   ├── extractor.ts               # deterministic explicit MEMORY block extractor (fence-aware)
 │   │   ├── llm-extractor.ts           # LLM extractor prompt (Trust Boundary + durability test) + model call + parser
 │   │   ├── curator.ts                 # ADR 0016 memory_search-powered curator loop (create/update/merge/archive/supersede/delete/skip)
-│   │   ├── migration.ts               # /sediment migrate-one/migration-backups legacy migration plan/apply/restore/list
 │   │   ├── validation.ts              # schema-only draft runtime validation
 │   │   ├── dedupe.ts                  # storage-only slug collision detection（semantic dedupe 由 curator 处理）
 │   │   ├── sanitizer.ts               # sensitive-info fail-closed (jwt/pem/aws/url/email/ip/$HOME)
@@ -133,7 +132,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
-| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + migrate-one + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator；writer 按需创建 `.pensieve/`；bg 在飞时不推进 checkpoint/不写 skip audit；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控） | Phase 1.4 A1+A2+A3 + ADR 0016 |
+| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator + B1 abrain workflows lane writer；writer 按需创建 `.pensieve/`；bg 在飞时不推进 checkpoint/不写 skip audit；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控。原 per-file `migration.ts` 基底于 2026-05-12 剥离，per-repo 迁移走 ADR 0014「待实施」 B4。） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
 | `extensions/abrain/` | ✅ vault P0a-c 完全 ship： backend-detect + master-key bootstrap + vaultWriter + vaultReader + /vault + /secret （default = boot-time active project，--global / --project=<id> opt-out，--all-projects 枚举） + `vault_release(key, scope?, reason?)` （pre-flight + deny-first + i18n + description rendering） + boot-aware `$VAULT_*` / `$PVAULT_*` / `$GVAULT_*` bash injection 与 default-withheld + literal redaction + read-path audit closure（release / release_denied / release_blocked / bash_inject / bash_inject_block / bash_output_release / bash_output_withhold） | ADR 0014 §D4 P0a/P0b/P0c.write/P0c.read + §D4 P1 project routing (2026-05-09 → 2026-05-11) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
@@ -222,8 +221,7 @@ OpenAI Responses API 生图。复用用户已有的 openai provider 配置（key
 │   ├── sediment/
 │   │   ├── audit.jsonl              # JSONL；v2 schema：本地 TZ + audit_version + pid + project_root + lane/session_id/correlation_id/candidate_id + settings_snapshot + entry_breakdown + parser_version + stage_ms
 │   │   ├── checkpoint.json          # 上次处理过的 entry_id
-│   │   ├── locks/                   # ephemeral 文件锁
-│   │   └── migration-backups/<ts>/  # /sediment migrate-one --apply 前的备份
+│   │   └── locks/                   # ephemeral 文件锁
 │   ├── memory/
 │   │   └── migration-report.md      # /memory migrate --dry-run --report 输出
 │   ├── compaction-tuner/
@@ -294,7 +292,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | `extensions/model-curator/` | alfadb（C 类迁入） | ✅ 已实现 | ✅ |
 | `extensions/model-fallback/` | alfadb（A 类永久 own） | ✅ 已实现 | ✅ |
 | `extensions/memory/` | alfadb（v7 新建） | ✅ 已实现（只读 Facade） | ✅ |
-| `extensions/sediment/` | alfadb（A 类改造） | ✅ 实现（explicit extractor + LLM auto-write LIVE + migrate-one plan/apply/restore + migration-backups + LLM semantic policy/update substrate） | ✅ |
+| `extensions/sediment/` | alfadb（A 类改造） | ✅ 实现（explicit extractor + LLM auto-write LIVE + LLM semantic policy/update substrate + B1 abrain workflows lane writer） | ✅ |
 | `extensions/browse/` | alfadb（C 类迁入） | [计划] | ✅ |
 | `skills/` | alfadb（B 类端口） | [计划] | ✅ |
 | `prompts/` | alfadb（A 类 + B 类） | [计划] | ✅ |

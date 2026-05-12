@@ -170,9 +170,9 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 >
 > **与 abrain-pensieve-migration.md 原 8-phase 计划的差异**（v7.1 修订，2026-05-12）：原 P5-P8 持锁渐进迁移 · writer cutover · symlink · 删 fallback 四个 phase 合并为 **单仓一次性迁移**（`/memory migrate --go`）：git 提供逆向网 → 不需 backup 不需 symlink；per-repo 手工执行 → 不需 8-phase 全局协调。单用户场景 14 个仓变更不频，原为多人多机设计的渐进 phase 是过度工程。
 
-关键约束：P4 之前可 **完全 revert**（git revert 即可）；P5 之后是 forward-only；P6 之后的 delta 只能走 [migration playbook §3-4](../migration/abrain-pensieve-migration.md#3-rollback-playbookp5-半成品状态) 处理。
+关键约束（v7.1 单仓一次性迁移模型）：git working tree clean 作为 precondition，迁完单仓后该仓 forward-only；取消迁移走 `git checkout HEAD~1 -- .pensieve` + abrain 側 `git reset --hard HEAD~1`，不依赖自定义 backup 子系统。详 [abrain-pensieve-migration.md §5](../migration/abrain-pensieve-migration.md#5-回滚)。
 
-预计工程：纯代码 ≈3 天 + 2 周观察期。
+预计工程：B4 实施 ≈2 日（14 仓按需手动触发迁移，不需连续观察期）。
 
 ## 审计扩展
 

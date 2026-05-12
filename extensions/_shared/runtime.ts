@@ -7,7 +7,7 @@
  *   `<projectRoot>/.pensieve/.state/...` location.
  *
  * Boundary:
- * - `.pi-astack/<module>/`  — runtime state, audit logs, locks, backups
+ * - `.pi-astack/<module>/`  — runtime state, audit logs, locks
  * - `.pensieve/`            — canonical markdown knowledge + browsable
  *                             derived views (_index.md, .index/graph.json)
  *
@@ -45,16 +45,6 @@ export function formatLocalIsoTimestamp(d: Date = new Date()): string {
   return `${year}-${month}-${day}T${hour}:${minute}:${second}.${ms}${offsetSign}${offsetHours}:${offsetMins}`;
 }
 
-/**
- * Generate a backup directory name from the local-timezone timestamp.
- * Uses dashes instead of colons (filesystem-safe) and drops the ms separator.
- *
- *   2026-05-08T14-08-38-295+08-00
- */
-export function localTimestampForFilename(d: Date = new Date()): string {
-  return formatLocalIsoTimestamp(d).replace(/:/g, "-").replace(/\./, "-");
-}
-
 /** Root for all pi-astack runtime artifacts within a given project. */
 export function piAstackRoot(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), ".pi-astack");
@@ -79,10 +69,6 @@ export function sedimentCheckpointPath(projectRoot: string): string {
 export function sedimentLocksDir(projectRoot: string): string {
   return path.join(sedimentDir(projectRoot), "locks");
 }
-export function sedimentMigrationBackupsDir(projectRoot: string): string {
-  return path.join(sedimentDir(projectRoot), "migration-backups");
-}
-
 /* -------- memory ------------------------------------------------------- */
 
 export function memoryDir(projectRoot: string): string {
@@ -133,9 +119,6 @@ export function legacySedimentCheckpointPath(projectRoot: string): string {
 }
 export function legacySedimentLocksDir(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), ".pensieve", ".state", "locks");
-}
-export function legacySedimentMigrationBackupsDir(projectRoot: string): string {
-  return path.join(path.resolve(projectRoot), ".pensieve", ".state", "migration-backups");
 }
 export function legacyMemoryMigrationReportPath(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), ".pensieve", ".state", "migration-report.md");
@@ -579,5 +562,5 @@ export async function ensureSedimentLegacyMigrated(projectRoot: string): Promise
 
   await migrateAuditFile(legacySedimentAuditPath(root), sedimentAuditPath(root));
   await migrateCheckpointFile(legacySedimentCheckpointPath(root), sedimentCheckpointPath(root));
-  // Locks are ephemeral; do not migrate. Migration-backups already pruned.
+  // Locks are ephemeral; do not migrate.
 }

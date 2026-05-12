@@ -23,11 +23,11 @@
 **验收标准**：
 - [x] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）— 真实迁移已完成（~/.pi 父仓 173 → 0 pending，lint 0 errors，dead links 0）
 - [x] 10 条 Lint 规则实现（T1-T10；`/memory lint [path]` slash command，CLI wrapper 未实现；另有 `/memory doctor-lite [path]` 聚合报告）
-- [x] 旧格式迁移工具：`/memory migrate --dry-run [path]` 全库计划生成 + `/sediment migrate-one --plan <file>` 单文件预览 + `/sediment migrate-one --apply --yes <file>` 单文件 apply + `/sediment migrate-one --restore <backup> --yes` 单文件恢复 + `/sediment migration-backups` 恢复点列表；**batch apply 不再追加**（单文件 + git commit-per-batch 已被验证足够）
+- [x] 旧格式迁移工具：`/memory migrate --dry-run [path]` 全库 read-only 计划生成。per-file apply substrate（`/sediment migrate-one` + `/sediment migration-backups` + restore）于 2026-05-12 随 Phase 1 迁移完成后剥离；per-repo 迁移走 ADR 0014 `/memory migrate --go`（pending B4）
 - [x] `memory_search` grep-based 实现（Phase 1 baseline；已由 ADR 0015 LLM retrieval 替代为 runtime 路径；grep/tf-idf 保留作 legacy diagnostics）
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
-- [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`；`/sediment migrate-one` 成功后自动重建）
-- [x] graph 派生索引：已实现 `buildGraphSnapshot` + `/memory check-backlinks [path]` + `/memory rebuild --graph [path]`；`/sediment migrate-one` 成功后自动重建 `.pensieve/.index/graph.json`
+- [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`）
+- [x] graph 派生索引：已实现 `buildGraphSnapshot` + `/memory check-backlinks [path]` + `/memory rebuild --graph [path]`
 - [x] Sediment project-only pipeline：writer substrate 已实现（validate → sanitize → deterministic dedupe → lint → lock → atomic write md → git best-effort → audit）；explicit `MEMORY:` lane 与 agent_end LLM auto-write curator lane 均已实现
 - [x] Project scope 的 file lock + 错误恢复（writer substrate）
 - [x] 最小脱敏：credential pattern → 写入拒绝（fail-closed）；$HOME 路径替换
@@ -70,46 +70,13 @@
 
 ### Phase 1.2 — 旧格式迁移
 
-**实现状态（2026-05-08）**：`extensions/memory/migrate.ts` 已实现 `/memory migrate --dry-run [--report] [path]` 的计划生成逻辑，`extensions/memory/index.ts` 注册命令入口；只生成迁移计划，不写 markdown 条目。`--report` 仅写 generated report 到 `.pi-astack/memory/migration-report.md`（与 [apply-checklist.md](./apply-checklist.md) §1 一致）。实际条目迁移由 `extensions/sediment/migration.ts` 的 `/sediment migrate-one --plan <file>` / `/sediment migrate-one --apply --yes <file>` / `/sediment migrate-one --restore <backup> --yes` 承接；`/sediment migration-backups [--limit N]` 可列出最近 backup 与 restore 命令。一次只预览、迁移或恢复单文件，以保持 staged/reversible；batch apply 尚未实现。
+**状态**：✅ 完成（2026-05-08）。详细里程数据见 [apply-checklist.md](./apply-checklist.md)（~/.pi 父仓 173 → 0 pending，14 batch，lint errors 547 → 0）。
 
-- 识别旧格式条目：无 `schema_version` 或无 `---` 分隔符
-- 自动映射：旧 `short-term/` → 条目移入同级目录 + `lifetime.kind: ttl`
-- 缺失 timeline：迁移时生成初始 timeline 行
-- 迁移前备份 source；apply/restore 后 best-effort git commit（失败不回滚 markdown）
-- 支持 `--dry-run`
-- 支持 `--report` 写入 `.pi-astack/memory/migration-report.md`（generated artifact）；report 每个 migration item 都包含推荐的 `/sediment migrate-one --plan ...` 与 `/sediment migrate-one --apply --yes ...` 命令
+**当前还在维护的**：`/memory migrate --dry-run [--report] [path]`—— read-only 计划生成，仅列出哪些 legacy entry 仍在、不写 markdown。适用场景：Phase 1 迁移后可能仍有调试仓产生的 legacy entry，或未来 schema bump 时快速扫仓。
 
-**当前验收**：
-```text
-/memory migrate --dry-run .pensieve
-# → 显示迁移计划，不修改 markdown 条目
+**已剥离**（2026-05-12）：per-file apply substrate（`extensions/sediment/migration.ts`、`/sediment migrate-one --plan/--apply --yes/--restore`、`/sediment migration-backups`、backup 子系统）随 Phase 1 迁移完成后剥离。设计动机：per-file workflow 是 Phase 1 为 173 条 legacy entry 定制的临时机械，迁移完成后它就不再服务于任何路径，反而产生两个负担：（1）作为 slash command 出现在提示里，误导 LLM 去调用不需要的备份逻辑；（2）backup 子系统与 git 重复。后续使用场景（例如 ADR 0014 .pensieve → abrain 迁移）全部走 per-repo、不走 per-file。
 
-/memory migrate --dry-run --report .pensieve
-# → 写入 .pi-astack/memory/migration-report.md，便于人工审查；每项都带 plan/apply 单文件命令
-```
-
-**plan/apply/restore 验收（单文件）**：
-```text
-# 预览单文件迁移结果，不写入、不 audit、不重建 derived artifacts
-/sediment migrate-one --plan .pensieve/short-term/maxims/example.md
-# → 返回 target/actions/lint/frontmatter/body preview，供人工审计
-
-# 由 sediment/migration writer 执行，非当前 read-only extension
-/sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
-# → 备份 source，写入 schema v1/canonical path，返回 restore_command，并重建 .pensieve/.index/graph.json + .pensieve/_index.md
-
-# 列出最近 migration backups 与对应 restore_command
-/sediment migration-backups --limit 20
-# → 返回 backup_path/source_path/target_path/state/restore_command
-
-# 从 apply 产生的 backup 恢复原 source；仅在 target 未被手改时自动删除 target
-/sediment migrate-one --restore .pi-astack/sediment/migration-backups/<timestamp>/short-term/maxims/example.md --yes
-# → 恢复原 legacy source，删除可验证的迁移 target，并重建 graph/index；若 target 已被手改则拒绝 target_modified
-```
-
-**操作手册**：真实项目迁移按 [apply-checklist.md](./apply-checklist.md) 执行。实践中 LLM 在同一会话内调用 `migrateOne({apply:true,yes:true,gitCommit:false})` 批处理并 git commit-per-batch 已足够。
-
-**状态**：迁移完成（2026-05-08）。~/.pi 父仓 173 → 0 pending，14 batch，所有 commit 逆向可追。batch apply CLI 按原计划**不再追加**（详见 [apply-checklist.md](./apply-checklist.md) Status 段）。
+**per-repo 后续**：ADR 0014「待实施」B4（`/memory migrate --go`）——git working tree clean 作为 precondition，不做 backup，不留 symlink，逆向走 `git checkout HEAD -- .pensieve` + `git reset --hard HEAD~1`。
 
 ### Phase 1.3 — memory_search（ADR 0015 LLM-driven；无 grep 降级）
 
@@ -199,19 +166,7 @@ memory_search(query: "dispatch agent prompt")
 已删除 LLM extractor dry-run/readiness 链：
 - **ADR 0016 更新（2026-05-10）**：`/sediment llm --dry-run`、`/sediment llm-report`、`/sediment readiness`、`scripts/seed-llm-dry-runs.mjs` 与 `llm_dry_run` readiness gate 已删除。auto-write 不再需要 dry-run 样本；git + audit 是回滚面。
 
-已完成 migration apply 安全入口：
-- `/sediment migrate-one --plan <file>`：只预览单文件迁移结果，不写入、不 audit、不重建 derived artifacts
-- `/sediment migrate-one --apply --yes <file>`：只允许单文件迁移
-- `/sediment migrate-one --restore <backup> --yes`：只允许从 `.pi-astack/sediment/migration-backups/` 恢复单文件；若 target 已被手改则拒绝 `target_modified`，不恢复 source、不删除 target
-- `/sediment migration-backups [--limit N]`：只读列出最近 backup、restore command 与当前 state（restorable / target_modified / already_restored 等）
-- source 必须位于 `.pensieve/` 内且不是 `.state/.index/pipelines`
-- target 已存在则拒绝
-- 迁移前 backup 到 `.pi-astack/sediment/migration-backups/<timestamp>/...`
-- apply 成功返回可复制的 `restore_command: /sediment migrate-one --restore <backup> --yes`
-- 生成 schema v1 markdown 后先 lint，error 则拒绝
-- tmp → rename 原子写入；移动场景写 target 后删除 source；不删除空目录
-- audit 到 `.pi-astack/sediment/audit.jsonl`
-- 成功后自动重建 `.pensieve/.index/graph.json` 与 `.pensieve/_index.md`；derived rebuild 失败不会回滚已完成迁移/恢复，但会写入返回值/audit
+原 migration apply 安全入口（`/sediment migrate-one --plan/--apply --yes/--restore` + `/sediment migration-backups`）随 Phase 1 迁移完成于 2026-05-12 剥离。详见 Phase 1.2 中「已剥离」说明。per-repo 迁移走 ADR 0014 「待实施」 B4（`/memory migrate --go`），不继承 per-file substrate 任何代码
 
 已完成 LLM auto-write lane（A1 + A2 + A3，2026-05-08）：
 - A1（历史实现）：早期曾用 `writeProjectEntry.opts.policy`、`forceProvisional`、`disallowMaxim`、`maxConfidence`、G13 near-duplicate 等机械 gates 保护 LLM auto-write。
@@ -250,17 +205,8 @@ memory_search(query: "dispatch agent prompt")
 /sediment dedupe --title "Some Insight Title"
 # → 返回 deterministic duplicate 检查结果
 
-/sediment migrate-one --plan .pensieve/short-term/maxims/example.md
-# → 预览单个 legacy 文件将生成的 target/actions/lint/frontmatter/body preview，不写入
-
-/sediment migrate-one --apply --yes .pensieve/short-term/maxims/example.md
-# → 备份 source，迁移单个 legacy 文件到 schema v1/canonical path，并重建 graph/index derived artifacts
-
-/sediment migration-backups --limit 20
-# → 列出最近 backup、当前 state 与可复制 restore_command
-
-/sediment migrate-one --restore .pi-astack/sediment/migration-backups/<timestamp>/short-term/maxims/example.md --yes
-# → 从 backup 恢复原 source；若 target 与迁移生成内容一致则删除 target，并重建 graph/index
+# /sediment migrate-one / /sediment migration-backups 于 2026-05-12 剥离。
+# per-repo 迁移后续走 ADR 0014 `/memory migrate --go`（pending B4）。
 ```
 
 **当前 live 验收**：

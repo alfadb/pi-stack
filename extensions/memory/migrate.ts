@@ -25,8 +25,6 @@ export interface MigrationPlanItem {
   confidence: number;
   reasons: string[];
   actions: string[];
-  plan_command: string;
-  apply_command: string;
 }
 
 export interface MigrationSkipItem {
@@ -173,8 +171,6 @@ async function planMigrationForFile(
       confidence,
       reasons: stableUnique(reasons),
       actions,
-      plan_command: `/sediment migrate-one --plan ${sourceDisplay}`,
-      apply_command: `/sediment migrate-one --apply --yes ${sourceDisplay}`,
     },
   };
 }
@@ -265,18 +261,14 @@ export function formatMigrationReportMarkdown(report: MigrationPlanReport): stri
   }
   if (Object.keys(reasonCounts).length === 0) lines.push("- None");
 
-  lines.push("", "## Suggested Single-File Workflow", "");
-  lines.push("1. Pick one migration item from the table below.");
-  lines.push("2. Run its `Plan Command` and review target/frontmatter/body preview.");
-  lines.push("3. Only after review, run its `Apply Command`.");
-  lines.push(`4. Re-run \`/memory migrate --dry-run --report ${report.target}\` after each apply to refresh the queue.`);
-
   lines.push("", "## Migration Items", "");
+  lines.push("_Per-file migration substrate has been retired (2026-05-12). Per-repo migration via `/memory migrate --go` is pending (ADR 0014 「待实施」). For rollback before that lands, use `git checkout HEAD -- .pensieve` (data is git-tracked)._");
+  lines.push("");
   if (report.items.length === 0) {
     lines.push("- None");
   } else {
-    lines.push("| Source | Target | Title | Kind | Confidence | Reasons | Actions | Plan Command | Apply Command |");
-    lines.push("|---|---|---|---:|---:|---|---|---|---|");
+    lines.push("| Source | Target | Title | Kind | Confidence | Reasons | Actions |");
+    lines.push("|---|---|---|---:|---:|---|---|");
     for (const item of report.items) {
       lines.push([
         markdownCell(item.source_path),
@@ -286,8 +278,6 @@ export function formatMigrationReportMarkdown(report: MigrationPlanReport): stri
         String(item.confidence),
         markdownCell(item.reasons.join(", ")),
         markdownCell(item.actions.join("; ")),
-        markdownCell(`\`${item.plan_command}\``),
-        markdownCell(`\`${item.apply_command}\``),
       ].join(" | ").replace(/^/, "| ").replace(/$/, " |"));
     }
   }
@@ -335,7 +325,12 @@ export async function writeMigrationReport(
 export function formatMigrationPlan(report: MigrationPlanReport, maxItems = 12): string {
   const lines: string[] = [
     `Memory migrate dry-run: ${report.migrateCount} file(s) need migration, ${report.skippedCount} skipped, ${report.filesScanned} scanned`,
-    "Actual writes are intentionally not available in this read-only extension; use /sediment migrate-one --plan before /sediment migrate-one --apply --yes.",
+    // Per-file migration substrate retired 2026-05-12; per-repo migration
+    // via `/memory migrate --go` is pending (ADR 0014 「待实施」). This
+    // planner stays read-only and only surfaces what would migrate; rollback
+    // path before --go lands is `git checkout HEAD -- .pensieve` (data is
+    // git-tracked across all repos).
+    "Read-only plan (writes not exposed in this extension). Per-repo migration command is pending; see ADR 0014.",
   ];
 
   if (report.items.length === 0) return lines.join("\n");
@@ -346,8 +341,6 @@ export function formatMigrationPlan(report: MigrationPlanReport, maxItems = 12):
     lines.push(`  slug=${item.slug} kind=${item.kind} status=${item.status} confidence=${item.confidence}`);
     lines.push(`  reasons: ${item.reasons.join(", ")}`);
     lines.push(`  actions: ${item.actions.join("; ")}`);
-    lines.push(`  plan: ${item.plan_command}`);
-    lines.push(`  apply: ${item.apply_command}`);
   }
   if (report.items.length > maxItems) {
     lines.push(`- ... ${report.items.length - maxItems} more migration item(s) omitted`);

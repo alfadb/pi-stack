@@ -150,7 +150,6 @@ async function main() {
     const { runDoctorLite } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow } = req("./sediment/writer.js");
-    const { listMigrationBackups, migrateOne, restoreMigrationBackup } = req("./sediment/migration.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     const { buildRunWindow, saveCheckpoint, loadCheckpoint, loadSessionCheckpoint, saveSessionCheckpoint } = req("./sediment/checkpoint.js");
     const { detectProjectDuplicate } = req("./sediment/dedupe.js");
@@ -348,87 +347,27 @@ created: 2026-05-08
 
 Body.
 `);
+    // === Memory migrate dry-run (read-only planner) ========================
+    // Per-file `/sediment migrate-one` substrate retired 2026-05-12 — backup /
+    // apply / restore commands removed; per-repo migration via `/memory migrate
+    // --go` is pending (ADR 0014 「待实施」). dry-run remains useful as a
+    // legacy-data inventory; smoke now only covers the planner + report writer.
     const migration = await planMigrationDryRun(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(migration.migrateCount >= 1, "migration dry-run found no pending entries");
     const legacyPlan = migration.items.find((item) => item.source_path === ".pensieve/short-term/maxims/legacy.md");
-    assert(legacyPlan?.plan_command === "/sediment migrate-one --plan .pensieve/short-term/maxims/legacy.md", "migration plan command missing");
-    assert(legacyPlan?.apply_command === "/sediment migrate-one --apply --yes .pensieve/short-term/maxims/legacy.md", "migration apply command missing");
+    assert(legacyPlan, "migration plan should include legacy.md");
+    assert(legacyPlan.target_path === ".pensieve/maxims/legacy.md", `legacy plan target mismatch: ${legacyPlan.target_path}`);
+    assert(legacyPlan.plan_command === undefined && legacyPlan.apply_command === undefined, "plan/apply command fields must be retired");
     const migrationReport = await writeMigrationReport(path.join(root, ".pensieve"), migration, root);
     const migrationReportText = fs.readFileSync(path.join(root, ".pi-astack", "memory", "migration-report.md"), "utf-8");
     assert(fs.existsSync(path.join(root, ".pi-astack", "memory", "migration-report.md")), "migration report not written");
-    assert(migrationReportText.includes("Suggested Single-File Workflow"), "migration report missing workflow guidance");
-    assert(migrationReportText.includes("/sediment migrate-one --plan .pensieve/short-term/maxims/legacy.md"), "migration report missing plan command");
-    assert(migrationReportText.includes("/sediment migrate-one --apply --yes .pensieve/short-term/maxims/legacy.md"), "migration report missing apply command");
+    assert(!migrationReportText.includes("migrate-one") && !migrationReportText.includes("migration-backups"), "migration report must not reference retired per-file substrate");
     assert(migrationReport.migrateCount === migration.migrateCount, "migration report count mismatch");
-
-    const migratePlanned = await migrateOne(".pensieve/short-term/maxims/legacy.md", {
-      projectRoot: root,
-      sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
-      memorySettings: DEFAULT_SETTINGS,
-      apply: false,
-      yes: false,
-      plan: true,
-    });
-    assert(migratePlanned.status === "dry_run", `migrate-one plan failed: ${migratePlanned.reason}`);
-    assert(migratePlanned.target_path === ".pensieve/maxims/legacy.md", "migrate-one plan target mismatch");
-    assert(migratePlanned.preview?.frontmatter.includes("schema_version: 1"), "migrate-one plan preview missing schema_version");
-    assert(!fs.existsSync(path.join(root, ".pensieve", "maxims", "legacy.md")), "migrate-one plan should not write target");
-
-    const migrateApplied = await migrateOne(".pensieve/short-term/maxims/legacy.md", {
-      projectRoot: root,
-      sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
-      memorySettings: DEFAULT_SETTINGS,
-      apply: true,
-      yes: true,
-    });
-    assert(migrateApplied.status === "applied", `migrate-one failed: ${migrateApplied.reason}`);
-    assert(migrateApplied.restore_command === `/sediment migrate-one --restore ${migrateApplied.backup_path} --yes`, "migrate-one restore command missing");
-    assert(!migrateApplied.derived?.error, `migrate-one derived rebuild failed: ${migrateApplied.derived?.error}`);
-    assert(fs.existsSync(path.join(root, ".pensieve", "maxims", "legacy.md")), "migrate-one target not written");
-    assert(fs.existsSync(path.join(root, migrateApplied.backup_path)), "migrate-one backup not written");
-    assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "migrate-one graph index not rebuilt");
-    assert(fs.existsSync(path.join(root, ".pensieve", "_index.md")), "migrate-one markdown index not rebuilt");
-
-    const backups = await listMigrationBackups(root, DEFAULT_SETTINGS, 10);
-    const listedBackup = backups.items.find((item) => item.backup_path === migrateApplied.backup_path);
-    assert(listedBackup, "migration-backups should list applied backup");
-    assert(listedBackup.restore_command === migrateApplied.restore_command, "migration-backups restore command mismatch");
-    assert(listedBackup.state === "restorable_remove_target", `migration-backups state mismatch: ${listedBackup.state}`);
-
-    const migratedTarget = path.join(root, ".pensieve", "maxims", "legacy.md");
-    const migratedTargetText = fs.readFileSync(migratedTarget, "utf-8");
-    fs.writeFileSync(migratedTarget, `${migratedTargetText}\nmanual edit after migration\n`);
-    const restoreConflict = await restoreMigrationBackup(migrateApplied.backup_path, {
-      projectRoot: root,
-      sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
-      memorySettings: DEFAULT_SETTINGS,
-      yes: true,
-    });
-    assert(restoreConflict.status === "rejected" && restoreConflict.reason === "target_modified", `restore conflict should reject target_modified, got ${restoreConflict.reason}`);
-    assert(!fs.existsSync(path.join(root, ".pensieve", "short-term", "maxims", "legacy.md")), "restore conflict should not restore source");
-    assert(fs.readFileSync(migratedTarget, "utf-8").includes("manual edit after migration"), "restore conflict should preserve modified target");
-    const conflictBackups = await listMigrationBackups(root, DEFAULT_SETTINGS, 10);
-    const listedConflict = conflictBackups.items.find((item) => item.backup_path === migrateApplied.backup_path);
-    assert(listedConflict?.state === "target_modified", `migration-backups conflict state mismatch: ${listedConflict?.state}`);
-    fs.writeFileSync(migratedTarget, migratedTargetText);
-
-    const restored = await restoreMigrationBackup(migrateApplied.backup_path, {
-      projectRoot: root,
-      sedimentSettings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
-      memorySettings: DEFAULT_SETTINGS,
-      yes: true,
-    });
-    assert(restored.status === "restored", `restore migration backup failed: ${restored.reason}`);
-    assert(restored.removed_target, "restore should remove migrated target");
-    assert(fs.existsSync(path.join(root, ".pensieve", "short-term", "maxims", "legacy.md")), "restore did not restore original source");
-    assert(!fs.existsSync(path.join(root, ".pensieve", "maxims", "legacy.md")), "restore did not remove migrated target");
-    assert(fs.readFileSync(path.join(root, ".pensieve", "short-term", "maxims", "legacy.md"), "utf-8").includes("type: maxim"), "restore source content mismatch");
-    assert(!restored.derived?.error, `restore derived rebuild failed: ${restored.derived?.error}`);
 
     const doctor = await runDoctorLite(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(["pass", "warning", "error"].includes(doctor.status), "doctor-lite invalid status");
-    assert(doctor.migrationBackups.total >= 1, "doctor-lite should report migration backups");
-    assert(doctor.migrationBackups.stateCounts.already_restored >= 1, "doctor-lite should report restored backup state");
+    assert(doctor.migrationBackups === undefined, "doctor-lite migrationBackups field must be retired");
+    assert(doctor.migration.pendingCount >= 1, "doctor-lite should still surface pending migrations");
 
     execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: root });

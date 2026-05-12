@@ -43,11 +43,6 @@ import {
   summarizeLlmExtractorResult,
   type LlmExtractorResult,
 } from "./llm-extractor";
-import {
-  listMigrationBackups,
-  migrateOne,
-  restoreMigrationBackup,
-} from "./migration";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
 
 import {
@@ -259,17 +254,9 @@ function registerSedimentCommand(pi: ExtensionAPI) {
 
   maybePi.registerCommand("sediment", {
     description:
-      "Sediment status/dedupe/migration-backups/migrate-one: /sediment status, /sediment dedupe --title <title>, /sediment migration-backups [--limit N], /sediment migrate-one --plan <file>, /sediment migrate-one --apply --yes <file>, /sediment migrate-one --restore <backup> --yes",
+      "Sediment status/dedupe: /sediment status, /sediment dedupe --title <title>",
     getArgumentCompletions(prefix: string) {
-      const items = [
-        "status",
-        "dedupe --title ",
-        "migration-backups",
-        "migration-backups --limit ",
-        "migrate-one --plan ",
-        "migrate-one --apply --yes ",
-        "migrate-one --restore ",
-      ];
+      const items = ["status", "dedupe --title "];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length
         ? filtered.map((value) => ({ value, label: value }))
@@ -312,22 +299,6 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      if (subcommand === "migration-backups") {
-        const limitFlagIndex = rest.indexOf("--limit");
-        const limitRaw =
-          limitFlagIndex >= 0 ? Number(rest[limitFlagIndex + 1]) : undefined;
-        const result = await listMigrationBackups(
-          cwd,
-          resolveMemorySettings(),
-          limitRaw,
-        );
-        ctx.ui.notify(
-          JSON.stringify(result, null, 2),
-          result.returned > 0 ? "info" : "warning",
-        );
-        return;
-      }
-
       if (subcommand === "dedupe") {
         const titleFlagIndex = rest.indexOf("--title");
         const title =
@@ -349,59 +320,8 @@ function registerSedimentCommand(pi: ExtensionAPI) {
         return;
       }
 
-      if (subcommand === "migrate-one") {
-        const plan = rest.includes("--plan");
-        const apply = rest.includes("--apply");
-        const restore = rest.includes("--restore");
-        const yes = rest.includes("--yes");
-        const fileParts = rest.filter(
-          (part) =>
-            part !== "--plan" &&
-            part !== "--apply" &&
-            part !== "--restore" &&
-            part !== "--yes",
-        );
-        const source = fileParts.join(" ").trim();
-        const modeCount = [plan, apply, restore].filter(Boolean).length;
-        if (!source || modeCount !== 1) {
-          ctx.ui.notify(
-            "Usage: /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes",
-            "warning",
-          );
-          return;
-        }
-        if (restore) {
-          const result = await restoreMigrationBackup(source, {
-            projectRoot: cwd,
-            sedimentSettings: settings,
-            memorySettings: resolveMemorySettings(),
-            yes,
-          });
-          ctx.ui.notify(
-            JSON.stringify(result, null, 2),
-            result.status === "restored" ? "info" : "warning",
-          );
-          return;
-        }
-        const result = await migrateOne(source, {
-          projectRoot: cwd,
-          sedimentSettings: settings,
-          memorySettings: resolveMemorySettings(),
-          apply,
-          yes,
-          plan,
-        });
-        ctx.ui.notify(
-          JSON.stringify(result, null, 2),
-          result.status === "applied" || result.status === "dry_run"
-            ? "info"
-            : "warning",
-        );
-        return;
-      }
-
       ctx.ui.notify(
-        "Usage: /sediment status OR /sediment dedupe --title <title> OR /sediment migration-backups [--limit N] OR /sediment migrate-one --plan <file> OR /sediment migrate-one --apply --yes <file> OR /sediment migrate-one --restore <backup> --yes",
+        "Usage: /sediment status OR /sediment dedupe --title <title>",
         "warning",
       );
     },
