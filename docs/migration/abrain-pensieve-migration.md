@@ -82,15 +82,26 @@ dry-run（`/memory migrate` 默认 / `/memory migrate --dry-run`）仅列出 leg
 
 ### 单仓刚迁完想撤销
 
-```bash
-cd <parent>                       # e.g. ~/work/uamp/full
-git checkout HEAD~1 -- .pensieve  # 恢复 .pensieve/ 到迁移前
-git reset HEAD .pensieve          # unstage（让工作区有 .pensieve 但不进下次 commit）
-                                  # ↑ 或不 unstage，直接做新 commit 撤销迁移：
-                                  # git commit -m "revert: undo .pensieve migration to abrain"
+`/memory migrate --go` 输出的 summary 末尾会打印 **pre-migration SHA 锡点**的 rollback 命令，直接复制粘贴即可。例：
 
-cd ~/.abrain
-git reset --hard HEAD~1           # 撤销 abrain 一侧的 mv-in commit
+```bash
+Rollback (if needed):
+  cd ~/work/uamp/full && git reset --hard a1b2c3d4...   # parentPreSha
+  cd ~/.abrain && git reset --hard e5f6g7h8...          # abrainPreSha
+  # Note: abrain may have multiple commits from this migration (N workflows + 1 migrate-in).
+  # The reset above targets the SHA captured before *any* of them landed.
+```
+
+**为什么不用 `HEAD~1`**：
+- abrain 一侧 N 个 workflow commit + 1 个 migrate(in) commit = **N+1** 个 commit，`HEAD~1` 只能撤 1 个。
+- sediment auto-commit 可能在迁移后并发落入任一侧仓，让 `HEAD~N` 指错位置。
+- pre-sha 在 preflight 阶段捕获，不会被后续任何 commit 污染。
+
+如果 summary 已丢（终端滚出去），手动找两仓迁移 commit 的父 commit：
+
+```bash
+cd <parent> && git log --oneline -5   # 找 "chore: migrate .pensieve" 上一个 commit
+cd ~/.abrain && git log --oneline -10 # 找第一个 "workflow:" / "migrate(in):" 的上一个 commit
 ```
 
 ### 多仓迁完后发现规则错（少见）

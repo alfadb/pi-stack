@@ -172,9 +172,9 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 >
 > **与 abrain-pensieve-migration.md 原 8-phase 计划的差异**（v7.1 修订，2026-05-12）：原 P5-P8 持锁渐进迁移 · writer cutover · symlink · 删 fallback 四个 phase 合并为 **单仓一次性迁移**（`/memory migrate --go`）：git 提供逆向网 → 不需 backup 不需 symlink；per-repo 手工执行 → 不需 8-phase 全局协调。单用户场景 14 个仓变更不频，原为多人多机设计的渐进 phase 是过度工程。
 
-关键约束（v7.1 单仓一次性迁移模型）：git working tree clean 作为 precondition，迁完单仓后该仓 forward-only；取消迁移走 `git checkout HEAD~1 -- .pensieve` + abrain 側 `git reset --hard HEAD~1`，不依赖自定义 backup 子系统。详 [abrain-pensieve-migration.md §5](../migration/abrain-pensieve-migration.md#5-回滚)。
+关键约束（v7.1 单仓一次性迁移模型）：git working tree clean 作为 precondition，迁完单仓后该仓 forward-only；取消迁移走 **`/memory migrate --go` summary 末尾打印的 pre-migration SHA 锡点 rollback** （`git reset --hard <parentPreSha>` + `git reset --hard <abrainPreSha>`），不依赖自定义 backup 子系统。不用 `HEAD~1` 是因为 abrain 会产生 N workflow commit + 1 migrate-in commit（N+1 个），且 sediment 可能并发插 commit。详 [abrain-pensieve-migration.md §5](../migration/abrain-pensieve-migration.md#5-回滚)。
 
-B4 已 ship（2026-05-12，commit 待 bump）——接下来是手动逐仓迁移（8 优先级 / 14 仓）。B5 writer cutover 是迁完后的拍板动作，预计 ≈1 日。
+B4 已 ship（2026-05-12，commit `cc40792` + 后续完善）——接下来是手动逐仓迁移（8 优先级 / 14 仓）。B5 writer cutover 是迁完后的拍板动作，预计 ≈1 日。
 
 ## 审计扩展
 

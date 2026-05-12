@@ -96,6 +96,18 @@ export interface MigrationGoResult {
   failedCount: number;
   parentCommitSha?: string | null;
   abrainCommitSha?: string | null;
+  /** HEAD sha of parent repo *before* migration started. Use for safe
+   *  rollback even if other commits land in either repo after the migration
+   *  (e.g. concurrent sediment auto-commit, or N workflow commits + 1
+   *  migrate(in) commit on the abrain side). */
+  parentPreSha?: string | null;
+  /** HEAD sha of abrain repo *before* migration started. */
+  abrainPreSha?: string | null;
+  /** Reports from B4 step 6 (spec §3 step 6): rebuilt graph + markdown index
+   *  on the abrain projects/<id>/ side so memory_list / facade can see the
+   *  freshly-migrated entries without waiting for a doctor-lite run. */
+  graphRebuilt?: { nodeCount: number; edgeCount: number } | null;
+  markdownIndexRebuilt?: { entryCount: number; kindCount: number } | null;
   preconditionFailures: string[];
 }
 
@@ -104,7 +116,23 @@ interface PreflightOutcome {
   projectId: string;
   projectIdSource: "explicit" | "git-remote" | "cwd-basename";
   parentRepoRoot: string;
+  /** HEAD sha of parent repo at preflight time. Captured so the migration
+   *  summary can print a rollback command anchored on a concrete SHA rather
+   *  than `HEAD~1` (which is wrong when sediment commits concurrently or
+   *  the migration produces N+1 abrain commits). */
+  parentPreSha?: string | null;
+  /** HEAD sha of abrain repo at preflight time. Same rationale. */
+  abrainPreSha?: string | null;
   failures: string[];
+}
+
+async function gitHeadSha(cwd: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], { timeout: 3000, maxBuffer: 64 * 1024 });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 /* ── Project-id inference ──────────────────────────────────────────── */
@@ -286,11 +314,20 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
     }
   }
 
+  // Capture pre-migration HEAD SHAs so the summary can print accurate
+  // rollback commands anchored on a concrete commit (rather than HEAD~1
+  // which is wrong when abrain has N workflow commits + 1 migrate(in) commit,
+  // or when sediment auto-commits land concurrently).
+  const parentPreSha = failures.length === 0 ? await gitHeadSha(parentRepoRoot) : null;
+  const abrainPreSha = failures.length === 0 ? await gitHeadSha(opts.abrainHome) : null;
+
   return {
     ok: failures.length === 0,
     projectId,
     projectIdSource,
     parentRepoRoot,
+    parentPreSha,
+    abrainPreSha,
     failures,
   };
 }
@@ -599,6 +636,8 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       workflowCount: 0,
       skippedCount: 0,
       failedCount: 0,
+      parentPreSha: pre.parentPreSha ?? null,
+      abrainPreSha: pre.abrainPreSha ?? null,
       preconditionFailures: pre.failures,
     };
   }
@@ -732,10 +771,33 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
     }
   }
 
+  // B4 spec §3 step 6: rebuild abrain projects/<id>/.index/graph.json +
+  // _index.md so memory_list / facade can read the migrated entries
+  // immediately. We do this before the abrain commit so the index files
+  // ship inside the same commit. Failures are non-fatal (commit still
+  // happens; user can run `/memory rebuild --graph|--index` manually).
+  let graphRebuilt: { nodeCount: number; edgeCount: number } | null = null;
+  let markdownIndexRebuilt: { entryCount: number; kindCount: number } | null = null;
+  if (movedCount > 0) {
+    try {
+      const { rebuildGraphIndex } = await import("./graph");
+      const { rebuildMarkdownIndex } = await import("./index-file");
+      const gReport = await rebuildGraphIndex(projectAbrainDir, opts.settings, opts.signal, cwd);
+      graphRebuilt = { nodeCount: gReport.nodeCount, edgeCount: gReport.edgeCount };
+      const mReport = await rebuildMarkdownIndex(projectAbrainDir, opts.settings, opts.signal, cwd);
+      markdownIndexRebuilt = { entryCount: mReport.entryCount, kindCount: mReport.kindCount };
+    } catch {
+      // Non-fatal: leave nulls; user can run /memory rebuild manually.
+      graphRebuilt = null;
+      markdownIndexRebuilt = null;
+    }
+  }
+
   // Single commit per side (workflow writer already committed individual
   // workflows in abrain; we commit any leftover staged changes — typically
-  // none, but in case writeAbrainWorkflow's gitCommit hit a soft failure
-  // we don't want to leave orphans).
+  // the knowledge mv-ins + the rebuilt index files. In case
+  // writeAbrainWorkflow's gitCommit hit a soft failure we don't want to
+  // leave orphans).
   const parentBasename = path.basename(parentRepoRoot);
   const parentCommitSha = await gitCommitAll(
     parentRepoRoot,
@@ -759,6 +821,10 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
     failedCount,
     parentCommitSha,
     abrainCommitSha,
+    parentPreSha: pre.parentPreSha ?? null,
+    abrainPreSha: pre.abrainPreSha ?? null,
+    graphRebuilt,
+    markdownIndexRebuilt,
     preconditionFailures: [],
   };
 }
@@ -789,10 +855,40 @@ export function formatMigrationGoSummary(result: MigrationGoResult, cwd: string 
     if (result.failedCount > 10) lines.push(`  ... ${result.failedCount - 10} more failure(s) omitted`);
   }
   lines.push(
-    "",
-    `Rollback (if needed):`,
-    `  cd ${prettyPath(result.parentRepoRoot, cwd)} && git reset --hard HEAD~1`,
-    `  cd ~/.abrain && git reset --hard HEAD~1`,
+  );
+
+  if (result.graphRebuilt) {
+    lines.push(
+      `  graph index rebuilt: ${result.graphRebuilt.nodeCount} node(s), ${result.graphRebuilt.edgeCount} edge(s)`,
+    );
+  }
+  if (result.markdownIndexRebuilt) {
+    lines.push(
+      `  markdown index rebuilt: ${result.markdownIndexRebuilt.entryCount} entry(s), ${result.markdownIndexRebuilt.kindCount} kind group(s)`,
+    );
+  }
+  if (!result.graphRebuilt && !result.markdownIndexRebuilt && result.movedCount > 0) {
+    lines.push(`  ⚠️  index rebuild failed; run \`/memory rebuild --graph\` + \`/memory rebuild --index\` on ${result.abrainProjectDir}`);
+  }
+
+  // Rollback hint: use pre-migration SHAs (captured at preflight) rather
+  // than HEAD~1, which is wrong because (a) abrain has N workflow commits +
+  // 1 migrate(in) commit = N+1 commits to undo, and (b) sediment auto-commit
+  // may land concurrently and push HEAD~1 to the wrong commit.
+  lines.push("", `Rollback (if needed):`);
+  if (result.parentPreSha) {
+    lines.push(`  cd ${prettyPath(result.parentRepoRoot, cwd)} && git reset --hard ${result.parentPreSha}`);
+  } else {
+    lines.push(`  cd ${prettyPath(result.parentRepoRoot, cwd)} && git reset --hard HEAD~1  # ⚠️  pre-migration SHA not captured; verify HEAD~1 manually`);
+  }
+  if (result.abrainPreSha) {
+    lines.push(`  cd ~/.abrain && git reset --hard ${result.abrainPreSha}`);
+  } else {
+    lines.push(`  cd ~/.abrain && git reset --hard HEAD~1  # ⚠️  pre-migration SHA not captured`);
+  }
+  lines.push(
+    `  # Note: abrain may have multiple commits from this migration (N workflows + 1 migrate-in).`,
+    `  # The reset above targets the SHA captured before *any* of them landed.`,
   );
   return lines.join("\n");
 }

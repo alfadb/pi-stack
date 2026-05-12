@@ -262,7 +262,7 @@ export function formatMigrationReportMarkdown(report: MigrationPlanReport): stri
   if (Object.keys(reasonCounts).length === 0) lines.push("- None");
 
   lines.push("", "## Migration Items", "");
-  lines.push("_Per-file migration substrate has been retired (2026-05-12). Per-repo migration via `/memory migrate --go` is pending (ADR 0014 「待实施」). For rollback before that lands, use `git checkout HEAD -- .pensieve` (data is git-tracked)._");
+  lines.push("_Per-file migration substrate retired 2026-05-12. Per-repo one-shot migration: run `/memory migrate --go [--project=<id>]` (B4 shipped 2026-05-12, see `extensions/memory/migrate-go.ts`). Spec: docs/migration/abrain-pensieve-migration.md §3. Rollback: see summary printed by `--go` (pre-migration SHAs)._");
   lines.push("");
   if (report.items.length === 0) {
     lines.push("- None");
@@ -325,12 +325,12 @@ export async function writeMigrationReport(
 export function formatMigrationPlan(report: MigrationPlanReport, maxItems = 12): string {
   const lines: string[] = [
     `Memory migrate dry-run: ${report.migrateCount} file(s) need migration, ${report.skippedCount} skipped, ${report.filesScanned} scanned`,
-    // Per-file migration substrate retired 2026-05-12; per-repo migration
-    // via `/memory migrate --go` is pending (ADR 0014 「待实施」). This
-    // planner stays read-only and only surfaces what would migrate; rollback
-    // path before --go lands is `git checkout HEAD -- .pensieve` (data is
-    // git-tracked across all repos).
-    "Read-only plan (writes not exposed in this extension). Per-repo migration command is pending; see ADR 0014.",
+    // Per-file migration substrate retired 2026-05-12. Per-repo one-shot
+    // migration (`/memory migrate --go`) shipped same day (B4); this dry-run
+    // planner stays read-only and only surfaces what would migrate. To execute,
+    // run `/memory migrate --go [--project=<id>]`. See migrate-go.ts and
+    // docs/migration/abrain-pensieve-migration.md §3 for the apply path.
+    "Read-only plan (no writes). To execute migration: `/memory migrate --go [--project=<id>]` (B4 shipped 2026-05-12).",
   ];
 
   if (report.items.length === 0) return lines.join("\n");

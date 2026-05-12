@@ -1308,10 +1308,64 @@ This is a cross-project review pipeline body with enough content.
       assert(/projectId=test-project/.test(summary), `summary should include projectId`);
       assert(/Rollback/.test(summary), `summary should mention rollback`);
 
-      // 12) Idempotency: running again must fail preflight cleanly because
-      // .pensieve no longer has user entries (only derived .index/.state
-      // files remain, which migrate-go ignores). This protects against
-      // accidental empty-migration commits.
+      // 11a) Spec §3 step 6 — index rebuild on abrain projects/<id>/ side
+      // must run before the abrain commit, so memory_list / facade see the
+      // freshly-migrated entries without manual /memory rebuild.
+      assert(result.graphRebuilt && typeof result.graphRebuilt.nodeCount === "number", `result.graphRebuilt must be populated, got ${JSON.stringify(result.graphRebuilt)}`);
+      // 3 nodes = 2 knowledge entries + 1 project-specific workflow under
+      // projects/<id>/workflows/. Cross-project workflow lives outside the
+      // project at ~/.abrain/workflows/ and is not counted here.
+      assert(result.graphRebuilt.nodeCount === 3, `expected 3 graph nodes (2 knowledge + 1 project workflow), got ${result.graphRebuilt.nodeCount}`);
+      assert(result.markdownIndexRebuilt && typeof result.markdownIndexRebuilt.entryCount === "number", `result.markdownIndexRebuilt must be populated`);
+      assert(result.markdownIndexRebuilt.entryCount === 3, `expected 3 markdown index entries, got ${result.markdownIndexRebuilt.entryCount}`);
+      assert(fs.existsSync(path.join(goAbrain, "projects", "test-project", ".index", "graph.json")), `abrain graph.json must exist after migration`);
+      assert(fs.existsSync(path.join(goAbrain, "projects", "test-project", "_index.md")), `abrain _index.md must exist after migration`);
+      assert(/graph index rebuilt/.test(summary), `summary should mention graph rebuild`);
+      assert(/markdown index rebuilt/.test(summary), `summary should mention markdown index rebuild`);
+
+      // 11b) Rollback hint uses pre-migration SHAs (not HEAD~1) so it works
+      // even with N+1 abrain commits (N workflow + 1 migrate-in).
+      assert(result.parentPreSha && /^[0-9a-f]{40}$/.test(result.parentPreSha), `parentPreSha must be a valid SHA: ${result.parentPreSha}`);
+      assert(result.abrainPreSha && /^[0-9a-f]{40}$/.test(result.abrainPreSha), `abrainPreSha must be a valid SHA: ${result.abrainPreSha}`);
+      assert(summary.includes(result.parentPreSha), `summary rollback must reference parentPreSha ${result.parentPreSha}`);
+      assert(summary.includes(result.abrainPreSha), `summary rollback must reference abrainPreSha ${result.abrainPreSha}`);
+      assert(!/HEAD~1(?!.*pre-migration SHA not captured)/.test(summary), `summary must not use HEAD~1 in rollback (it's wrong for N+1 abrain commits):\n${summary}`);
+
+      // 11c) The captured pre-SHAs must actually be the pre-migration HEAD,
+      // i.e. the commit immediately before the migrate-in commit chain. Reset
+      // to those SHAs must restore the original .pensieve layout.
+      const abrainHeadAfter = execFileSync("git", ["-C", goAbrain, "rev-parse", "HEAD"], { encoding: "utf-8" }).trim();
+      assert(abrainHeadAfter !== result.abrainPreSha, `abrain HEAD should have advanced past pre-sha`);
+      // Simulate rollback and verify .pensieve content comes back on parent side
+      execFileSync("git", ["-C", goParent, "reset", "--hard", result.parentPreSha]);
+      assert(
+        fs.existsSync(path.join(goParent, ".pensieve", "maxims", "test-rule.md")),
+        `rollback to parentPreSha must restore .pensieve/maxims/test-rule.md`,
+      );
+      assert(
+        fs.existsSync(path.join(goParent, ".pensieve", "pipelines", "run-when-coding.md")),
+        `rollback must restore .pensieve/pipelines/run-when-coding.md`,
+      );
+      execFileSync("git", ["-C", goAbrain, "reset", "--hard", result.abrainPreSha]);
+      assert(
+        !fs.existsSync(path.join(goAbrain, "projects", "test-project")),
+        `rollback to abrainPreSha must remove abrain/projects/test-project/`,
+      );
+      assert(
+        !fs.existsSync(path.join(goAbrain, "workflows", "run-when-reviewing.md")),
+        `rollback must remove cross-project workflow added by migration`,
+      );
+
+      // 12) Idempotency / Forward-only protection.
+      //
+      // After 11c rollback, both repos are back at pre-migration state, so
+      // we re-run migration to get back to migrated state — then verify a
+      // *third* run fails preflight cleanly because .pensieve no longer has
+      // user entries (only derived .index/.state files remain, which
+      // migrate-go ignores). This protects against accidental empty-migration
+      // commits.
+      const reapply = await runMigrationGo(goOpts);
+      assert(reapply.ok, `re-apply after rollback must succeed, got: ${JSON.stringify(reapply.preconditionFailures)}`);
       const second = await runMigrationGo(goOpts);
       assert(second.ok === false, `second run must not succeed`);
       assert(
