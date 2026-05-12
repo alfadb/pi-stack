@@ -151,6 +151,11 @@ function registerMemoryCommand(pi: ExtensionAPI) {
           part !== "--dry-run" && part !== "-n" && part !== "--report" && part !== "--go",
         );
         const targetArg = targetParts.join(" ").trim();
+        const explicitTarget = targetArg ? path.resolve(cwd, targetArg) : undefined;
+        if (explicitTarget && path.basename(explicitTarget) !== ".pensieve") {
+          ctx.ui.notify(`/memory migrate refused: target must be the project .pensieve directory; got ${explicitTarget}. Omit the path or pass <projectRoot>/.pensieve.`, "warning");
+          return;
+        }
 
         const abrainHome = process.env.ABRAIN_ROOT
           ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
@@ -162,8 +167,8 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         // the current repo's active binding and migrating another repo into
         // the wrong abrain project. With no explicit target, default to the
         // bound project root's `.pensieve`, so starting pi from a subdir works.
-        const active = targetArg
-          ? resolveActiveProject(path.dirname(path.resolve(cwd, targetArg)), { abrainHome })
+        const active = explicitTarget
+          ? resolveActiveProject(path.dirname(explicitTarget), { abrainHome })
           : resolveActiveProject(cwd, { abrainHome });
         if (!active.activeProject) {
           ctx.ui.notify(
@@ -172,9 +177,7 @@ function registerMemoryCommand(pi: ExtensionAPI) {
           );
           return;
         }
-        const target = targetArg
-          ? path.resolve(cwd, targetArg)
-          : path.join(active.activeProject.projectRoot, ".pensieve");
+        const target = explicitTarget ?? path.join(active.activeProject.projectRoot, ".pensieve");
         const expectedTarget = path.join(active.activeProject.projectRoot, ".pensieve");
         if (path.resolve(target) !== path.resolve(expectedTarget)) {
           ctx.ui.notify(

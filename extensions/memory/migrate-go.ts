@@ -245,6 +245,9 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
   const inferredParent = path.dirname(pensieveAbs);
   const parentRepoRoot = (await gitToplevel(inferredParent)) ?? inferredParent;
 
+  if (path.basename(pensieveAbs) !== ".pensieve") {
+    failures.push(`pensieve target must be the project .pensieve directory: ${pensieveAbs}`);
+  }
   if (!fsSync.existsSync(pensieveAbs)) {
     failures.push(`pensieve target not found: ${pensieveAbs}`);
   }

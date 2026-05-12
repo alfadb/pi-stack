@@ -540,6 +540,37 @@ export default function (pi: ExtensionAPI) {
           : lastAssistant?.stopReason === "aborted"
             ? "agent_aborted"
             : null;
+      // ADR 0017 / B4.5 strict binding: sediment is a project-scoped
+      // writer. Resolve it before all non-ephemeral audit/checkpoint paths,
+      // including unhealthy-stop skips, so launching pi from a repo subdir
+      // never splits audit/checkpoint files into <repo>/subdir/.pi-astack.
+      const binding = resolveActiveProject(cwd, { abrainHome: resolveAbrainHomeForSediment() });
+      if (!binding.activeProject) {
+        await appendAudit(cwd, {
+          operation: "skip",
+          lane: "system",
+          reason: "project_not_bound",
+          binding_status: binding.reason,
+          hint: binding.reason === "manifest_missing" ? "/abrain bind --project=<id>" : "/abrain bind",
+          session_id: sessionId,
+          branch_size: branch.length,
+          stop_reason: lastAssistant?.stopReason,
+          settings_snapshot: settingsSnapshot,
+          extractor: "explicit_marker",
+          parser_version: PARSER_VERSION,
+          checkpoint_advanced: false,
+          stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
+        });
+        applySedimentStatus(setStatus, sessionId, "completed", `project_not_bound:${binding.reason}`);
+        return;
+      }
+      // From this point on, all checkpoint/audit/writer paths must use the
+      // bound project root, not the launch subdirectory. Otherwise starting
+      // pi from <repo>/subdir would pass strict binding via git root but
+      // write split-brain state into <repo>/subdir/.pensieve and bypass the
+      // root-level MIGRATED_TO_ABRAIN guard.
+      cwd = binding.activeProject.projectRoot;
+
       if (unhealthyStopReason) {
         await appendAudit(cwd, {
           operation: "skip",
@@ -569,39 +600,6 @@ export default function (pi: ExtensionAPI) {
         applySedimentStatus(setStatus, sessionId, "completed", detail);
         return;
       }
-
-      // ADR 0017 / B4.5 strict binding: sediment is a project-scoped
-      // writer. It must not create or mutate project memory unless the
-      // boot cwd is explicitly bound via .abrain-project.json + abrain
-      // registry + local-map. This prevents unbound repos (or repos that
-      // merely forged a manifest) from writing into .pensieve / future
-      // abrain project paths. Do NOT advance checkpoint: once the user
-      // runs /abrain bind, the same window can be processed legitimately.
-      const binding = resolveActiveProject(cwd, { abrainHome: resolveAbrainHomeForSediment() });
-      if (!binding.activeProject) {
-        await appendAudit(cwd, {
-          operation: "skip",
-          lane: "system",
-          reason: "project_not_bound",
-          binding_status: binding.reason,
-          hint: binding.reason === "manifest_missing" ? "/abrain bind --project=<id>" : "/abrain bind",
-          session_id: sessionId,
-          branch_size: branch.length,
-          settings_snapshot: settingsSnapshot,
-          extractor: "explicit_marker",
-          parser_version: PARSER_VERSION,
-          checkpoint_advanced: false,
-          stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
-        });
-        applySedimentStatus(setStatus, sessionId, "completed", `project_not_bound:${binding.reason}`);
-        return;
-      }
-      // From this point on, all checkpoint/audit/writer paths must use the
-      // bound project root, not the launch subdirectory. Otherwise starting
-      // pi from <repo>/subdir would pass strict binding via git root but
-      // write split-brain state into <repo>/subdir/.pensieve and bypass the
-      // root-level MIGRATED_TO_ABRAIN guard.
-      cwd = binding.activeProject.projectRoot;
 
       const tStart = Date.now();
       const checkpoint = await loadSessionCheckpoint(cwd, sessionId);
@@ -682,9 +680,26 @@ export default function (pi: ExtensionAPI) {
           const cyc = sessionAgentCycle.get(sessionId);
           if (!cyc || cyc.started > cyc.ended) return;
 
-          const branchNow = getBranch();
+          let branchNow: unknown[];
+          try {
+            branchNow = getBranch();
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            appendAudit(cwd, {
+              operation: "skip",
+              lane: "auto_write",
+              session_id: sessionId,
+              reason: "drain_branch_read_failed",
+              error: message.slice(0, 200),
+              drain: true,
+            }).catch(() => {});
+            applySedimentStatus(setStatus, sessionId, "failed", `branch: ${message.slice(0, 40)}`);
+            return;
+          }
           loadSessionCheckpoint(cwd, sessionId)
             .then((cp) => {
+              const latestCycle = sessionAgentCycle.get(sessionId);
+              if (!latestCycle || latestCycle.started > latestCycle.ended) return;
               const win = buildRunWindow(branchNow, cp, settings);
               if (win.skipReason || !win.lastEntryId) return; // no backlog
 
@@ -693,6 +708,8 @@ export default function (pi: ExtensionAPI) {
                 lastProcessedEntryId: win.lastEntryId,
               })
                 .then(() => {
+                  const latestCycle = sessionAgentCycle.get(sessionId);
+                  if (!latestCycle || latestCycle.started > latestCycle.ended) return;
                   applySedimentStatus(setStatus, sessionId, "running", "drain");
                   const corrId = makeCorrelationId(
                     "auto_write",
@@ -797,6 +814,7 @@ export default function (pi: ExtensionAPI) {
                     }
                   })();
                   autoWriteInFlight.set(sessionId, bg);
+                  bg.catch(() => {});
                 })
                 .catch((err: unknown) => {
                   // R8 P1 (deepseek): saveSessionCheckpoint failures used
@@ -1070,6 +1088,7 @@ export default function (pi: ExtensionAPI) {
           }
         })();
         autoWriteInFlight.set(sessionId, bgPromise);
+        bgPromise.catch(() => {});
         // DO NOT await bgPromise. agent_end returns immediately so the
         // main session is unblocked.
         return;

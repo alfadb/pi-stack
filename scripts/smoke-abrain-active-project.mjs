@@ -294,14 +294,41 @@ await check("bindAbrainProject serializes concurrent local-map updates", async (
   const root1 = fs.mkdtempSync(path.join(tmpDir, "bind-race-1-"));
   const root2 = fs.mkdtempSync(path.join(tmpDir, "bind-race-2-"));
   await Promise.all([
-    runtime.bindAbrainProject({ abrainHome, cwd: root1, projectId: "race-one", now: "2026-05-12T21:00:00.000+08:00" }),
-    runtime.bindAbrainProject({ abrainHome, cwd: root2, projectId: "race-two", now: "2026-05-12T21:00:00.000+08:00" }),
+    runtime.bindAbrainProject({ abrainHome, cwd: root1, projectId: "race-shared", now: "2026-05-12T21:00:00.000+08:00" }),
+    runtime.bindAbrainProject({ abrainHome, cwd: root2, projectId: "race-shared", now: "2026-05-12T21:00:00.000+08:00" }),
   ]);
   const local = JSON.parse(fs.readFileSync(runtime.abrainProjectLocalMapPath(abrainHome), "utf-8"));
-  const p1 = local.projects["race-one"]?.paths?.map((p) => p.path) || [];
-  const p2 = local.projects["race-two"]?.paths?.map((p) => p.path) || [];
-  if (!p1.includes(path.resolve(root1))) throw new Error(`race-one path lost: ${JSON.stringify(local.projects["race-one"])}`);
-  if (!p2.includes(path.resolve(root2))) throw new Error(`race-two path lost: ${JSON.stringify(local.projects["race-two"])}`);
+  const paths = local.projects["race-shared"]?.paths?.map((p) => p.path) || [];
+  if (!paths.includes(path.resolve(root1))) throw new Error(`race root1 path lost: ${JSON.stringify(local.projects["race-shared"])}`);
+  if (!paths.includes(path.resolve(root2))) throw new Error(`race root2 path lost: ${JSON.stringify(local.projects["race-shared"])}`);
+});
+
+await check("file lock release does not delete another owner's lock", async () => {
+  const lockPath = path.join(tmpDir, "locks", "owner-token.lock");
+  const handle = await runtime.acquireFileLock(lockPath, { timeoutMs: 500, staleMs: 30_000, retryMs: 10, label: "smoke" });
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999999, token: "other-owner", created_at: "old" }) + "\n");
+  await handle.release();
+  const raw = fs.readFileSync(lockPath, "utf-8");
+  if (!raw.includes("other-owner")) throw new Error(`release removed or changed another owner's lock: ${raw}`);
+  fs.rmSync(lockPath, { force: true });
+});
+
+await check("file lock does not steal stale lock from a live pid", async () => {
+  const lockPath = path.join(tmpDir, "locks", "live-stale.lock");
+  fs.mkdirSync(path.dirname(lockPath), { recursive: true });
+  fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, token: "live-owner", created_at: "old" }) + "\n");
+  const old = (Date.now() - 60_000) / 1000;
+  fs.utimesSync(lockPath, old, old);
+  let timedOut = false;
+  try {
+    await runtime.acquireFileLock(lockPath, { timeoutMs: 80, staleMs: 1, retryMs: 10, label: "smoke-live" });
+  } catch (err) {
+    timedOut = /lock timeout/.test(String(err?.message || err));
+  }
+  if (!timedOut) throw new Error("expected live stale lock to be preserved until timeout");
+  const raw = fs.readFileSync(lockPath, "utf-8");
+  if (!raw.includes("live-owner")) throw new Error(`live lock should remain untouched: ${raw}`);
+  fs.rmSync(lockPath, { force: true });
 });
 
 fs.rmSync(tmpDir, { recursive: true, force: true });

@@ -1703,6 +1703,19 @@ This is a cross-project review pipeline body with enough content.
         !fs.existsSync(path.join(rAbrain, "projects", "alfadb-uamp", "maxims", "remote-test.md")),
         `entry must NOT be migrated via git-remote inference`,
       );
+
+      const badTarget = await runMigrationGo({
+        pensieveTarget: rParent,
+        abrainHome: rAbrain,
+        cwd: boundOther,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
+      });
+      assert(!badTarget.ok, `non-.pensieve target must fail, got ok=true`);
+      assert(
+        badTarget.preconditionFailures.some((f) => /must be the project \.pensieve directory/.test(f)),
+        `non-.pensieve target failure should be explicit, got: ${badTarget.preconditionFailures.join("; ")}`,
+      );
     }
 
     // (c) strict-bound projectId succeeds; HTTPS remote is ignored

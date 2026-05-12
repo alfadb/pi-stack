@@ -7,6 +7,7 @@ import {
   formatLocalIsoTimestamp,
   sedimentCheckpointPath,
   sedimentLocksDir,
+  withFileLock,
 } from "../_shared/runtime";
 
 /**
@@ -123,36 +124,13 @@ async function atomicWriteCheckpoint(projectRoot: string, file: CheckpointFile):
  * crashed without releasing.
  */
 async function withCheckpointLock<T>(projectRoot: string, fn: () => Promise<T>): Promise<T> {
-  const lockDir = sedimentLocksDir(projectRoot);
-  const lockPath = path.join(lockDir, "checkpoint.lock");
-  await fs.mkdir(lockDir, { recursive: true });
-  const start = Date.now();
-  while (true) {
-    try {
-      const handle = await fs.open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ pid: process.pid, op: "checkpoint", at: formatLocalIsoTimestamp() }));
-      await handle.close();
-      try {
-        return await fn();
-      } finally {
-        await fs.unlink(lockPath).catch(() => undefined);
-      }
-    } catch (e: any) {
-      if (e?.code !== "EEXIST") throw e;
-      // Steal stale lock (previous holder crashed).
-      try {
-        const stat = await fs.stat(lockPath);
-        if (Date.now() - stat.mtimeMs > CHECKPOINT_LOCK_STEAL_AFTER_MS) {
-          await fs.unlink(lockPath).catch(() => undefined);
-          continue;
-        }
-      } catch { /* ignore */ }
-      if (Date.now() - start > CHECKPOINT_LOCK_TIMEOUT_MS) {
-        throw new Error(`checkpoint lock timeout after ${CHECKPOINT_LOCK_TIMEOUT_MS}ms`);
-      }
-      await new Promise((r) => setTimeout(r, 50));
-    }
-  }
+  const lockPath = path.join(sedimentLocksDir(projectRoot), "checkpoint.lock");
+  return withFileLock(lockPath, {
+    timeoutMs: CHECKPOINT_LOCK_TIMEOUT_MS,
+    staleMs: CHECKPOINT_LOCK_STEAL_AFTER_MS,
+    retryMs: 50,
+    label: "checkpoint",
+  }, fn);
 }
 
 /**

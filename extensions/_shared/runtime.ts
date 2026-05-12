@@ -391,33 +391,144 @@ async function atomicWriteText(file: string, content: string): Promise<void> {
   }
 }
 
-async function withAbrainProjectStateLock<T>(abrainHome: string, fn: () => Promise<T>): Promise<T> {
+export interface FileLockOptions {
+  timeoutMs: number;
+  staleMs: number;
+  retryMs?: number;
+  label?: string;
+}
+
+export interface FileLockHandle {
+  lockPath: string;
+  token: string;
+  release(): Promise<void>;
+}
+
+interface FileLockRecord {
+  pid?: number;
+  token?: string;
+  created_at?: string;
+  label?: string;
+}
+
+function makeFileLockToken(): string {
+  return `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function parseFileLockRecord(raw: string): FileLockRecord {
+  try {
+    const parsed = JSON.parse(raw) as FileLockRecord;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function pidAppearsAlive(pid: number | undefined): boolean {
+  if (!pid || !Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err: any) {
+    // EPERM means a process exists but this user cannot signal it.
+    return err?.code === "EPERM";
+  }
+}
+
+async function releaseFileLockIfOwner(lockPath: string, token: string): Promise<void> {
   const fsPromises = await import("node:fs/promises");
-  const lockPath = path.join(abrainStateDir(abrainHome), "projects", "local-map.lock");
+  try {
+    const raw = await fsPromises.readFile(lockPath, "utf-8");
+    const record = parseFileLockRecord(raw);
+    if (record.token !== token) return;
+    await fsPromises.unlink(lockPath).catch(() => {});
+  } catch {}
+}
+
+async function tryStealStaleFileLock(lockPath: string, staleMs: number): Promise<boolean> {
+  const fsPromises = await import("node:fs/promises");
+  let raw: string;
+  let statMtimeMs: number;
+  try {
+    const stat = await fsPromises.stat(lockPath);
+    statMtimeMs = stat.mtimeMs;
+    if (Date.now() - statMtimeMs <= staleMs) return false;
+    raw = await fsPromises.readFile(lockPath, "utf-8");
+  } catch {
+    return false;
+  }
+
+  const record = parseFileLockRecord(raw);
+  if (pidAppearsAlive(record.pid)) return false;
+
+  // Owner-token guard: re-read immediately before unlink so a stale-lock
+  // stealer never deletes a fresh lock that appeared between stat/read and
+  // unlink. Legacy token-less locks fall back to exact raw-content match.
+  try {
+    const currentRaw = await fsPromises.readFile(lockPath, "utf-8");
+    const current = parseFileLockRecord(currentRaw);
+    if (record.token) {
+      if (current.token !== record.token) return false;
+    } else if (currentRaw !== raw) {
+      return false;
+    }
+    const currentStat = await fsPromises.stat(lockPath);
+    if (Date.now() - currentStat.mtimeMs <= staleMs) return false;
+    await fsPromises.unlink(lockPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function acquireFileLock(lockPath: string, opts: FileLockOptions): Promise<FileLockHandle> {
+  const fsPromises = await import("node:fs/promises");
   await fsPromises.mkdir(path.dirname(lockPath), { recursive: true });
-  const deadline = Date.now() + 5000;
-  let fd: import("node:fs/promises").FileHandle | null = null;
-  while (!fd) {
+  const token = makeFileLockToken();
+  const retryMs = opts.retryMs ?? 50;
+  const start = Date.now();
+  while (true) {
     try {
-      fd = await fsPromises.open(lockPath, "wx");
-      await fd.writeFile(JSON.stringify({ pid: process.pid, created_at: formatLocalIsoTimestamp() }) + "\n", "utf-8");
-      break;
+      const handle = await fsPromises.open(lockPath, "wx");
+      try {
+        await handle.writeFile(JSON.stringify({
+          pid: process.pid,
+          token,
+          created_at: formatLocalIsoTimestamp(),
+          label: opts.label,
+        }) + "\n", "utf-8");
+      } catch (err) {
+        await handle.close().catch(() => {});
+        await releaseFileLockIfOwner(lockPath, token);
+        throw err;
+      }
+      await handle.close();
+      return {
+        lockPath,
+        token,
+        release: () => releaseFileLockIfOwner(lockPath, token),
+      };
     } catch (err: any) {
       if (err?.code !== "EEXIST") throw err;
-      try {
-        const stat = await fsPromises.stat(lockPath);
-        if (Date.now() - stat.mtimeMs > 30_000) await fsPromises.unlink(lockPath);
-      } catch {}
-      if (Date.now() >= deadline) throw new Error(`local_map_lock_timeout: ${lockPath}`);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await tryStealStaleFileLock(lockPath, opts.staleMs);
+      if (Date.now() - start > opts.timeoutMs) throw new Error(`${opts.label ?? "file"} lock timeout after ${opts.timeoutMs}ms: ${lockPath}`);
+      await new Promise((resolve) => setTimeout(resolve, retryMs));
     }
   }
+}
+
+export async function withFileLock<T>(lockPath: string, opts: FileLockOptions, fn: () => Promise<T>): Promise<T> {
+  const handle = await acquireFileLock(lockPath, opts);
   try {
     return await fn();
   } finally {
-    await fd?.close().catch(() => {});
-    await fsPromises.unlink(lockPath).catch(() => {});
+    await handle.release();
   }
+}
+
+async function withAbrainProjectStateLock<T>(abrainHome: string, fn: () => Promise<T>): Promise<T> {
+  const lockPath = path.join(abrainStateDir(abrainHome), "projects", "local-map.lock");
+  return withFileLock(lockPath, { timeoutMs: 5000, staleMs: 30_000, retryMs: 50, label: "local_map" }, fn);
 }
 
 export interface BindAbrainProjectResult {

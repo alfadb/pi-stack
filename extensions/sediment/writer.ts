@@ -25,6 +25,7 @@ import {
   abrainProjectWorkflowsDir,
   abrainSedimentAuditPath,
   abrainSedimentLocksDir,
+  acquireFileLock,
   abrainWorkflowsDir,
   ensureProjectGitignoredOnce,
   ensureSedimentLegacyMigrated,
@@ -483,45 +484,21 @@ function mergeUpdateMarkdown(
  * subsequent /memory write call timed out after `lockTimeoutMs` (5s default)
  * with the misleading "sediment lock timeout" error. The pattern below is
  * borrowed from `withCheckpointLock` (`checkpoint.ts:139`) which uses the
- * same mtime-based reclaim. We don't bother parsing the JSON inside the
- * lock file (pid + created_at) for `process.kill(pid, 0)` checks because
- * pid recycle across reboots can give false-positives; mtime is the safer
- * signal.
+ * same owner-token stale reclaim helper. The helper validates the lock
+ * token before both stealing and releasing, so a slow previous holder cannot
+ * delete a fresh successor's lock in its finally block.
  */
 const SEDIMENT_LOCK_STEAL_AFTER_MS = 30_000;
 
 async function acquireLock(projectRoot: string, timeoutMs: number): Promise<LockHandle> {
-  const lockDir = sedimentLocksDir(projectRoot);
-  const lockPath = path.join(lockDir, "sediment.lock");
-  await fs.mkdir(lockDir, { recursive: true });
-
-  const start = Date.now();
-  while (true) {
-    try {
-      const handle = await fs.open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ pid: process.pid, created_at: formatLocalIsoTimestamp() }));
-      await handle.close();
-      return {
-        async release() {
-          await fs.unlink(lockPath).catch(() => undefined);
-        },
-      };
-    } catch (e: any) {
-      if (e?.code !== "EEXIST") throw e;
-      // Steal stale lock (previous holder crashed). Mirror checkpoint.ts:139.
-      try {
-        const stat = await fs.stat(lockPath);
-        if (Date.now() - stat.mtimeMs > SEDIMENT_LOCK_STEAL_AFTER_MS) {
-          await fs.unlink(lockPath).catch(() => undefined);
-          continue;
-        }
-      } catch {
-        /* lock vanished between EEXIST and stat — retry the wx open */
-      }
-      if (Date.now() - start > timeoutMs) throw new Error(`sediment lock timeout after ${timeoutMs}ms`);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
+  const lockPath = path.join(sedimentLocksDir(projectRoot), "sediment.lock");
+  const handle = await acquireFileLock(lockPath, {
+    timeoutMs,
+    staleMs: SEDIMENT_LOCK_STEAL_AFTER_MS,
+    retryMs: 100,
+    label: "sediment",
+  });
+  return { release: handle.release };
 }
 
 async function atomicWrite(file: string, content: string) {
@@ -1294,38 +1271,18 @@ function buildWorkflowMarkdown(draft: WorkflowDraft, slug: string): string {
 }
 
 async function acquireAbrainWorkflowLock(abrainHome: string, timeoutMs: number): Promise<LockHandle> {
-  // Same stale-lock reclaim as `acquireLock` above. The two locks are
-  // intentionally distinct files in different repos (project-side
+  // Same owner-token stale-lock reclaim as `acquireLock` above. The two
+  // locks are intentionally distinct files in different repos (project-side
   // sediment.lock vs abrain-side workflow.lock) so a hang on one doesn't
-  // block the other; both share the same SEDIMENT_LOCK_STEAL_AFTER_MS
-  // grace period.
-  const lockDir = abrainSedimentLocksDir(abrainHome);
-  const lockPath = path.join(lockDir, "workflow.lock");
-  await fs.mkdir(lockDir, { recursive: true });
-  const start = Date.now();
-  while (true) {
-    try {
-      const handle = await fs.open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ pid: process.pid, created_at: formatLocalIsoTimestamp() }));
-      await handle.close();
-      return {
-        async release() { await fs.unlink(lockPath).catch(() => undefined); },
-      };
-    } catch (e: any) {
-      if (e?.code !== "EEXIST") throw e;
-      try {
-        const stat = await fs.stat(lockPath);
-        if (Date.now() - stat.mtimeMs > SEDIMENT_LOCK_STEAL_AFTER_MS) {
-          await fs.unlink(lockPath).catch(() => undefined);
-          continue;
-        }
-      } catch {
-        /* lock vanished between EEXIST and stat — retry the wx open */
-      }
-      if (Date.now() - start > timeoutMs) throw new Error(`abrain workflow lock timeout after ${timeoutMs}ms`);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-  }
+  // block the other; both share the same grace period.
+  const lockPath = path.join(abrainSedimentLocksDir(abrainHome), "workflow.lock");
+  const handle = await acquireFileLock(lockPath, {
+    timeoutMs,
+    staleMs: SEDIMENT_LOCK_STEAL_AFTER_MS,
+    retryMs: 100,
+    label: "abrain workflow",
+  });
+  return { release: handle.release };
 }
 
 async function appendAbrainWorkflowAudit(abrainHome: string, event: Record<string, unknown>): Promise<string> {
