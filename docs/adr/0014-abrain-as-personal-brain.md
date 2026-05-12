@@ -158,13 +158,17 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 
 ### 待实施
 
-| 子 phase | 动作 | 验收 |
-|---|---|---|
-| **P0d** | TUI onboarding wizard（`/vault init` 全交互菜单）+ `/secret set` mask input + `vault import-env` `.env` ingest | wizard 走完七种 backend dynamic menu + mask + import |
-| **P1+（主表）** | abrain-pensieve-migration.md P2-P8：Facade dual-read · hard-coded `.pensieve` 清除 · freeze · 持锁迁移 · writer cutover · symlink · 删 fallback | grep 整 repo 无残留 hard-coded `.pensieve`，sediment writer 写 `~/.abrain/projects/<id>/` |
-| **Lane G** | `/about-me` command + `MEMORY-ABOUT-ME` extractor（identity 区 writer） | identity 区有条目产生 |
+| 子 phase | 动作 | 验收 | prerequisite |
+|---|---|---|---|
+| **P0d** | TUI onboarding wizard（`/vault init` 全交互菜单）+ `/secret set` mask input + `vault import-env` `.env` ingest | wizard 走完七种 backend dynamic menu + mask + import | — |
+| **workflows lane writer** | sediment writer 识别 `kind: pipeline` 或 `run-when-*.md` 文件名，路由到 `~/.abrain/workflows/`（跨项目）或 `~/.abrain/projects/<id>/workflows/`（项目特定，frontmatter `cross_project: true` 显式标记区分） | smoke：写一条 pipeline-型条目 → 出现在 abrain workflows/ 中 | — |
+| **一次性 per-repo 迁移** | `/memory migrate` 默认 dry-run 显示计划，`/memory migrate --go` 执行：git working tree clean precondition 检查 → mv `.pensieve/` 到 `~/.abrain/projects/<id>/` → frontmatter normalize 补 178 条 legacy 的 `kind` 字段 → pipelines 路由到 workflows 区 → sediment writer 通过 runtime resolver 自动定位新路径（不留 symlink） | grep 整 repo 无残留 hard-coded `.pensieve`；sediment writer 写 `~/.abrain/projects/<id>/`；14 个仓逐个迁完 | workflows lane writer（上行） |
+| **Lane G** | `/about-me` command + `MEMORY-ABOUT-ME` extractor（identity 区 writer） | identity 区有条目产生 | — |
+| **其他 lane writer** | skills / habits 区 writer，及跨项目 knowledge 写路径 | 各区有条目产生 | — |
 
 > 七区拓扑说明：extension activate 时 `ensureBrainLayout()`（`brain-layout.ts`）会创建全部七个顶层目录，但目前只有 `vault/`（P0c）和 `projects/`（memory Facade dual-read）被实际使用；identity / skills / habits / workflows / knowledge 是空壳，等待各自的 lane writer 落地。
+>
+> **与 abrain-pensieve-migration.md 原 8-phase 计划的差异**（v7.1 修订，2026-05-12）：原 P5-P8 持锁渐进迁移 · writer cutover · symlink · 删 fallback 四个 phase 合并为 **单仓一次性迁移**（`/memory migrate --go`）：git 提供逆向网 → 不需 backup 不需 symlink；per-repo 手工执行 → 不需 8-phase 全局协调。单用户场景 14 个仓变更不频，原为多人多机设计的渐进 phase 是过度工程。
 
 关键约束：P4 之前可 **完全 revert**（git revert 即可）；P5 之后是 forward-only；P6 之后的 delta 只能走 [migration playbook §3-4](../migration/abrain-pensieve-migration.md#3-rollback-playbookp5-半成品状态) 处理。
 

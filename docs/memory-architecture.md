@@ -145,6 +145,28 @@ sediment 写入时根据 kind + scope 决定目标目录。这是确定性映射
 | (any, status=deprecated) | 留在原目录 | 留在原目录 | 原位标记，不移动 |
 | (any, status=superseded) | 留在原目录 | 留在原目录 | 原位标记，不移动 |
 
+### 4.3.2 读侧 legacy 兼容（kind alias）
+
+写侧 kind 严格 7 种（上表 + ENTRY_KINDS）。读侧为兼容 v7 前古本 pensieve 数据，`extensions/memory/parser.ts:inferKindFromPath` 额外返回两个 **read-only legacy alias**：
+
+| alias kind | 触发条件 | 含义 |
+|---|---|---|
+| `pipeline` | 文件在 `pipelines/` 目录且 frontmatter 缺 `kind` 字段 | v6.x “工作流 pipeline”（如 `run-when-*.md` task blueprint），本质不是知识而是流程编排 |
+| `knowledge` | 文件在顶层 `knowledge/` 目录且 frontmatter 缺 `kind` 字段 | 古本 pensieve “catch-all”知识桶 |
+
+优先级：`frontmatter.kind` > `frontmatter.type` > `inferKindFromPath`。现代 sediment writer 写入总是带 `kind:` 字段，alias 仅在读 legacy 文件时生效。
+
+#### pipeline kind 的归属修订（v7.1）
+
+原设计中 pipeline 被当作一种“项目知识”。[ADR 0014](./adr/0014-abrain-as-personal-brain.md) v7.1 abrain 重设计后，pipeline 形态的内容（「触发词 + Task Blueprint + 完成标准」）**归属调整到 abrain `workflows/` 区**：
+
+- 跨项目可复用的流程（如 `run-when-reviewing-code`）→ `~/.abrain/workflows/`
+- 项目特定流程（如 `run-when-updating-claude-plugins`）→ `~/.abrain/projects/<id>/workflows/`
+
+**迁移前提条件**：abrain `workflows/` lane writer（sediment 侧）必须先落地。当前（2026-05-12）该 lane writer 未实现，pipeline 条目仍以 read-only legacy 形式存在于 `<project>/.pensieve/pipelines/`。实施线路见 ADR 0014 「待实施」表。
+
+**废除路径**：`workflows/` lane writer + `/memory migrate --go` 完成 14 个仓一次性迁移后，`pipelines/` 目录在新仓里不再产生。parser 的 `pipeline` alias 在所有 legacy 数据迁完后可删除（需 alfadb 拍板，预计 ≥1 轮迁移完成后）。
+
 ### 4.4 条目内部结构：Compiled Truth + Timeline（决策 5）
 
 **完整示例（avoid-long-argv-prompts）**：

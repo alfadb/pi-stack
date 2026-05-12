@@ -218,6 +218,29 @@ function makeSummary(compiledTruth: string, fallbackTitle: string): string {
   return selected.length > 240 ? `${selected.slice(0, 237)}...` : selected;
 }
 
+/**
+ * Infer entry kind from directory path.
+ *
+ * Authoritative kind set (write side, see extensions/sediment/validation.ts
+ * ENTRY_KINDS) is 7: maxim / decision / pattern / anti-pattern / fact /
+ * preference / smell. Writer only produces these.
+ *
+ * The two extra returns below — `"pipeline"` and `"knowledge"` — are READ-ONLY
+ * LEGACY ALIASES for pre-frontmatter pensieve entries that pre-date the v7
+ * frontmatter+compiled-truth format. Modern entries always carry an explicit
+ * `kind:` field in frontmatter (see parser.ts:~357 priority chain:
+ * `frontmatter.kind || frontmatter.type || inferKindFromPath`), so this fallback
+ * only triggers on legacy data without frontmatter.kind.
+ *
+ * Pipeline kind is being phased out: per ADR 0014 v7.1 abrain redesign,
+ * pipeline-shaped entries ("run-when-*.md" task blueprints) belong in
+ * abrain `workflows/` zone, not in project knowledge. Migration is gated by
+ * the abrain workflows lane writer (currently not implemented — see ADR 0014
+ * "待实施" section). Until migration, parser keeps the alias so existing
+ * legacy `pipelines/` and top-level `knowledge/` directories remain readable.
+ *
+ * Do not add new kind aliases here — extend ENTRY_KINDS instead.
+ */
 export function inferKindFromPath(relPath: string): string {
   const parts = relPath.split(/[\\/]+/);
   const dirs = new Set(parts.slice(0, -1));
@@ -227,6 +250,7 @@ export function inferKindFromPath(relPath: string): string {
   if (dirs.has("anti-patterns")) return "anti-pattern";
   if (dirs.has("facts")) return "fact";
   if (dirs.has("staging")) return "smell";
+  // Legacy aliases — see JSDoc above. Do not extend.
   if (dirs.has("pipelines")) return "pipeline";
   if (dirs.has("knowledge")) return "knowledge";
   return "fact";
