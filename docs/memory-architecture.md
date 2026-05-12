@@ -1,11 +1,12 @@
 # Pi 知识管理架构设计
 
-> ⚠️ **部分 superseded by [ADR 0014](adr/0014-abrain-as-personal-brain.md)（2026-05-09）+ [ADR 0015](adr/0015-memory-search-llm-driven-retrieval.md)（2026-05-10）+ [ADR 0016](adr/0016-sediment-as-llm-curator.md)（2026-05-10）**
+> ⚠️ **部分 superseded by [ADR 0014](adr/0014-abrain-as-personal-brain.md)（2026-05-09）+ [ADR 0015](adr/0015-memory-search-llm-driven-retrieval.md)（2026-05-10）+ [ADR 0016](adr/0016-sediment-as-llm-curator.md)（2026-05-10）+ [ADR 0017](adr/0017-project-binding-strict-mode.md)（2026-05-12）**
 >
-> 本文档的以下部分**已被 ADR 0014 + [brain-redesign-spec.md](brain-redesign-spec.md) 或 ADR 0015 取代**：
+> 本文档的以下部分**已被 ADR 0014 + [brain-redesign-spec.md](brain-redesign-spec.md)、ADR 0015 或 ADR 0017 取代**：
 > - **§4.1 三层 Scope（Session / Project / World）的物理拓扑**：`<project>/.pensieve/` 物理位置已废止；项目知识迁入 `~/.abrain/projects/<id>/`。所有数据统一在 `~/.abrain/` 内部按七区结构（identity/skills/habits/workflows/projects/knowledge/vault）组织。
 > - **scope=project\|world 二元划分（含 4.1 表 / 8 节 sediment 路由 / 9 节 promotion）**：被 brain 内部结构吸收。Lane B（manual promote）和 Lane D（auto-promote）失去意义。新增 Lane G（about-me declare）和 Lane V（vault declare）。
 > - **§7 工具接口**：`memory_search` 等 facade 接口形状保留，但 `scope` 参数语义重新定义（详见 brain-redesign-spec.md §4）。
+> - **project identity / migration target selection**：B4.5 后项目身份由 `.abrain-project.json` + `~/.abrain/projects/<id>/_project.json` + `~/.abrain/.state/projects/local-map.json` strict binding 决定；`/memory migrate --project`、git remote 推断、cwd 推断均被 ADR 0017 取代。
 > - **§5.3 `memory_search` 算法规格 / §3.8 Graceful degradation**：被 ADR 0015 supersede。`memory_search` runtime 只走双阶段 LLM retrieval；grep+tf-idf 代码仅作为历史 baseline/diagnostics，不作为降级路径。LLM 失败 hard error。
 >
 > **仍然有效的部分**：7 节 LLM-facing facade 契约 / Compiled Truth + Timeline 双段格式 / Lint 规则 / Brain Health 评分 / 8 节 sediment pipeline 的 extractor/triage/writer/reviewer 内核。**修正**：sediment Lane C 的 mechanical semantic gates / dedupe gates 已被 ADR 0016 删除；默认转向 LLM curator + sensitive-info/storage hard gates，git/audit 作为回滚面。

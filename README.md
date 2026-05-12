@@ -38,9 +38,9 @@
 | 知识模型 | 7 种 kind（maxim/decision/anti-pattern/pattern/fact/preference/smell）+ confidence 0-10 + lifetime 正交 |
 | Facade 模式 | LLM 只看到统一的 `memory_*` 读接口，底层存储和索引拓扑变更不影响上层 |
 
-详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 16 条 ADR。
+详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 17 条 ADR。
 
-> ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 §D3 supersede；ADR 0013 Lane C 的 G2-G13 / readiness / rolling / rate / sampling 机械 gate 被 ADR 0016 删除（详见各 ADR 顶部状态字段）。
+> ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 §D3 supersede；ADR 0013 Lane C 的 G2-G13 / readiness / rolling / rate / sampling 机械 gate 被 ADR 0016 删除；ADR 0017 接受 B4.5 Project Binding Strict Mode，并取代 ADR 0014 / brain-redesign-spec 中旧的 `_bindings.md` + remote/cwd 推断模型（详见各 ADR 顶部状态字段）。
 >
 > 文件布局参考：[docs/directory-layout.md](./docs/directory-layout.md) — 反映当前实际实现状态。
 
