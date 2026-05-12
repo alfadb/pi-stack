@@ -1,6 +1,6 @@
 # Migration — `.pensieve/` → `~/.abrain/projects/<id>/`
 
-> **状态**：spec ready；`/memory migrate --go` 实施为 ADR 0014「待实施」B4（pending）
+> **状态**：✅ B4 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，12 个 smoke 场景覆盖。接下来是手动逐仓迁移（§4 优先级表）。
 > **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [brain-redesign-spec.md](../brain-redesign-spec.md)
 > **前置**：[vault-bootstrap.md](vault-bootstrap.md)（vault 基础设施已 ship，P0a-P0c.read）
 
@@ -18,16 +18,17 @@
 | **symlink** | 不留 | runtime resolver 在 sediment writer 内部定位新路径；symlink 是另一种 split-brain 风险源 |
 | **dual-read 期** | memory facade 长期 dual-read `.pensieve/` + `~/.abrain/projects/<id>/`（已 ship） | 单仓迁完即 forward-only；其他仓未迁仍读旧路径，无需统一切换 |
 
-## 2. precondition（dry-run + --go 均强制检查）
+## 2. precondition（`--go` 强制检查，dry-run 跳过）
 
-执行前 `/memory migrate` 验证：
+执行 `/memory migrate --go` 验证：
 
 1. **父仓 git working tree clean**（`git status --porcelain` 为空）—— dirty 时阻止，提示先 commit
 2. **`.pensieve/` 内文件 tracked > 0** —— sub2api 这种 untracked 仓需要先 `git add .pensieve && git commit` 否则失去 git 回滚网
-3. **`~/.abrain` working tree clean** —— 确保 abrain 一侧 mv 后能干净 commit、出问题能 `git reset --hard HEAD~1`
-4. **projectId 可推断** —— 优先用 git remote origin（`alfadb/uamp` → `alfadb-uamp`），兜底 `path.basename(cwd)`；冲突时报错让用户 `--project=<id>` 显式指定
+3. **`.pensieve/` 内有至少 1 个用户 entry­**（排除 `.state/`/`.index/` 下的派生文件）——避免幂等双迁时跟仓中只剩 derived 文件仍提交一个空迁移 commit
+4. **`~/.abrain` working tree clean** —— 确保 abrain 一侧 mv 后能干净 commit、出问题能 `git reset --hard HEAD~1`
+5. **projectId 可推断**。优先级：`--project=<id>` 显式 override > git remote origin（`github.com/alfadb/pi` → `alfadb-pi`）> 父仓 cwd 末二段拼接（`~/work/uamp/full` → `uamp-full`，避免多个 `full` 冲突）。最终 id 走 `validateAbrainProjectId`，不过则 `--go` 拒绝。
 
-dry-run 时这些检查显示为警告（提示但不阻止预览）；`--go` 时升级为阻止。
+dry-run（`/memory migrate` 默认 / `/memory migrate --dry-run`）仅列出 legacy entry、不检 precondition；它是护栏前的调查工具，不是迁移预览。要看 per-repo 迁移的 dry-run，要么手动检查上述 5 项，要么直接 `--go` 让它 fail-fast。
 
 ## 3. 迁移动作（`/memory migrate --go` 内部步骤）
 
@@ -106,11 +107,19 @@ git reset --hard HEAD~1           # 撤销 abrain 一侧的 mv-in commit
 B1: workflows lane writer (✅ shipped 2026-05-12)
   → writeAbrainWorkflow API 可用；为 /memory migrate --go 提供 pipeline routing target
 
-B4: /memory migrate --go 实施 (pending)
-  → 实现本文件 §3 的迁移动作；本文件即 spec
+B3+B7: per-file migration substrate 剩离 (✅ shipped 2026-05-12)
+  → 删除 sediment/migration.ts + /sediment migrate-one + /sediment migration-backups
+
+B4: /memory migrate --go (✅ shipped 2026-05-12)
+  → extensions/memory/migrate-go.ts；preflight + frontmatter 归一化 + pipeline 路由
+  → 12 个 smoke 场景覆盖（happy path / dirty preflight / 幂等 / commits）
+
+B5: writer cutover (pending)
+  → sediment writeProjectEntry 走 abrain projects 路径而非 <cwd>/.pensieve。
+  → ­14 仓完成迁移后拍板。
 
 P0d: vault wizard / mask input / .env import (pending)
-  → 与 B4 独立，可并行
+  → 与 B5 独立，可并行
 
 Lane G: /about-me + MEMORY-ABOUT-ME (pending)
 其他 lane writer: skills / habits / world knowledge (pending)

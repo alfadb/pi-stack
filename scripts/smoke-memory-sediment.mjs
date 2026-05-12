@@ -147,6 +147,7 @@ async function main() {
     const { rebuildGraphIndex } = req("./memory/graph.js");
     const { rebuildMarkdownIndex } = req("./memory/index-file.js");
     const { planMigrationDryRun, writeMigrationReport } = req("./memory/migrate.js");
+    const { runMigrationGo, formatMigrationGoSummary } = req("./memory/migrate-go.js");
     const { runDoctorLite } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow } = req("./sediment/writer.js");
@@ -1108,6 +1109,215 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       const gitLog = execFileSync("git", ["-C", wfHome, "log", "--pretty=%s"], { encoding: "utf-8" });
       const workflowCommits = gitLog.split("\n").filter((s) => s.startsWith("workflow: ")).length;
       assert(workflowCommits >= 2, `expected ≥2 workflow commits in abrain git log, got ${workflowCommits}:\n${gitLog}`);
+    }
+
+    // === per-repo migration --go (B4) ====================================
+    // End-to-end: build a fake parent repo with .pensieve mix (modern entry,
+    // legacy short-term entry without schema_version, project-specific
+    // pipeline, cross-project pipeline, derived index file to skip), build
+    // a fake abrain repo, run runMigrationGo, assert routing + normalization
+    // + commits + preflight rejection on dirty parent. Stays offline.
+    {
+      const goParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-go-parent-"));
+      execFileSync("git", ["-C", goParent, "init", "-q"]);
+      execFileSync("git", ["-C", goParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", goParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", goParent, "config", "commit.gpgsign", "false"]);
+
+      // modern v1 maxim
+      writeFile(
+        path.join(goParent, ".pensieve", "maxims", "test-rule.md"),
+        makeEntry({ title: "Test Rule", kind: "maxim" }),
+      );
+      // legacy short-term entry: no schema_version, no kind, weird path
+      writeFile(
+        path.join(goParent, ".pensieve", "short-term", "maxims", "legacy.md"),
+        `---
+type: maxim
+title: Legacy Rule
+status: active
+created: 2026-05-08
+---
+# Legacy Rule
+
+Body.
+`,
+      );
+      // pipeline: project-specific (no cross_project flag)
+      writeFile(
+        path.join(goParent, ".pensieve", "pipelines", "run-when-coding.md"),
+        `---
+title: Run when coding
+trigger: 用户要求写代码
+status: active
+created: 2026-05-08
+---
+# Run when coding
+
+**Trigger**: 用户要求写代码
+
+## Task Blueprint
+
+1. Read the request carefully.
+2. Plan, then implement.
+`,
+      );
+      // pipeline: cross-project (cross_project: true)
+      writeFile(
+        path.join(goParent, ".pensieve", "pipelines", "run-when-reviewing.md"),
+        `---
+title: Run when reviewing
+trigger: review request
+cross_project: true
+status: active
+created: 2026-05-08
+---
+# Run when reviewing
+
+This is a cross-project review pipeline body with enough content.
+`,
+      );
+      // derived index/state files: markdownFilesForTarget already filters
+      // them via IGNORE_DIRS + rg --glob exclusions, so they don't show up
+      // as either migrated or skipped. We seed both anyway to lock in that
+      // they never appear in the migration entry list.
+      writeFile(path.join(goParent, ".pensieve", ".index", "graph.json"), "{}");
+      writeFile(path.join(goParent, ".pensieve", ".state", "checkpoint.md"), "derived state file (not user content)");
+
+      execFileSync("git", ["-C", goParent, "add", "-A"]);
+      execFileSync("git", ["-C", goParent, "commit", "-q", "-m", "init pensieve"]);
+
+      const goAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-go-abrain-"));
+      execFileSync("git", ["-C", goAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", goAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", goAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", goAbrain, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(goAbrain, "README.md"), "# abrain home (smoke)\n");
+      execFileSync("git", ["-C", goAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", goAbrain, "commit", "-q", "-m", "init abrain"]);
+
+      const goOpts = {
+        pensieveTarget: path.join(goParent, ".pensieve"),
+        abrainHome: goAbrain,
+        projectId: "test-project",
+        cwd: goParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
+      };
+
+      // 1) Preflight rejects dirty parent
+      fs.writeFileSync(path.join(goParent, "dirty-file.txt"), "oops");
+      const dirty = await runMigrationGo(goOpts);
+      assert(dirty.ok === false, `dirty parent must fail preflight, got ok=${dirty.ok}`);
+      assert(
+        dirty.preconditionFailures.some((f) => /not clean/.test(f)),
+        `dirty parent failure must mention 'not clean': ${dirty.preconditionFailures.join("; ")}`,
+      );
+      assert(dirty.movedCount === 0 && dirty.workflowCount === 0, `dirty preflight must not migrate anything`);
+      fs.unlinkSync(path.join(goParent, "dirty-file.txt"));
+
+      // 2) Preflight rejects when abrain dirty
+      fs.writeFileSync(path.join(goAbrain, "dirty-file.txt"), "oops");
+      const abrainDirty = await runMigrationGo(goOpts);
+      assert(abrainDirty.ok === false, `dirty abrain must fail preflight`);
+      assert(
+        abrainDirty.preconditionFailures.some((f) => /abrain.*not clean/i.test(f)),
+        `dirty abrain failure should mention abrain: ${abrainDirty.preconditionFailures.join("; ")}`,
+      );
+      fs.unlinkSync(path.join(goAbrain, "dirty-file.txt"));
+
+      // 3) Happy path migration
+      const result = await runMigrationGo(goOpts);
+      assert(result.ok, `migration should succeed, got failures: ${JSON.stringify(result.preconditionFailures)}`);
+      assert(result.projectId === "test-project", `projectId mismatch: ${result.projectId}`);
+      assert(result.projectIdSource === "explicit", `projectIdSource should be explicit, got ${result.projectIdSource}`);
+      assert(result.movedCount === 2, `expected 2 knowledge entries moved, got ${result.movedCount} (entries=${JSON.stringify(result.entries)})`);
+      assert(result.workflowCount === 2, `expected 2 workflows routed, got ${result.workflowCount}`);
+      assert(result.failedCount === 0, `expected 0 failures, got ${result.failedCount}`);
+      // Derived index/state files are pre-filtered by markdownFilesForTarget
+      // (parser.ts IGNORE_DIRS + listFilesWithRg --glob), so they're invisible
+      // to migrate-go and never show up as migrated OR skipped.
+      assert(result.skippedCount === 0, `derived files must be pre-filtered, got ${result.skippedCount} skips`);
+      assert(
+        !result.entries.some((e) => /\.state|\.index/.test(e.source)),
+        `no entry should reference .state/.index source: ${JSON.stringify(result.entries)}`,
+      );
+      // Both derived files remain in .pensieve/ (untouched by migration).
+      assert(
+        fs.existsSync(path.join(goParent, ".pensieve", ".index", "graph.json")),
+        `.index/graph.json should remain in .pensieve (not touched by migration)`,
+      );
+      assert(
+        fs.existsSync(path.join(goParent, ".pensieve", ".state", "checkpoint.md")),
+        `.state/checkpoint.md should remain in .pensieve (not touched by migration)`,
+      );
+
+      // 4) Knowledge entries moved to abrain projects dir
+      const modernTarget = path.join(goAbrain, "projects", "test-project", "maxims", "test-rule.md");
+      const legacyTarget = path.join(goAbrain, "projects", "test-project", "maxims", "legacy.md");
+      assert(fs.existsSync(modernTarget), `modern entry should land at ${modernTarget}`);
+      assert(fs.existsSync(legacyTarget), `legacy entry should land at ${legacyTarget}`);
+      assert(!fs.existsSync(path.join(goParent, ".pensieve", "maxims", "test-rule.md")), `source should be removed from .pensieve`);
+      assert(!fs.existsSync(path.join(goParent, ".pensieve", "short-term", "maxims", "legacy.md")), `legacy source should be removed`);
+
+      // 5) Legacy entry normalized: gained schema_version, scope, kind,
+      // confidence, schema_version line; gained migrated-from-legacy timeline.
+      const legacyText = fs.readFileSync(legacyTarget, "utf-8");
+      assert(/^schema_version: 1$/m.test(legacyText), `legacy missing schema_version:1\n${legacyText}`);
+      assert(/^scope: project$/m.test(legacyText), `legacy missing scope: project`);
+      assert(/^kind: maxim$/m.test(legacyText), `legacy kind should be maxim (mapped from type)`);
+      assert(/^id: project:test-project:legacy$/m.test(legacyText), `legacy id mismatch`);
+      assert(/migrated-from-legacy/.test(legacyText), `legacy missing migration timeline note`);
+      assert(/^## Timeline$/m.test(legacyText), `legacy missing ## Timeline heading`);
+
+      // 6) Modern entry preserved (re-normalized) and still has a migration
+      // timeline entry, but original frontmatter values survived.
+      const modernText = fs.readFileSync(modernTarget, "utf-8");
+      assert(/^id: project:test-project:test-rule$/m.test(modernText), `modern id mismatch:\n${modernText}`);
+      assert(/^kind: maxim$/m.test(modernText), `modern kind preserved`);
+      assert(/migrated-from-legacy/.test(modernText), `modern entry should also gain migration timeline marker`);
+
+      // 7) Pipeline routing: project-specific → ~/.abrain/projects/<id>/workflows/
+      const wfProj = path.join(goAbrain, "projects", "test-project", "workflows", "run-when-coding.md");
+      assert(fs.existsSync(wfProj), `project workflow should land at ${wfProj}`);
+      const wfProjText = fs.readFileSync(wfProj, "utf-8");
+      assert(/^kind: workflow$/m.test(wfProjText), `workflow kind missing`);
+      assert(/^cross_project: false$/m.test(wfProjText), `project workflow should have cross_project: false`);
+
+      // 8) Pipeline routing: cross-project → ~/.abrain/workflows/
+      const wfCross = path.join(goAbrain, "workflows", "run-when-reviewing.md");
+      assert(fs.existsSync(wfCross), `cross-project workflow should land at ${wfCross}`);
+      const wfCrossText = fs.readFileSync(wfCross, "utf-8");
+      assert(/^cross_project: true$/m.test(wfCrossText), `cross-project workflow should have cross_project: true`);
+
+      // 9) Parent repo commit: "chore: migrate .pensieve → ~/.abrain/projects/..."
+      const parentLog = execFileSync("git", ["-C", goParent, "log", "--pretty=%s"], { encoding: "utf-8" });
+      assert(/^chore: migrate \.pensieve → ~\/\.abrain\/projects\/test-project/m.test(parentLog), `parent commit message mismatch:\n${parentLog}`);
+      assert(result.parentCommitSha && /^[0-9a-f]{40}$/.test(result.parentCommitSha), `parent commit sha invalid: ${result.parentCommitSha}`);
+
+      // 10) Abrain repo commit: workflows commit themselves individually +
+      // the migrate(in) commit captures knowledge entries.
+      const abrainLog = execFileSync("git", ["-C", goAbrain, "log", "--pretty=%s"], { encoding: "utf-8" });
+      assert(/^migrate\(in\): test-project/m.test(abrainLog), `abrain commit message missing:\n${abrainLog}`);
+      assert(/^workflow: run-when-coding$/m.test(abrainLog), `project workflow commit missing:\n${abrainLog}`);
+      assert(/^workflow: run-when-reviewing$/m.test(abrainLog), `cross-project workflow commit missing:\n${abrainLog}`);
+
+      // 11) Summary string sanity
+      const summary = formatMigrationGoSummary(result, goParent);
+      assert(/Migration complete/.test(summary), `summary should announce completion`);
+      assert(/projectId=test-project/.test(summary), `summary should include projectId`);
+      assert(/Rollback/.test(summary), `summary should mention rollback`);
+
+      // 12) Idempotency: running again must fail preflight cleanly because
+      // .pensieve no longer has user entries (only derived .index/.state
+      // files remain, which migrate-go ignores). This protects against
+      // accidental empty-migration commits.
+      const second = await runMigrationGo(goOpts);
+      assert(second.ok === false, `second run must not succeed`);
+      assert(
+        second.preconditionFailures.some((f) => /no user entries to migrate/.test(f)),
+        `second run should fail with no-user-entries: ${second.preconditionFailures.join("; ")}`,
+      );
     }
 
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));

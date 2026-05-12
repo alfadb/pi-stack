@@ -82,7 +82,8 @@ alfadb/pi-astack/
 │   │   ├── llm-search.ts              # ADR 0015 双阶段 LLM retrieval（stage1 candidate + stage2 rerank）
 │   │   ├── lint.ts                    # T1-T10 lint engine
 │   │   ├── doctor.ts                  # doctor-lite aggregate health report
-│   │   ├── migrate.ts                 # legacy migration dry-run planner
+│   │   ├── migrate.ts                 # legacy migration dry-run planner (read-only inventory)
+│   │   ├── migrate-go.ts              # B4 per-repo 一次性迁移执行器 (.pensieve → ~/.abrain/projects/<id>/)
 │   │   ├── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
 │   │   └── index-file.ts              # generated enhanced _index.md rebuild writer
 │   ├── sediment/                      # ✅ 实现：project-only writer + direct LLM auto-write + ADR 0016 curator/update substrate + B1 abrain workflows lane writer
@@ -132,7 +133,7 @@ alfadb/pi-astack/
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
 | `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
-| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator + B1 abrain workflows lane writer；writer 按需创建 `.pensieve/`；bg 在飞时不推进 checkpoint/不写 skip audit；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控。原 per-file `migration.ts` 基底于 2026-05-12 剥离，per-repo 迁移走 ADR 0014「待实施」 B4。） | Phase 1.4 A1+A2+A3 + ADR 0016 |
+| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator + B1 abrain workflows lane writer；writer 按需创建 `.pensieve/`；bg 在飞时不推进 checkpoint/不写 skip audit；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控。原 per-file `migration.ts` 基底于 2026-05-12 剥离；per-repo 迁移工具 `/memory migrate --go` 于 2026-05-12 ship（B4 ✅，`extensions/memory/migrate-go.ts`）。） | Phase 1.4 A1+A2+A3 + ADR 0016 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
 | `extensions/abrain/` | ✅ vault P0a-c 完全 ship： backend-detect + master-key bootstrap + vaultWriter + vaultReader + /vault + /secret （default = boot-time active project，--global / --project=<id> opt-out，--all-projects 枚举） + `vault_release(key, scope?, reason?)` （pre-flight + deny-first + i18n + description rendering） + boot-aware `$VAULT_*` / `$PVAULT_*` / `$GVAULT_*` bash injection 与 default-withheld + literal redaction + read-path audit closure（release / release_denied / release_blocked / bash_inject / bash_inject_block / bash_output_release / bash_output_withhold） | ADR 0014 §D4 P0a/P0b/P0c.write/P0c.read + §D4 P1 project routing (2026-05-09 → 2026-05-11) |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |

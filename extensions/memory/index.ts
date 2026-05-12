@@ -16,6 +16,8 @@ import { findEntry, listEntries, neighbors, serializeEntry } from "./search";
 import { llmSearchEntries } from "./llm-search";
 import { formatLintReport, lintTarget } from "./lint";
 import { formatMigrationPlan, planMigrationDryRun, writeMigrationReport } from "./migrate";
+import { formatMigrationGoSummary, runMigrationGo } from "./migrate-go";
+import * as os from "node:os";
 import { formatDoctorLiteReport, runDoctorLite } from "./doctor";
 import { checkBacklinks, formatBacklinkReport, formatGraphRebuildReport, rebuildGraphIndex } from "./graph";
 import { formatMarkdownIndexRebuildReport, rebuildMarkdownIndex } from "./index-file";
@@ -81,11 +83,11 @@ function registerMemoryCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("memory", {
-    description: "Memory maintenance commands: /memory lint [path], /memory migrate --dry-run [--report] [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path], /memory doctor-lite [path]",
+    description: "Memory maintenance commands: /memory lint [path], /memory migrate [--dry-run|--go] [--report] [--project=<id>] [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path], /memory doctor-lite [path]",
     getArgumentCompletions(prefix: string) {
       const items = [
         "lint", "lint .pensieve",
-        "migrate --dry-run", "migrate --dry-run --report", "migrate --dry-run .pensieve",
+        "migrate", "migrate --dry-run", "migrate --dry-run --report", "migrate --go", "migrate --go .pensieve",
         "doctor-lite", "doctor-lite .pensieve",
         "check-backlinks", "check-backlinks .pensieve",
         "rebuild --graph", "rebuild --graph .pensieve",
@@ -110,15 +112,42 @@ function registerMemoryCommand(pi: ExtensionAPI) {
       }
 
       if (subcommand === "migrate") {
+        // Slash surface (per user preference): `/memory migrate` defaults to
+        // dry-run; `--go` executes per-repo migration. Mutually exclusive.
+        // No `--apply --yes` double-confirmation — git working tree clean
+        // is the precondition, `git reset --hard HEAD~1` is the rollback
+        // (see docs/migration/abrain-pensieve-migration.md §5).
         const dryRun = rest.includes("--dry-run") || rest.includes("-n");
-        const writeReport = rest.includes("--report");
-        if (!dryRun) {
-          ctx.ui.notify("Usage: /memory migrate --dry-run [--report] [path]. Actual markdown writes are reserved for the sediment/migration writer.", "warning");
+        const goMode = rest.includes("--go");
+        if (dryRun && goMode) {
+          ctx.ui.notify("/memory migrate: cannot combine --dry-run and --go (default with no flag is dry-run).", "warning");
           return;
         }
-        const targetParts = rest.filter((part) => part !== "--dry-run" && part !== "-n" && part !== "--report");
+        const writeReport = rest.includes("--report");
+        const projectIdFlag = rest.find((part) => part.startsWith("--project="))?.slice("--project=".length);
+        const targetParts = rest.filter((part) =>
+          part !== "--dry-run" && part !== "-n" && part !== "--report" && part !== "--go" && !part.startsWith("--project="),
+        );
         const targetArg = targetParts.join(" ").trim();
         const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
+
+        if (goMode) {
+          const abrainHome = process.env.ABRAIN_ROOT
+            ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+            : path.join(os.homedir(), ".abrain");
+          const result = await runMigrationGo({
+            pensieveTarget: target,
+            abrainHome,
+            projectId: projectIdFlag,
+            cwd,
+            settings,
+          });
+          const summary = formatMigrationGoSummary(result, cwd);
+          const tone = !result.ok || result.failedCount > 0 ? "error" : result.movedCount + result.workflowCount > 0 ? "info" : "warning";
+          ctx.ui.notify(summary, tone);
+          return;
+        }
+
         const report = await planMigrationDryRun(target, settings, undefined, cwd);
         const messages = [formatMigrationPlan(report)];
         if (writeReport) {
@@ -171,7 +200,7 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate --dry-run [--report] [path] OR /memory doctor-lite [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]", "warning");
+      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate [--dry-run|--go] [--report] [--project=<id>] [path] OR /memory doctor-lite [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]", "warning");
     },
   });
 }

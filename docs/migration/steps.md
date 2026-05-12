@@ -23,7 +23,7 @@
 **验收标准**：
 - [x] Markdown 条目格式标准化（frontmatter schema v1 + compiled truth + `## Timeline`）— 真实迁移已完成（~/.pi 父仓 173 → 0 pending，lint 0 errors，dead links 0）
 - [x] 10 条 Lint 规则实现（T1-T10；`/memory lint [path]` slash command，CLI wrapper 未实现；另有 `/memory doctor-lite [path]` 聚合报告）
-- [x] 旧格式迁移工具：`/memory migrate --dry-run [path]` 全库 read-only 计划生成。per-file apply substrate（`/sediment migrate-one` + `/sediment migration-backups` + restore）于 2026-05-12 随 Phase 1 迁移完成后剥离；per-repo 迁移走 ADR 0014 `/memory migrate --go`（pending B4）
+- [x] 旧格式迁移工具：`/memory migrate --dry-run [path]` 全库 read-only 计划生成 + `/memory migrate --go` per-repo 一次性迁移（2026-05-12 B4 ship：preflight 检查 → frontmatter 归一化 → pipeline routing → 两仓各一个 commit）。per-file apply substrate（`/sediment migrate-one` + `/sediment migration-backups` + restore）于 2026-05-12 随 Phase 1 迁移完成后剥离
 - [x] `memory_search` grep-based 实现（Phase 1 baseline；已由 ADR 0015 LLM retrieval 替代为 runtime 路径；grep/tf-idf 保留作 legacy diagnostics）
 - [x] `memory_get` / `memory_list` 实现（另含 `memory_neighbors` 只读遍历）
 - [x] `_index.md` 自动生成（已实现 `/memory rebuild --index [path]`）
@@ -76,7 +76,7 @@
 
 **已剥离**（2026-05-12）：per-file apply substrate（`extensions/sediment/migration.ts`、`/sediment migrate-one --plan/--apply --yes/--restore`、`/sediment migration-backups`、backup 子系统）随 Phase 1 迁移完成后剥离。设计动机：per-file workflow 是 Phase 1 为 173 条 legacy entry 定制的临时机械，迁移完成后它就不再服务于任何路径，反而产生两个负担：（1）作为 slash command 出现在提示里，误导 LLM 去调用不需要的备份逻辑；（2）backup 子系统与 git 重复。后续使用场景（例如 ADR 0014 .pensieve → abrain 迁移）全部走 per-repo、不走 per-file。
 
-**per-repo 后续**：ADR 0014「待实施」B4（`/memory migrate --go`）——git working tree clean 作为 precondition，不做 backup，不留 symlink，逆向走 `git checkout HEAD -- .pensieve` + `git reset --hard HEAD~1`。
+**per-repo 迁移（2026-05-12 B4 ✅ shipped）**：`/memory migrate --go`——`extensions/memory/migrate-go.ts`，git working tree clean 作为 precondition，不做 backup，不留 symlink，逆向走 `git checkout HEAD~1 -- .pensieve` + `git reset --hard HEAD~1`。5 项 preflight（父仓 git clean / `.pensieve` tracked / 有用户 entry / abrain 仓 git clean / projectId 可推断）。Pipeline 路由走 `writeAbrainWorkflow`，其余 7 kind atomic write 到 `~/.abrain/projects/<id>/<kind-dir>/`。14 仓手动逐个触发，优先级表见 [abrain-pensieve-migration.md §4](./abrain-pensieve-migration.md#4-14-仓迁移建议顺序)。
 
 ### Phase 1.3 — memory_search（ADR 0015 LLM-driven；无 grep 降级）
 
@@ -166,7 +166,7 @@ memory_search(query: "dispatch agent prompt")
 已删除 LLM extractor dry-run/readiness 链：
 - **ADR 0016 更新（2026-05-10）**：`/sediment llm --dry-run`、`/sediment llm-report`、`/sediment readiness`、`scripts/seed-llm-dry-runs.mjs` 与 `llm_dry_run` readiness gate 已删除。auto-write 不再需要 dry-run 样本；git + audit 是回滚面。
 
-原 migration apply 安全入口（`/sediment migrate-one --plan/--apply --yes/--restore` + `/sediment migration-backups`）随 Phase 1 迁移完成于 2026-05-12 剥离。详见 Phase 1.2 中「已剥离」说明。per-repo 迁移走 ADR 0014 「待实施」 B4（`/memory migrate --go`），不继承 per-file substrate 任何代码
+原 migration apply 安全入口（`/sediment migrate-one --plan/--apply --yes/--restore` + `/sediment migration-backups`）随 Phase 1 迁移完成于 2026-05-12 剥离。详见 Phase 1.2 中「已剥离」说明。per-repo 迁移走 `/memory migrate --go`（2026-05-12 B4 ✅ shipped），在 `extensions/memory/migrate-go.ts`，不继承 per-file substrate 任何代码
 
 已完成 LLM auto-write lane（A1 + A2 + A3，2026-05-08）：
 - A1（历史实现）：早期曾用 `writeProjectEntry.opts.policy`、`forceProvisional`、`disallowMaxim`、`maxConfidence`、G13 near-duplicate 等机械 gates 保护 LLM auto-write。
@@ -206,7 +206,7 @@ memory_search(query: "dispatch agent prompt")
 # → 返回 deterministic duplicate 检查结果
 
 # /sediment migrate-one / /sediment migration-backups 于 2026-05-12 剥离。
-# per-repo 迁移后续走 ADR 0014 `/memory migrate --go`（pending B4）。
+# per-repo 迁移走 `/memory migrate --go`（2026-05-12 B4 ✅ shipped，详 abrain-pensieve-migration.md §3）。
 ```
 
 **当前 live 验收**：

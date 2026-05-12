@@ -21,7 +21,7 @@
 ### 原 P0/P1 问题中已结案部分（2026-05-11 同步到 git log）
 
 - **Q0 sediment agent prompt** → ✅ **已解决**：ADR 0016 LLM curator 实现完成。`extensions/sediment/llm-extractor.ts` + `extensions/sediment/curator.ts` 落地（commit `f267711` / `4b4432f` 等 Phase 1.4 系列）。kind/confidence 判断、op 决策、compiled truth 格式化全部交 LLM curator；skip/create/update/merge/archive/supersede/delete 七种 op 全部实现。
-- **Q1 旧 .pensieve 迁移** → ✅ **已解决**：~/.pi 父仓 173 → 0 pending，14 batch 于 2026-05-08 完成（详 `apply-checklist.md`）。原 per-file 迁移基底（`extensions/sediment/migration.ts`）于 2026-05-12 剥离；per-repo 迁移走 ADR 0014 `/memory migrate --go`（pending B4）。
+- **Q1 旧 .pensieve 迁移** → ✅ **已解决**：~/.pi 父仓 173 → 0 pending，14 batch 于 2026-05-08 完成（详 `apply-checklist.md`）。原 per-file 迁移基底（`extensions/sediment/migration.ts`）于 2026-05-12 剥离；per-repo 迁移工具 `/memory migrate --go` 于 2026-05-12 ship（B4 ✅，`extensions/memory/migrate-go.ts`），14 仓手动逐个触发。
 - **Q4 `_index.md` 格式** → ✅ **已解决**：gitignored，由 `extensions/memory/index-file.ts` rebuild；`/memory rebuild --index` 可手动触发。Orphans 筛选在同文件实现。
 - **Q5 File lock** → ✅ **已解决**：pid-file + atomic `open(... 'wx')` + stale reclaim。`extensions/sediment/writer.ts` 与 `extensions/abrain/vault-writer.ts:96-169` 均采用同一模式；sediment 锁文件位 `.pi-astack/sediment/locks/sediment.lock`。
 
