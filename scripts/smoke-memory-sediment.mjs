@@ -291,7 +291,11 @@ async function main() {
     assert(llmSearchRes[0].rank_reason === "direct match", "memory_search LLM result should expose stage2 rank_reason");
     const piAiStub = req("@earendil-works/pi-ai");
     assert(JSON.stringify(piAiStub.__calls) === JSON.stringify(["memory-search-stage1", "memory-search-stage2"]), `memory_search should call stage1+stage2, got ${JSON.stringify(piAiStub.__calls)}`);
-    assert(piAiStub.__configs[0]?.reasoning === "off" && piAiStub.__configs[1]?.reasoning === "high", `memory_search thinking config mismatch: ${JSON.stringify(piAiStub.__configs)}`);
+    // ADR 0015 D3 (2026-05-11 modification): Stage 2 reasoning lowered from
+    // "high" to "off" — rerank is reading comprehension + relevance judgment,
+    // not a reasoning task. settings.ts default was updated in commit 4b4432f
+    // but this smoke assertion was missed; now restored.
+    assert(piAiStub.__configs[0]?.reasoning === "off" && piAiStub.__configs[1]?.reasoning === "off", `memory_search thinking config mismatch (expected both stages off per ADR 0015 D3): ${JSON.stringify(piAiStub.__configs)}`);
 
     const graph = await rebuildGraphIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "graph.json not written");
@@ -837,10 +841,15 @@ END_MEMORY`;
         const running = renderSedimentStatus("running", "auto-write");
         const completed = renderSedimentStatus("completed", "3 entries");
         const failed = renderSedimentStatus("failed", "LLM error");
-        assert(idle.includes("idle"), `idle render missing keyword: ${idle}`);
-        assert(running.includes("running") && running.includes("auto-write"), `running render: ${running}`);
-        assert(completed.includes("completed") && completed.includes("3 entries"), `completed render: ${completed}`);
-        assert(failed.includes("failed") && failed.includes("LLM error"), `failed render: ${failed}`);
+        // commit 9700de5 (2026-05-12 refactor: compact footer status display)
+        // simplified prefixes from "💤 sediment idle" → "💤 sediment" etc.,
+        // letting emoji convey the state instead of an English word. State is
+        // now distinguished by emoji + detail field, not by literal state name.
+        // Smoke assertions updated to match the new contract.
+        assert(idle.includes("💤") && idle.includes("sediment"), `idle render missing emoji+sediment: ${idle}`);
+        assert(running.includes("📝") && running.includes("auto-write"), `running render: ${running}`);
+        assert(completed.includes("✅") && completed.includes("3 entries"), `completed render: ${completed}`);
+        assert(failed.includes("⚠️") && failed.includes("LLM error"), `failed render: ${failed}`);
       }
     }
 
