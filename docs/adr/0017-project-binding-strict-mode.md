@@ -273,7 +273,7 @@ project vault 与 memory 使用同一 active project 状态。若状态不是 `b
 2. `/abrain bind` + `/abrain status` 已落在 `extensions/abrain/index.ts`，写三处并展示 strict binding 状态。
 3. `/memory migrate` strict 已落在 `extensions/memory/index.ts` / `migrate-go.ts`：拒绝 `--project`，要求 active project `bound`。
 4. sediment/vault strict guards 已落地：未 bound 时 sediment hook 记录 `project_not_bound` audit 并拒绝；project vault scope 通过 strict active project gate。
-5. Smoke 覆盖：`smoke-abrain-active-project` 覆盖 strict resolver / bind happy / duplicate path / manifest conflict / path conflict / no-partial-on-path-conflict / concurrent local-map update / owner-token lock release、live-pid stale lock、lock record write failure cleanup；`smoke-memory-sediment` 覆盖 unbound target repo refused、cwd/target 错配拒绝、symlink `.pensieve` 拒绝、partial migration 不写 guard 与 migrate 主路径；`smoke-abrain-secret-scope` 覆盖 `/secret` project-scope 拒绝与 `/abrain status` read-only；`smoke-abrain-backend-detect` 覆盖 `vault_release(scope='project')` 注册/拒绝路径。
+5. Smoke 覆盖：`smoke-abrain-active-project` 覆盖 strict resolver / bind happy / duplicate path / manifest conflict / path conflict / no-partial-on-path-conflict / concurrent local-map update / owner-token lock release、live-pid stale lock、lock record write failure cleanup；`smoke-memory-sediment` 覆盖 agent_end strict-binding hook glue、unbound target repo refused、cwd/target 错配拒绝、symlink `.pensieve` 拒绝、partial migration 不写 guard 与 migrate 主路径；`smoke-abrain-secret-scope` 覆盖 `/secret` project-scope 拒绝与 `/abrain status` read-only；`smoke-abrain-backend-detect` 覆盖 `vault_release(scope='project')` 注册/拒绝路径。
 
 ## 后果
 

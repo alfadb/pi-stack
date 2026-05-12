@@ -222,6 +222,103 @@ async function main() {
     assert(tools.size === 4, `expected 4 memory tools, got ${tools.size}`);
     assert(commands.has("memory") && commands.has("sediment") && commands.has("compaction-tuner"), "expected memory, sediment, and compaction-tuner commands");
 
+    // === sediment agent_end strict-binding hook glue ===
+    // This drives the actual pi.on('agent_end') handler rather than only
+    // testing writer/migration substrates. It locks the B4.5 regression
+    // fingerprint: bound subdir launches write unhealthy-stop audit at the
+    // bound project root, while unbound launches emit project_not_bound and
+    // never advance checkpoint.
+    {
+      const hookRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-hook-"));
+      const hookOut = path.join(hookRoot, "compiled");
+      transpileExtensions(hookOut);
+      const fakeHome = path.join(hookRoot, "home");
+      writeFile(path.join(fakeHome, ".pi", "agent", "pi-astack-settings.json"), JSON.stringify({
+        sediment: { enabled: true, gitCommit: false, minWindowChars: 0, autoLlmWriteEnabled: false },
+      }, null, 2));
+      const hookAbrain = path.join(hookRoot, "abrain");
+      fs.mkdirSync(path.join(hookAbrain, "projects"), { recursive: true });
+
+      const oldHome = process.env.HOME;
+      const oldAbrainRoot = process.env.ABRAIN_ROOT;
+      try {
+        process.env.HOME = fakeHome;
+        process.env.ABRAIN_ROOT = hookAbrain;
+        const hookReq = createRequire(path.join(hookOut, "runner.cjs"));
+        const hookSedimentExt = hookReq("./sediment/index.js").default;
+        const { bindAbrainProject: hookBindAbrainProject } = hookReq("./_shared/runtime.js");
+        const hookHandlers = new Map();
+        hookSedimentExt({ registerCommand() {}, on(name, handler) { hookHandlers.set(name, handler); } });
+        const agentEnd = hookHandlers.get("agent_end");
+        assert(typeof agentEnd === "function", "sediment extension must register agent_end handler");
+
+        const boundRoot = path.join(hookRoot, "bound-project");
+        fs.mkdirSync(path.join(boundRoot, "subdir"), { recursive: true });
+        execFileSync("git", ["-C", boundRoot, "init", "-q"]);
+        await hookBindAbrainProject({
+          abrainHome: hookAbrain,
+          cwd: boundRoot,
+          projectId: "hook-bound",
+          now: "2026-05-12T10:00:00.000+08:00",
+        });
+        const boundSessionFile = path.join(hookRoot, "sessions", "bound.jsonl");
+        writeFile(boundSessionFile, "{}\n");
+        await agentEnd(
+          { messages: [{ role: "assistant", stopReason: "aborted", errorMessage: "user aborted" }] },
+          {
+            cwd: path.join(boundRoot, "subdir"),
+            sessionManager: {
+              getBranch: () => [{ role: "user", content: "hello" }],
+              getSessionId: () => "hook-bound-session",
+              getSessionFile: () => boundSessionFile,
+            },
+            ui: { notify() {}, setStatus() {} },
+          },
+        );
+        const boundAudit = path.join(boundRoot, ".pi-astack", "sediment", "audit.jsonl");
+        const boundSubAudit = path.join(boundRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
+        assert(fs.existsSync(boundAudit), `bound unhealthy audit must land at project root: ${boundAudit}`);
+        assert(!fs.existsSync(boundSubAudit), `bound unhealthy audit must not land in launch subdir: ${boundSubAudit}`);
+        const boundRows = fs.readFileSync(boundAudit, "utf-8").trim().split("\n").map(JSON.parse);
+        const boundRow = boundRows.find((r) => r.reason === "agent_aborted");
+        assert(boundRow, `bound unhealthy audit row missing: ${JSON.stringify(boundRows)}`);
+        assert(boundRow.project_root === path.resolve(boundRoot), `bound audit project_root mismatch: ${boundRow.project_root}`);
+        assert(boundRow.checkpoint_advanced === false, `bound unhealthy stop must not advance checkpoint`);
+        assert(!fs.existsSync(path.join(boundRoot, ".pi-astack", "sediment", "checkpoint.json")), `bound unhealthy stop must not create checkpoint`);
+
+        const unboundRoot = path.join(hookRoot, "unbound-project");
+        fs.mkdirSync(path.join(unboundRoot, "subdir"), { recursive: true });
+        execFileSync("git", ["-C", unboundRoot, "init", "-q"]);
+        const unboundSessionFile = path.join(hookRoot, "sessions", "unbound.jsonl");
+        writeFile(unboundSessionFile, "{}\n");
+        await agentEnd(
+          { messages: [{ role: "assistant", stopReason: "stop" }] },
+          {
+            cwd: path.join(unboundRoot, "subdir"),
+            sessionManager: {
+              getBranch: () => [{ role: "user", content: "MEMORY: should not write" }],
+              getSessionId: () => "hook-unbound-session",
+              getSessionFile: () => unboundSessionFile,
+            },
+            ui: { notify() {}, setStatus() {} },
+          },
+        );
+        const unboundAudit = path.join(unboundRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
+        assert(fs.existsSync(unboundAudit), `unbound audit must be visible at launch cwd: ${unboundAudit}`);
+        const unboundRows = fs.readFileSync(unboundAudit, "utf-8").trim().split("\n").map(JSON.parse);
+        const unboundRow = unboundRows.find((r) => r.reason === "project_not_bound");
+        assert(unboundRow, `unbound project_not_bound row missing: ${JSON.stringify(unboundRows)}`);
+        assert(unboundRow.binding_status === "manifest_missing", `unbound binding_status mismatch: ${unboundRow.binding_status}`);
+        assert(unboundRow.checkpoint_advanced === false, `unbound project_not_bound must not advance checkpoint`);
+        assert(!fs.existsSync(path.join(unboundRoot, "subdir", ".pi-astack", "sediment", "checkpoint.json")), `unbound project_not_bound must not create checkpoint`);
+      } finally {
+        if (oldHome === undefined) delete process.env.HOME;
+        else process.env.HOME = oldHome;
+        if (oldAbrainRoot === undefined) delete process.env.ABRAIN_ROOT;
+        else process.env.ABRAIN_ROOT = oldAbrainRoot;
+      }
+    }
+
     // === compaction-tuner: settings parsing + decision logic ===
     {
       // Defaults
