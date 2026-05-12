@@ -22,6 +22,7 @@ import { formatDoctorLiteReport, runDoctorLite } from "./doctor";
 import { checkBacklinks, formatBacklinkReport, formatGraphRebuildReport, rebuildGraphIndex } from "./graph";
 import { formatMarkdownIndexRebuildReport, rebuildMarkdownIndex } from "./index-file";
 import { clamp, normalizeBareSlug, normalizeListFilters, normalizeSearchFilters, parseMaybeJson } from "./utils";
+import { resolveActiveProject } from "../_shared/runtime";
 
 // ─────────────────────────────────────────────────────────────────────────
 // Tool result wrapper.
@@ -83,12 +84,12 @@ function registerMemoryCommand(pi: ExtensionAPI) {
   if (typeof maybePi.registerCommand !== "function") return;
 
   maybePi.registerCommand("memory", {
-    description: "Memory maintenance commands: /memory lint [path], /memory migrate [--dry-run|--go] [--report] [--project=<id>] [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path], /memory doctor-lite [path]",
+    description: "Memory maintenance commands: /memory lint [path], /memory migrate [--dry-run|--go] [--report] [path], /memory check-backlinks [path], /memory rebuild --graph|--index [path], /memory doctor-lite [path]. B4.5: run /abrain bind first; --project is rejected.",
     getArgumentCompletions(prefix: string) {
       const items = [
         "lint", "lint .pensieve",
         "migrate", "migrate --dry-run", "migrate --dry-run --report",
-        "migrate --go", "migrate --go .pensieve", "migrate --go --project=",
+        "migrate --go", "migrate --go .pensieve",
         "doctor-lite", "doctor-lite .pensieve",
         "check-backlinks", "check-backlinks .pensieve",
         "rebuild --graph", "rebuild --graph .pensieve",
@@ -129,9 +130,10 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         // entries are routed; see docs/migration/abrain-pensieve-migration.md
         // §5).
         //
-        // Flag scope:
-        //   --dry-run            : default. Supports --report. --project is ignored.
-        //   --go                 : execute. Supports --project. --report is ignored.
+        // Flag scope (ADR 0017 / B4.5):
+        //   --dry-run            : default. Supports --report.
+        //   --go                 : execute. --report is ignored.
+        //   --project=<id>       : rejected; identity is decided by /abrain bind.
         //   --dry-run + --go     : rejected (mutually exclusive).
         const dryRun = rest.includes("--dry-run") || rest.includes("-n");
         const goMode = rest.includes("--go");
@@ -140,12 +142,29 @@ function registerMemoryCommand(pi: ExtensionAPI) {
           return;
         }
         const writeReport = rest.includes("--report");
-        const projectIdFlag = rest.find((part) => part.startsWith("--project="))?.slice("--project=".length);
+        const projectFlag = rest.find((part) => part.startsWith("--project="));
+        if (projectFlag) {
+          ctx.ui.notify("/memory migrate: --project is no longer supported. Run /abrain bind --project=<id> first, then /memory migrate.", "warning");
+          return;
+        }
         const targetParts = rest.filter((part) =>
-          part !== "--dry-run" && part !== "-n" && part !== "--report" && part !== "--go" && !part.startsWith("--project="),
+          part !== "--dry-run" && part !== "-n" && part !== "--report" && part !== "--go",
         );
         const targetArg = targetParts.join(" ").trim();
         const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
+
+        const abrainHome = process.env.ABRAIN_ROOT
+          ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+          : path.join(os.homedir(), ".abrain");
+        const active = resolveActiveProject(cwd, { abrainHome });
+        if (!active.activeProject) {
+          ctx.ui.notify(
+            `/memory migrate refused: project binding status=${active.reason}. Run ${active.reason === "manifest_missing" ? "/abrain bind --project=<id>" : "/abrain bind"} first.`,
+            "warning",
+          );
+          return;
+        }
+        const projectId = active.activeProject.projectId;
 
         if (goMode) {
           // Out-of-scope flag warnings (was previously silent — gpt-5.5
@@ -154,13 +173,10 @@ function registerMemoryCommand(pi: ExtensionAPI) {
           if (writeReport) {
             ctx.ui.notify("/memory migrate --go: --report is dry-run-only and was ignored (see `/memory migrate --dry-run --report`).", "warning");
           }
-          const abrainHome = process.env.ABRAIN_ROOT
-            ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
-            : path.join(os.homedir(), ".abrain");
           const result = await runMigrationGo({
             pensieveTarget: target,
             abrainHome,
-            projectId: projectIdFlag,
+            projectId,
             cwd,
             settings,
           });
@@ -170,20 +186,13 @@ function registerMemoryCommand(pi: ExtensionAPI) {
           return;
         }
 
-        // Round 7 P0-C (opus audit fix): dry-run now feeds projectId + abrainHome
-        // through to the planner so target_path values reflect where `--go` would
-        // actually route each entry. Previously `--project=<id>` was rejected
-        // outright with a "ignored" warning, and pipelines were lied about as
-        // "unsupported". When --project is omitted we still run the dry-run; the
-        // planner will render `<unresolved — pass --project=<id>>` in target_path
-        // so users see explicitly that they need to add the flag to lock the
-        // destination preview.
-        const abrainHome = process.env.ABRAIN_ROOT
-          ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
-          : path.join(os.homedir(), ".abrain");
+        // Round 7 P0-C fixed dry-run drift by feeding projectId + abrainHome
+        // through to the planner. ADR 0017/B4.5 tightens that: projectId must
+        // come from strict active binding (/abrain bind), not from a migration
+        // flag, so dry-run target_path values exactly match `--go` routing.
         const report = await planMigrationDryRun(target, settings, undefined, cwd, {
           abrainHome,
-          projectId: projectIdFlag,
+          projectId,
         });
         const messages = [formatMigrationPlan(report)];
         if (writeReport) {
@@ -236,7 +245,7 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         return;
       }
 
-      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate [--dry-run|--go] [--report] [--project=<id>] [path] OR /memory doctor-lite [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]", "warning");
+      ctx.ui.notify("Usage: /memory lint [path] OR /memory migrate [--dry-run|--go] [--report] [path] OR /memory doctor-lite [path] OR /memory check-backlinks [path] OR /memory rebuild --graph|--index [path]. Run /abrain bind --project=<id> before migrate.", "warning");
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         ctx.ui.notify(`/memory ${subcommand} failed: ${message}`, "error");

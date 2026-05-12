@@ -17,14 +17,14 @@ import {
 } from "./parser";
 import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_FIELDS } from "./lint";
 import { writePostMigrationGuard } from "../sediment/writer";
-import { clamp, normalizeBareSlug, prettyPath, slugify, titleFromSlug, throwIfAborted } from "./utils";
+import { clamp, normalizeBareSlug, prettyPath, titleFromSlug, throwIfAborted } from "./utils";
 import {
   abrainProjectDir,
   abrainProjectWorkflowsDir,
   abrainSedimentAuditPath,
   abrainWorkflowsDir,
-  canonicalizeGitRemote,
   formatLocalIsoTimestamp,
+  resolveActiveProject,
   validateAbrainProjectId,
 } from "../_shared/runtime";
 
@@ -65,7 +65,7 @@ export interface MigrationGoOptions {
   pensieveTarget: string;
   /** Absolute path to ~/.abrain (env ABRAIN_ROOT or default os.homedir()/.abrain). */
   abrainHome: string;
-  /** Optional explicit project id; otherwise inferred from git remote → cwd basename. */
+  /** Optional assertion from caller; preflight independently resolves ADR 0017 strict binding and rejects mismatches. */
   projectId?: string;
   /** Override timestamp for migrated-from-legacy timeline; tests use this for stability. */
   migrationTimestamp?: string;
@@ -97,7 +97,7 @@ export interface MigrationGoEntryReport {
 export interface MigrationGoResult {
   ok: boolean;
   projectId: string;
-  projectIdSource: "explicit" | "git-remote" | "cwd-basename";
+  projectIdSource: "strict-binding";
   parentRepoRoot: string;
   abrainProjectDir: string;
   entries: MigrationGoEntryReport[];
@@ -125,7 +125,7 @@ export interface MigrationGoResult {
 interface PreflightOutcome {
   ok: boolean;
   projectId: string;
-  projectIdSource: "explicit" | "git-remote" | "cwd-basename";
+  projectIdSource: "strict-binding";
   parentRepoRoot: string;
   /** HEAD sha of parent repo at preflight time. Captured so the migration
    *  summary can print a rollback command anchored on a concrete SHA rather
@@ -146,81 +146,11 @@ async function gitHeadSha(cwd: string): Promise<string | null> {
   }
 }
 
-/* ── Project-id inference ──────────────────────────────────────────── */
-
-function deriveProjectIdFromRemote(remote: string | undefined | null): string | null {
-  const canon = canonicalizeGitRemote(remote);
-  if (!canon) return null;
-  // canon = "host/path"; strip host, take last 2 path segments → "org-repo"
-  const slashIdx = canon.indexOf("/");
-  if (slashIdx < 0) return null;
-  const pathPart = canon.slice(slashIdx + 1);
-  const parts = pathPart.split("/").filter(Boolean);
-  if (parts.length === 0) return null;
-  // Prefer `org-repo`; for monorepo-style remotes with deeper paths
-  // fall back to the last segment only (rare in practice).
-  const candidate = parts.length >= 2
-    ? `${parts[parts.length - 2]}-${parts[parts.length - 1]}`
-    : parts[parts.length - 1]!;
-  return sanitizeProjectIdCandidate(candidate);
-}
-
-/**
- * Generic basenames that collide trivially across multi-project trees. When
- * the cwd ends in one of these we prepend the parent so e.g.
- * `~/work/teamA/myproject/src` becomes `myproject-src` instead of a bare
- * `src` that conflicts with every other `src` checkout. Trade-off: over-
- * inclusion just produces longer-but-unique ids; under-inclusion (the
- * original full/src/main triple) produced silent collisions across repos
- * sharing the same basename. List is conservative — only names we've seen
- * used as monorepo segments or worktree conventions.
- */
-const GENERIC_BASENAMES = new Set<string>([
-  "full", "src", "main", "master", "app", "core", "repo", "root",
-  "dist", "build", "pkg", "packages", "project", "workspace",
-  "client", "server", "backend", "frontend", "web", "api",
-]);
-
-function deriveProjectIdFromCwd(cwd: string): string {
-  // Use the last two path components when the basename is in
-  // GENERIC_BASENAMES (~/work/uamp/full → uamp-full) to disambiguate repos
-  // that share a generic last segment. Otherwise the basename alone is
-  // unique enough. Falls back to "project" sentinel when cwd has no
-  // useful structure.
-  const norm = path.resolve(cwd).replace(/\/+$/, "");
-  if (norm === "/" || norm === "") return "project";
-  const parts = norm.split(path.sep).filter(Boolean);
-  if (parts.length === 0) return "project";
-  if (parts.length === 1) return sanitizeProjectIdCandidate(parts[0]!);
-  const last = parts[parts.length - 1]!;
-  const parent = parts[parts.length - 2]!;
-  const candidate = GENERIC_BASENAMES.has(last)
-    ? `${parent}-${last}`
-    : last;
-  return sanitizeProjectIdCandidate(candidate);
-}
-
-function sanitizeProjectIdCandidate(raw: string): string {
-  // validateAbrainProjectId allows [a-zA-Z0-9_.-]+; slugify always emits
-  // lowercase letters+digits+dashes, which is the safe subset.
-  const slug = slugify(raw);
-  if (slug.length === 0) return "project";
-  if (slug.startsWith(".")) return `_${slug}`;
-  return slug.slice(0, 128);
-}
-
 /* ── Git helpers (small wrappers; throw → caller decides) ──────────── */
 
 async function gitToplevel(cwd: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { timeout: 3000, maxBuffer: 256 * 1024 });
-    return stdout.trim() || null;
-  } catch { return null; }
-}
-
-async function gitRemoteOrigin(cwd: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "config", "--get", "remote.origin.url"], { timeout: 3000, maxBuffer: 256 * 1024 });
     return stdout.trim() || null;
   } catch { return null; }
 }
@@ -322,25 +252,24 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
     failures.push(`abrain home not found: ${opts.abrainHome}`);
   }
 
-  // Project id resolution
+  // Project id resolution (ADR 0017 / B4.5): migration no longer decides
+  // identity. It verifies the current repo is strict-bound via
+  // .abrain-project.json + abrain registry + local-map, then uses that
+  // bound project id. No git-remote/cwd fallback and no --project override:
+  // typo-safe identity is a precondition.
+  const binding = resolveActiveProject(opts.cwd ?? parentRepoRoot, { abrainHome: opts.abrainHome });
   let projectId = "";
-  let projectIdSource: "explicit" | "git-remote" | "cwd-basename" = "cwd-basename";
-  if (opts.projectId) {
-    projectId = opts.projectId;
-    projectIdSource = "explicit";
+  const projectIdSource: "strict-binding" = "strict-binding";
+  if (!binding.activeProject) {
+    failures.push(`project binding status=${binding.reason}: run ${binding.reason === "manifest_missing" ? "`/abrain bind --project=<id>`" : "`/abrain bind`"} first; /memory migrate no longer infers project id`);
   } else {
-    const remote = await gitRemoteOrigin(parentRepoRoot);
-    const fromRemote = deriveProjectIdFromRemote(remote);
-    if (fromRemote) {
-      projectId = fromRemote;
-      projectIdSource = "git-remote";
-    } else {
-      projectId = deriveProjectIdFromCwd(parentRepoRoot);
-      projectIdSource = "cwd-basename";
+    projectId = binding.activeProject.projectId;
+    if (opts.projectId && opts.projectId !== projectId) {
+      failures.push(`project id mismatch: active binding is "${projectId}" but caller supplied "${opts.projectId}"`);
     }
+    try { validateAbrainProjectId(projectId); }
+    catch (e) { failures.push(`invalid project id "${projectId}": ${(e as Error).message}`); }
   }
-  try { validateAbrainProjectId(projectId); }
-  catch (e) { failures.push(`invalid project id "${projectId}": ${(e as Error).message}`); }
 
   // Parent repo must be clean (so the migration commit is the only change)
   if (fsSync.existsSync(parentRepoRoot)) {

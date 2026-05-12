@@ -25,6 +25,7 @@
  *   7. Audit row.
  */
 
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { resolveSedimentSettings, type SedimentSettings } from "./settings";
@@ -58,6 +59,7 @@ import {
   type WriterAuditContext,
 } from "./writer";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
+import { resolveActiveProject } from "../_shared/runtime";
 
 // ---------------------------------------------------------------
 // Phase 1.4 A2 / ADR 0016: in-process bg work tracking.
@@ -91,6 +93,12 @@ const sessionAgentCycle = new Map<string, { started: number; ended: number }>();
 
 /** Status key for ctx.ui.setStatus(). */
 const SEDIMENT_STATUS_KEY = FOOTER_STATUS_KEYS.sediment;
+
+function resolveAbrainHomeForSediment(): string {
+  return process.env.ABRAIN_ROOT
+    ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
+    : path.join(os.homedir(), ".abrain");
+}
 
 /**
  * Footer status state machine for the sediment extension.
@@ -559,6 +567,33 @@ export default function (pi: ExtensionAPI) {
             ? "agent error"
             : "agent aborted";
         applySedimentStatus(setStatus, sessionId, "completed", detail);
+        return;
+      }
+
+      // ADR 0017 / B4.5 strict binding: sediment is a project-scoped
+      // writer. It must not create or mutate project memory unless the
+      // boot cwd is explicitly bound via .abrain-project.json + abrain
+      // registry + local-map. This prevents unbound repos (or repos that
+      // merely forged a manifest) from writing into .pensieve / future
+      // abrain project paths. Do NOT advance checkpoint: once the user
+      // runs /abrain bind, the same window can be processed legitimately.
+      const binding = resolveActiveProject(cwd, { abrainHome: resolveAbrainHomeForSediment() });
+      if (!binding.activeProject) {
+        await appendAudit(cwd, {
+          operation: "skip",
+          lane: "system",
+          reason: "project_not_bound",
+          binding_status: binding.reason,
+          hint: binding.reason === "manifest_missing" ? "/abrain bind --project=<id>" : "/abrain bind",
+          session_id: sessionId,
+          branch_size: branch.length,
+          settings_snapshot: settingsSnapshot,
+          extractor: "explicit_marker",
+          parser_version: PARSER_VERSION,
+          checkpoint_advanced: false,
+          stage_ms: { window_build: 0, parse: 0, write_total: 0, total: 0 },
+        });
+        applySedimentStatus(setStatus, sessionId, "completed", `project_not_bound:${binding.reason}`);
         return;
       }
 

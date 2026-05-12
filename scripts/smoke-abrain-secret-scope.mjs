@@ -46,7 +46,7 @@ fs.mkdirSync(sharedTarget, { recursive: true });
 fs.writeFileSync(path.join(sharedTarget, "runtime.cjs"), transpile(path.join(repoRoot, "extensions/_shared/runtime.ts")));
 fs.copyFileSync(path.join(sharedTarget, "runtime.cjs"), path.join(sharedTarget, "runtime.js"));
 
-for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "bootstrap", "backend-detect", "i18n"]) {
+for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "bootstrap", "backend-detect", "i18n", "brain-layout"]) {
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions/abrain", `${file}.ts`)));
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
@@ -67,6 +67,7 @@ const indexCjs = ts.transpileModule(indexSrc, {
   .replace(/require\("\.\/vault-reader"\)/g, 'require("./vault-reader.cjs")')
   .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")')
   .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
+  .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCjs);
 
@@ -121,36 +122,37 @@ check("resolveSecretScope: --global passes through", () => {
   if (!out.ok || out.scope !== "global") throw new Error(JSON.stringify(out));
 });
 
-check("resolveSecretScope: --project=<id> passes through without active project", () => {
+check("resolveSecretScope: --project=<id> cannot bypass missing active project", () => {
   const out = indexModule.resolveSecretScope({ project: "explicit" }, null);
-  if (!out.ok || out.scope.project !== "explicit") throw new Error(JSON.stringify(out));
+  if (out.ok) throw new Error(`expected refusal, got ${JSON.stringify(out)}`);
+  if (!out.reason.includes("missing .abrain-project.json")) throw new Error(`reason=${out.reason}`);
 });
 
 check("resolveSecretScope: default with no active project surfaces reason", () => {
   const out = indexModule.resolveSecretScope("default", null);
   if (out.ok) throw new Error("expected refusal");
-  if (!out.reason.includes("no active project")) throw new Error(`reason=${out.reason}`);
+  if (!out.reason.includes("missing .abrain-project.json")) throw new Error(`reason=${out.reason}`);
 });
 
-check("resolveSecretScope: default + unbound reason carries actionable hint", () => {
-  const stub = { activeProject: null, reason: "unbound", cwd: "/x", bindingsPath: "/y" };
+check("resolveSecretScope: default + path_unconfirmed reason carries actionable hint", () => {
+  const stub = { activeProject: null, reason: "path_unconfirmed", cwd: "/x", projectRoot: "/x", projectId: "alpha" };
   const out = indexModule.resolveSecretScope("default", stub);
   if (out.ok) throw new Error("expected refusal");
-  if (!out.reason.includes("not bound to any project")) throw new Error(`reason=${out.reason}`);
+  if (!out.reason.includes("not confirmed on this local path")) throw new Error(`reason=${out.reason}`);
 });
 
 check("resolveSecretScope: default + active project routes to that project", () => {
-  const stub = { activeProject: { projectId: "alpha", binding: { cwd: "/x", project: "alpha", raw: {} }, matchedBy: "git_root_exact", cwd: "/x", lookupCwd: "/x", bindingsPath: "/y" } };
+  const stub = { activeProject: { projectId: "alpha", matchedBy: "strict_local_map", cwd: "/x", lookupCwd: "/x", projectRoot: "/x", manifestPath: "/x/.abrain-project.json", registryPath: "/a/projects/alpha/_project.json", localMapPath: "/a/.state/projects/local-map.json", localPath: { path: "/x", first_seen: "t", last_seen: "t", confirmed_at: "t" }, manifest: { schema_version: 1, project_id: "alpha" }, registry: { schema_version: 1, project_id: "alpha", created_at: "t", updated_at: "t" } } };
   const out = indexModule.resolveSecretScope("default", stub);
   if (!out.ok) throw new Error("expected ok");
   if (out.scope.project !== "alpha") throw new Error(`scope=${JSON.stringify(out.scope)}`);
 });
 
-check("secretDefaultRejection covers ambiguous_remote / ambiguous_prefix paths", () => {
-  const remote = indexModule.secretDefaultRejection("ambiguous_remote");
-  if (!remote.includes("multiple bindings share this git remote")) throw new Error(remote);
-  const prefix = indexModule.secretDefaultRejection("ambiguous_prefix");
-  if (!prefix.includes("multiple bindings share this cwd prefix")) throw new Error(prefix);
+check("secretDefaultRejection covers strict binding failure paths", () => {
+  const missing = indexModule.secretDefaultRejection("manifest_missing");
+  if (!missing.includes("missing .abrain-project.json")) throw new Error(missing);
+  const conflict = indexModule.secretDefaultRejection("path_conflict");
+  if (!conflict.includes("already confirmed for another project")) throw new Error(conflict);
 });
 
 check("boot-time snapshot helpers expose getter+reset", () => {
@@ -160,7 +162,7 @@ check("boot-time snapshot helpers expose getter+reset", () => {
 });
 
 check("__resetBootActiveProjectForTests round-trips an active project value", () => {
-  const stub = { activeProject: { projectId: "alpha", binding: { cwd: "/x", project: "alpha", raw: {} }, matchedBy: "git_root_exact", cwd: "/x", lookupCwd: "/x", bindingsPath: "/y" } };
+  const stub = { activeProject: { projectId: "alpha", matchedBy: "strict_local_map", cwd: "/x", lookupCwd: "/x", projectRoot: "/x", manifestPath: "/x/.abrain-project.json", registryPath: "/a/projects/alpha/_project.json", localMapPath: "/a/.state/projects/local-map.json", localPath: { path: "/x", first_seen: "t", last_seen: "t", confirmed_at: "t" }, manifest: { schema_version: 1, project_id: "alpha" }, registry: { schema_version: 1, project_id: "alpha", created_at: "t", updated_at: "t" } } };
   indexModule.__resetBootActiveProjectForTests(stub);
   if (indexModule.getBootActiveProject() !== stub) throw new Error("snapshot not stored");
   if (typeof indexModule.getBootActiveProjectSnapshotAt() !== "number") throw new Error("snapshot timestamp missing");

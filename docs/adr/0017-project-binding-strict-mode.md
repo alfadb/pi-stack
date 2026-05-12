@@ -1,6 +1,6 @@
 # ADR 0017 — Project Binding Strict Mode（项目身份绑定严格模式）
 
-- **状态**：Accepted（2026-05-12），**B4.5 待实施**。
+- **状态**：Accepted（2026-05-12），**B4.5 已实施**（runtime strict resolver + `/abrain bind/status` + `/memory migrate` strict + sediment/vault guards）。
 - **取代**：ADR 0014 / brain-redesign-spec 中早期 `~/.abrain/projects/_bindings.md` + git remote / cwd prefix 推断方案。
 - **依赖**：[ADR 0014](0014-abrain-as-personal-brain.md)、[migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)、[migration/vault-bootstrap.md](../migration/vault-bootstrap.md)
 - **触发**：`~/.config/opencode` 首仓 dry-run 时用户手动传 `--project=opencode-gloabl`（typo）仍被 planner 接受，证明 migration 命令不应同时承担“决定项目身份”的职责。
@@ -267,13 +267,13 @@ project vault 与 memory 使用同一 active project 状态。若状态不是 `b
   - `/abrain project rename <old> <new>`
   - `/abrain repair`
 
-## 实施计划
+## 实施记录
 
-1. Runtime data model：manifest / registry / local-map parser/writer + resolver 状态机。
-2. `/abrain bind` + `/abrain status`：写三处，展示状态与 local paths。
-3. `/memory migrate` strict：拒绝 `--project`，要求 active project `bound`。
-4. sediment/vault strict guards：未 bound 拒绝 project-scoped 写入与 project vault。
-5. 文档与 smoke：bind happy / duplicate path / manifest conflict / path conflict / path_unconfirmed / migrate unbound refused / `--project` refused。
+1. Runtime data model：manifest / registry / local-map parser/writer + resolver 状态机已落在 `extensions/_shared/runtime.ts`。
+2. `/abrain bind` + `/abrain status` 已落在 `extensions/abrain/index.ts`，写三处并展示 strict binding 状态。
+3. `/memory migrate` strict 已落在 `extensions/memory/index.ts` / `migrate-go.ts`：拒绝 `--project`，要求 active project `bound`。
+4. sediment/vault strict guards 已落地：未 bound 时 sediment hook 记录 `project_not_bound` audit 并拒绝；project vault scope 通过 strict active project gate。
+5. Smoke 覆盖：strict resolver / bind happy / duplicate path / manifest conflict / path conflict / no-partial-on-path-conflict / path_unconfirmed / migrate missing projectId refused / vault project-scope refused。
 
 ## 后果
 
@@ -291,4 +291,4 @@ project vault 与 memory 使用同一 active project 状态。若状态不是 `b
 - 每个项目第一次使用前必须 `/abrain bind`。
 - 用户需要理解 `.abrain-project.json` 是否 commit 的含义。
 - 新 clone / 新路径首次使用需要 `/abrain bind` 确认 path。
-- 当前 B4 的 `--project` override 将被废弃，迁移流程多一步但更安全。
+- 旧 B4 的 `--project` override 已废弃并被拒绝，迁移流程多一步但更安全。

@@ -8,7 +8,7 @@
 > 通过内部 writer substrate 单写（create/update/merge/archive/supersede/delete/skip），不暴露 LLM-facing 写工具。
 > gbrain 被完全去除；其 timeline/图谱方法论被借鉴到 markdown 条目格式中（Compiled Truth + `## Timeline` + `graph.json`）。
 >
-> **v7.1 update (2026-05-09 起持续 v1.x 迭代，[ADR 0014](./docs/adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](./docs/brain-redesign-spec.md)):** `~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑——七区结构（identity / skills / habits / workflows / projects / knowledge / vault）。`.pensieve/` 已由 ADR 0014 废止（设计层面），当前 14 仓按需通过 `/memory migrate --go` 一次性迁移到 `~/.abrain/projects/<id>/`（B4 ✅ shipped 2026-05-12；B4.5 project binding strict mode 已在 [ADR 0017](./docs/adr/0017-project-binding-strict-mode.md) 接受、待实施：先 `/abrain bind --project=<id>`，再 `/memory migrate --dry-run` / `--go`；`--project` 迁移参数将被废弃）。已 ship 节点：vault P0a-c 子集（`/secret` + `/vault`，age 加密 + portable identity backend）；B1 abrain workflows lane writer；B3+B7 per-file migration substrate 剥离；B4 per-repo `/memory migrate --go` 含 preflight + frontmatter 归一化 + pipeline routing + 索引重建 + pre-migration SHA rollback。待实施：B4.5 strict project binding、B5 sediment writeProjectEntry cutover 到 abrain projects 路径、P0d vault TUI wizard、Lane G (about-me) + identity/skills/habits writer。
+> **v7.1 update (2026-05-09 起持续 v1.x 迭代，[ADR 0014](./docs/adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](./docs/brain-redesign-spec.md)):** `~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑——七区结构（identity / skills / habits / workflows / projects / knowledge / vault）。`.pensieve/` 已由 ADR 0014 废止（设计层面），当前 14 仓按需通过 `/memory migrate --go` 一次性迁移到 `~/.abrain/projects/<id>/`（B4 ✅ shipped 2026-05-12；B4.5 project binding strict mode ✅ shipped 2026-05-12，见 [ADR 0017](./docs/adr/0017-project-binding-strict-mode.md)：先 `/abrain bind --project=<id>`，再 `/memory migrate --dry-run` / `--go`；`/memory migrate --project=<id>` 已废弃并拒绝）。已 ship 节点：vault P0a-c 子集（`/secret` + `/vault`，age 加密 + portable identity backend）；B1 abrain workflows lane writer；B3+B7 per-file migration substrate 剥离；B4 per-repo `/memory migrate --go` 含 preflight + frontmatter 归一化 + pipeline routing + 索引重建 + pre-migration SHA rollback。待实施：B5 sediment writeProjectEntry cutover 到 abrain projects 路径、P0d vault TUI wizard、Lane G (about-me) + identity/skills/habits writer。
 >
 > 历史架构演进：v6.5（gbrain 唯一存储 + 三模型投票）→ v6.6（单 agent + lookup tools）→ v6.7（双轨 gbrain sources）
 > → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）→ v7.1（abrain 重定位为数字孪生）**。详见 [docs/adr/](./docs/adr/) 17 条 ADR（含 [ADR 0015](./docs/adr/0015-memory-search-llm-driven-retrieval.md) memory_search LLM-driven retrieval、[ADR 0016](./docs/adr/0016-sediment-as-llm-curator.md) sediment 从 gate-heavy extractor 转向 LLM curator，以及 [ADR 0017](./docs/adr/0017-project-binding-strict-mode.md) project binding strict mode）。
@@ -40,7 +40,7 @@
 
 详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 17 条 ADR。
 
-> ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 §D3 supersede；ADR 0013 Lane C 的 G2-G13 / readiness / rolling / rate / sampling 机械 gate 被 ADR 0016 删除；ADR 0017 接受 B4.5 Project Binding Strict Mode，并取代 ADR 0014 / brain-redesign-spec 中旧的 `_bindings.md` + remote/cwd 推断模型（详见各 ADR 顶部状态字段）。
+> ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 §D3 supersede；ADR 0013 Lane C 的 G2-G13 / readiness / rolling / rate / sampling 机械 gate 被 ADR 0016 删除；ADR 0017 已实施 B4.5 Project Binding Strict Mode，并取代 ADR 0014 / brain-redesign-spec 中旧的 `_bindings.md` + remote/cwd 推断模型（详见各 ADR 顶部状态字段）。
 >
 > 文件布局参考：[docs/directory-layout.md](./docs/directory-layout.md) — 反映当前实际实现状态。
 
@@ -155,7 +155,7 @@ pi install git:github.com/alfadb/pi-astack
 ## 沉淀
 
 记忆基础设施 = **markdown+git**（详见 [memory-architecture.md](./docs/memory-architecture.md)）：
-- 项目记忆 → 未迁仓：`<project>/.pensieve/{maxims,decisions,knowledge,staging,archive,pipelines}/`（legacy，memory facade dual-read）；已迁仓：`~/.abrain/projects/<id>/`，走 `/abrain bind --project=<id>` → `/memory migrate --dry-run` → `/memory migrate --go`（ADR 0014 B4 已 ship；ADR 0017 B4.5 strict binding 待实施后废弃迁移 `--project` 参数；14 仓逐个手动触发，不是一次性全局切换）
+- 项目记忆 → 未迁仓：`<project>/.pensieve/{maxims,decisions,knowledge,staging,archive,pipelines}/`（legacy，memory facade dual-read）；已迁仓：`~/.abrain/projects/<id>/`，走 `/abrain bind --project=<id>` → `/memory migrate --dry-run` → `/memory migrate --go`（ADR 0014 B4 + ADR 0017 B4.5 已 ship；迁移命令已拒绝 `--project` 参数；14 仓逐个手动触发，不是一次性全局切换）
 - 跨项目准则 → `~/.abrain/knowledge/`（v7.1 七区之 knowledge 区；独立 git repo）
 - 条目格式：frontmatter v1 + compiled truth + `## Timeline`
 - 主会话只读（`memory_search/get/list/neighbors`），sediment 单写（内部 writer substrate 已实现：create/update/merge/archive/supersede/delete/skip；不计划暴露 LLM-facing 写工具）

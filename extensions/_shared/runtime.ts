@@ -127,46 +127,87 @@ export function legacySedimentLocksDir(projectRoot: string): string {
 // already stripped. Re-add only if a future per-file workflow re-emerges.
 
 /* -------- abrain project identity ------------------------------------- *
- * ADR 0014 active project is a boot-time snapshot: callers should resolve
- * once from pi's startup cwd and keep that project id stable for the session.
- * Bash `cd` must not dynamically switch active project / vault visibility. */
+ * ADR 0017 strict binding: callers must resolve project identity from the
+ * three explicit binding artifacts. Shell cwd/git remote alone never grants
+ * project-scoped write/vault privileges. */
 
-export interface AbrainProjectBinding {
-  cwd: string;
-  project: string;
-  boundAt?: string;
-  boundVia?: string;
-  gitRemote?: string;
-  raw: Record<string, string>;
+// ADR 0017 / B4.5 Project Binding Strict Mode ----------------------
+//
+// project id is the only durable identity. cwd and git remote are merely
+// local locator signals and MUST NOT grant project-scoped write/vault
+// privileges by themselves. A project is considered bound only when all
+// three artifacts agree:
+//   1. <project>/.abrain-project.json              (portable identity claim)
+//   2. ~/.abrain/projects/<id>/_project.json       (abrain tracked registry)
+//   3. ~/.abrain/.state/projects/local-map.json    (local path authorization)
+
+export interface AbrainProjectManifest {
+  schema_version: 1;
+  project_id: string;
 }
 
-export type ActiveProjectMatchKind = "git_root_exact" | "git_remote" | "cwd_prefix";
+export interface AbrainProjectRegistry {
+  schema_version: 1;
+  project_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AbrainLocalProjectPath {
+  path: string;
+  first_seen: string;
+  last_seen: string;
+  confirmed_at: string;
+}
+
+export interface AbrainLocalProjectMap {
+  schema_version: 1;
+  projects: Record<string, { paths: AbrainLocalProjectPath[] }>;
+}
+
+export type ActiveProjectMatchKind = "strict_local_map";
 
 export interface ActiveProjectResolution {
   projectId: string;
-  binding: AbrainProjectBinding;
   matchedBy: ActiveProjectMatchKind;
   cwd: string;
   lookupCwd: string;
-  bindingsPath: string;
+  projectRoot: string;
+  manifestPath: string;
+  registryPath: string;
+  localMapPath: string;
+  localPath: AbrainLocalProjectPath;
+  manifest: AbrainProjectManifest;
+  registry: AbrainProjectRegistry;
   gitRoot?: string;
-  gitRemote?: string;
 }
+
+export type ProjectBindingStatus =
+  | "manifest_missing"
+  | "manifest_invalid"
+  | "registry_missing"
+  | "registry_mismatch"
+  | "path_unconfirmed"
+  | "path_conflict"
+  | "invalid_cwd";
 
 export type ResolveActiveProjectResult =
   | { activeProject: ActiveProjectResolution; reason?: undefined }
   | {
       activeProject: null;
-      reason: "bindings_missing" | "bindings_empty" | "unbound" | "ambiguous_remote" | "ambiguous_prefix" | "invalid_cwd";
+      reason: ProjectBindingStatus;
       cwd: string;
-      bindingsPath: string;
+      projectRoot?: string;
+      projectId?: string;
+      manifestPath?: string;
+      registryPath?: string;
+      localMapPath?: string;
       gitRoot?: string;
-      gitRemote?: string;
+      detail?: string;
     };
 
 export interface ResolveActiveProjectOptions {
   abrainHome: string;
-  bindingsPath?: string;
   existsSync?: (file: string) => boolean;
   readFileSync?: (file: string, encoding: BufferEncoding) => string;
   execFileSync?: (file: string, args: string[], options: { cwd?: string; encoding: BufferEncoding; stdio?: Array<"ignore" | "pipe">; timeout?: number }) => string;
@@ -175,17 +216,32 @@ export interface ResolveActiveProjectOptions {
 export interface BrainPaths {
   abrainHome: string;
   projectsDir: string;
-  bindingsPath: string;
   projectDir: string;
   projectVaultDir: string;
+  manifestPath?: string;
+  registryPath: string;
+  localMapPath: string;
 }
 
 export function abrainProjectsDir(abrainHome: string): string {
   return path.join(path.resolve(abrainHome), "projects");
 }
-export function abrainProjectBindingsPath(abrainHome: string): string {
-  return path.join(abrainProjectsDir(abrainHome), "_bindings.md");
+
+export const ABRAIN_PROJECT_MANIFEST = ".abrain-project.json";
+export const ABRAIN_PROJECT_REGISTRY = "_project.json";
+
+export function abrainProjectManifestPath(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), ABRAIN_PROJECT_MANIFEST);
 }
+
+export function abrainProjectRegistryPath(abrainHome: string, projectId: string): string {
+  return path.join(abrainProjectDir(abrainHome, projectId), ABRAIN_PROJECT_REGISTRY);
+}
+
+export function abrainProjectLocalMapPath(abrainHome: string): string {
+  return path.join(abrainStateDir(abrainHome), "projects", "local-map.json");
+}
+
 export function abrainProjectDir(abrainHome: string, projectId: string): string {
   validateAbrainProjectId(projectId);
   return path.join(abrainProjectsDir(abrainHome), projectId);
@@ -247,9 +303,10 @@ export function resolveBrainPaths(abrainHome: string, projectId: string): BrainP
   return {
     abrainHome: root,
     projectsDir: abrainProjectsDir(root),
-    bindingsPath: abrainProjectBindingsPath(root),
     projectDir: abrainProjectDir(root, projectId),
     projectVaultDir: abrainProjectVaultDir(root, projectId),
+    registryPath: abrainProjectRegistryPath(root, projectId),
+    localMapPath: abrainProjectLocalMapPath(root),
   };
 }
 
@@ -262,93 +319,177 @@ export function validateAbrainProjectId(projectId: string): void {
   if (!/^[a-zA-Z0-9_.-]+$/.test(projectId)) throw new Error(`project id must match [a-zA-Z0-9_.-]+: ${projectId}`);
 }
 
-function unquoteYamlScalar(raw: string): string {
-  let value = raw.trim().replace(/\s+#.*$/, "");
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    value = value.slice(1, -1);
-  }
-  return value.trim();
+function parseJsonFile<T>(raw: string, label: string): T {
+  try { return JSON.parse(raw) as T; }
+  catch (e: any) { throw new Error(`${label} is not valid JSON: ${e?.message ?? String(e)}`); }
 }
 
-function parseBindingKeyValue(line: string): [string, string] | null {
-  const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
-  if (!match) return null;
-  return [match[1]!, unquoteYamlScalar(match[2] ?? "")];
+export function normalizeProjectRoot(cwd: string, opts: ResolveActiveProjectOptions): { cwd: string; projectRoot: string; gitRoot?: string } {
+  const normalizedCwd = path.resolve(cwd);
+  const gitRoot = findGitRoot(normalizedCwd, opts);
+  return { cwd: normalizedCwd, projectRoot: gitRoot ?? normalizedCwd, gitRoot };
 }
 
-function bindingFromRaw(raw: Record<string, string>): AbrainProjectBinding | null {
-  const cwd = raw.cwd?.trim();
-  const project = raw.project?.trim();
-  if (!cwd || !project) return null;
-  try { validateAbrainProjectId(project); } catch { return null; }
-  return {
-    cwd,
-    project,
-    boundAt: raw.bound_at,
-    boundVia: raw.bound_via,
-    gitRemote: raw.git_remote,
-    raw: { ...raw },
-  };
+export function parseAbrainProjectManifest(raw: string): AbrainProjectManifest {
+  const parsed = parseJsonFile<Partial<AbrainProjectManifest>>(raw, ABRAIN_PROJECT_MANIFEST);
+  if (parsed.schema_version !== 1) throw new Error(`unsupported ${ABRAIN_PROJECT_MANIFEST} schema_version: ${String(parsed.schema_version)}`);
+  const projectId = String(parsed.project_id ?? "").trim();
+  validateAbrainProjectId(projectId);
+  return { schema_version: 1, project_id: projectId };
 }
 
-export function parseProjectBindingsMarkdown(markdown: string): AbrainProjectBinding[] {
-  const bindings: AbrainProjectBinding[] = [];
-  let current: Record<string, string> | null = null;
+export function parseAbrainProjectRegistry(raw: string): AbrainProjectRegistry {
+  const parsed = parseJsonFile<Partial<AbrainProjectRegistry>>(raw, ABRAIN_PROJECT_REGISTRY);
+  if (parsed.schema_version !== 1) throw new Error(`unsupported ${ABRAIN_PROJECT_REGISTRY} schema_version: ${String(parsed.schema_version)}`);
+  const projectId = String(parsed.project_id ?? "").trim();
+  validateAbrainProjectId(projectId);
+  const createdAt = typeof parsed.created_at === "string" && parsed.created_at.trim() ? parsed.created_at : formatLocalIsoTimestamp();
+  const updatedAt = typeof parsed.updated_at === "string" && parsed.updated_at.trim() ? parsed.updated_at : createdAt;
+  return { schema_version: 1, project_id: projectId, created_at: createdAt, updated_at: updatedAt };
+}
 
-  const flush = () => {
-    if (!current) return;
-    const binding = bindingFromRaw(current);
-    if (binding) bindings.push(binding);
-    current = null;
-  };
+export function emptyAbrainLocalProjectMap(): AbrainLocalProjectMap {
+  return { schema_version: 1, projects: {} };
+}
 
-  for (const line of markdown.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    if (trimmed.startsWith("- ")) {
-      flush();
-      current = {};
-      const rest = trimmed.slice(2).trim();
-      if (rest) {
-        const kv = parseBindingKeyValue(rest);
-        if (kv) current[kv[0]] = kv[1];
-      }
-      continue;
+export function parseAbrainLocalProjectMap(raw: string): AbrainLocalProjectMap {
+  const parsed = parseJsonFile<Partial<AbrainLocalProjectMap>>(raw, "local-map.json");
+  if (parsed.schema_version !== 1) throw new Error(`unsupported local-map.json schema_version: ${String(parsed.schema_version)}`);
+  const projectsRaw = parsed.projects && typeof parsed.projects === "object" ? parsed.projects : {};
+  const projects: AbrainLocalProjectMap["projects"] = {};
+  for (const [projectId, value] of Object.entries(projectsRaw)) {
+    try { validateAbrainProjectId(projectId); } catch { continue; }
+    const pathsRaw = (value as any)?.paths;
+    if (!Array.isArray(pathsRaw)) { projects[projectId] = { paths: [] }; continue; }
+    const paths: AbrainLocalProjectPath[] = [];
+    for (const p of pathsRaw) {
+      if (!p || typeof p !== "object") continue;
+      const pathValue = typeof (p as any).path === "string" ? path.resolve((p as any).path) : "";
+      if (!pathValue) continue;
+      const now = formatLocalIsoTimestamp();
+      paths.push({
+        path: pathValue,
+        first_seen: typeof (p as any).first_seen === "string" ? (p as any).first_seen : now,
+        last_seen: typeof (p as any).last_seen === "string" ? (p as any).last_seen : now,
+        confirmed_at: typeof (p as any).confirmed_at === "string" ? (p as any).confirmed_at : now,
+      });
     }
-    if (!current) continue;
-    const kv = parseBindingKeyValue(trimmed);
-    if (kv) current[kv[0]] = kv[1];
+    projects[projectId] = { paths };
   }
-  flush();
-  return bindings;
+  return { schema_version: 1, projects };
 }
 
-export function canonicalizeGitRemote(remote: string | undefined | null): string | null {
-  if (!remote) return null;
-  let value = unquoteYamlScalar(remote);
-  if (!value) return null;
-  value = value.replace(/^git\+/, "").replace(/\/$/, "");
-  const scpLike = value.match(/^([^/@:]+)@([^:]+):(.+)$/);
-  if (scpLike) value = `ssh://${scpLike[1]}@${scpLike[2]}/${scpLike[3]}`;
+async function atomicWriteText(file: string, content: string): Promise<void> {
+  const fsPromises = await import("node:fs/promises");
+  await fsPromises.mkdir(path.dirname(file), { recursive: true });
+  const tmp = path.join(path.dirname(file), `.tmp-${path.basename(file)}-${process.pid}-${Date.now()}`);
   try {
-    const url = new URL(value);
-    const host = url.hostname.toLowerCase();
-    let pathname = url.pathname.replace(/^\/+/, "").replace(/\/$/, "");
-    pathname = pathname.replace(/\.git$/i, "");
-    return `${host}/${pathname}`.toLowerCase();
-  } catch {
-    return value.replace(/\.git$/i, "").toLowerCase();
+    await fsPromises.writeFile(tmp, content, "utf-8");
+    await fsPromises.rename(tmp, file);
+  } finally {
+    await fsPromises.unlink(tmp).catch(() => {});
   }
 }
 
-function normalizeBindingCwd(cwd: string): string {
-  const expanded = cwd.startsWith("~/") ? path.join(process.env.HOME ?? "", cwd.slice(2)) : cwd;
-  return path.resolve(expanded);
+export interface BindAbrainProjectResult {
+  projectId: string;
+  projectRoot: string;
+  manifestPath: string;
+  registryPath: string;
+  localMapPath: string;
+  abrainGitignorePath: string;
+  manifestCreated: boolean;
+  registryCreated: boolean;
+  localPathAdded: boolean;
+  abrainGitignoreUpdated: boolean;
 }
 
-function isPathPrefix(prefix: string, target: string): boolean {
-  const rel = path.relative(prefix, target);
-  return rel === "" || (!!rel && !rel.startsWith("..") && rel !== ".." && !path.isAbsolute(rel));
+export async function bindAbrainProject(opts: {
+  abrainHome: string;
+  cwd: string;
+  projectId?: string;
+  now?: string;
+  existsSync?: (file: string) => boolean;
+  readFileSync?: (file: string, encoding: BufferEncoding) => string;
+  execFileSync?: ResolveActiveProjectOptions["execFileSync"];
+}): Promise<BindAbrainProjectResult> {
+  const now = opts.now ?? formatLocalIsoTimestamp();
+  const exists = opts.existsSync ?? fs.existsSync;
+  const read = opts.readFileSync ?? fs.readFileSync;
+  const rootInfo = normalizeProjectRoot(opts.cwd, { abrainHome: opts.abrainHome, execFileSync: opts.execFileSync });
+  const projectRoot = rootInfo.projectRoot;
+  const manifestPath = abrainProjectManifestPath(projectRoot);
+
+  let projectId = opts.projectId?.trim();
+  let manifestCreated = false;
+  let manifestToWrite: AbrainProjectManifest | null = null;
+  if (projectId) validateAbrainProjectId(projectId);
+  if (exists(manifestPath)) {
+    const manifest = parseAbrainProjectManifest(read(manifestPath, "utf-8"));
+    if (projectId && manifest.project_id !== projectId) {
+      throw new Error(`manifest_conflict: ${ABRAIN_PROJECT_MANIFEST} already declares project_id=${manifest.project_id}; refusing to bind to ${projectId}`);
+    }
+    projectId = manifest.project_id;
+  } else {
+    if (!projectId) throw new Error(`manifest_missing: run /abrain bind --project=<id> to create ${ABRAIN_PROJECT_MANIFEST}`);
+    manifestToWrite = { schema_version: 1, project_id: projectId };
+    manifestCreated = true;
+  }
+
+  const registryPath = abrainProjectRegistryPath(opts.abrainHome, projectId!);
+  let registryCreated = false;
+  let registryToWrite: AbrainProjectRegistry;
+  if (exists(registryPath)) {
+    const registry = parseAbrainProjectRegistry(read(registryPath, "utf-8"));
+    if (registry.project_id !== projectId) {
+      throw new Error(`registry_mismatch: ${registryPath} declares project_id=${registry.project_id}; expected ${projectId}`);
+    }
+    registryToWrite = { ...registry, updated_at: now };
+  } else {
+    registryToWrite = { schema_version: 1, project_id: projectId!, created_at: now, updated_at: now };
+    registryCreated = true;
+  }
+
+  const localMapPath = abrainProjectLocalMapPath(opts.abrainHome);
+  let localMap = emptyAbrainLocalProjectMap();
+  if (exists(localMapPath)) localMap = parseAbrainLocalProjectMap(read(localMapPath, "utf-8"));
+
+  const normalizedPath = path.resolve(projectRoot);
+  for (const [otherProjectId, info] of Object.entries(localMap.projects)) {
+    if (otherProjectId === projectId) continue;
+    if (info.paths.some((p) => path.resolve(p.path) === normalizedPath)) {
+      throw new Error(`path_conflict: ${normalizedPath} is already confirmed for project ${otherProjectId}`);
+    }
+  }
+
+  const entry = localMap.projects[projectId!] ?? { paths: [] };
+  const existingPath = entry.paths.find((p) => path.resolve(p.path) === normalizedPath);
+  let localPathAdded = false;
+  if (existingPath) {
+    existingPath.last_seen = now;
+  } else {
+    entry.paths.push({ path: normalizedPath, first_seen: now, last_seen: now, confirmed_at: now });
+    localPathAdded = true;
+  }
+  localMap.projects[projectId!] = entry;
+
+  const abrainGitignorePath = path.join(path.resolve(opts.abrainHome), ".gitignore");
+  const gitignoreRaw = exists(abrainGitignorePath) ? read(abrainGitignorePath, "utf-8") : "";
+  const abrainGitignoreUpdated = !/(^|\n)\.state\/?(\n|$)/.test(gitignoreRaw);
+  const gitignoreToWrite = abrainGitignoreUpdated
+    ? `${gitignoreRaw}${gitignoreRaw && !gitignoreRaw.endsWith("\n") ? "\n" : ""}.state/\n`
+    : null;
+
+  if (gitignoreToWrite !== null) {
+    await atomicWriteText(abrainGitignorePath, gitignoreToWrite);
+  }
+  if (manifestToWrite) {
+    await atomicWriteText(manifestPath, JSON.stringify(manifestToWrite, null, 2) + "\n");
+  }
+  await atomicWriteText(registryPath, JSON.stringify(registryToWrite, null, 2) + "\n");
+  await atomicWriteText(localMapPath, JSON.stringify(localMap, null, 2) + "\n");
+
+  return { projectId: projectId!, projectRoot, manifestPath, registryPath, localMapPath, abrainGitignorePath, manifestCreated, registryCreated, localPathAdded, abrainGitignoreUpdated };
 }
 
 function findGitRoot(cwd: string, opts: ResolveActiveProjectOptions): string | undefined {
@@ -365,96 +506,79 @@ function findGitRoot(cwd: string, opts: ResolveActiveProjectOptions): string | u
   }
 }
 
-function findGitRemote(gitRoot: string | undefined, opts: ResolveActiveProjectOptions): string | undefined {
-  if (!gitRoot) return undefined;
-  const exec = opts.execFileSync ?? nodeExecFileSync;
-  try {
-    const out = exec("git", ["config", "--get", "remote.origin.url"], {
-      cwd: gitRoot,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2000,
-    }).trim();
-    return out || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function uniqueProjectIds(bindings: AbrainProjectBinding[]): string[] {
-  return Array.from(new Set(bindings.map((b) => b.project)));
-}
-
-function activeProjectResult(
-  binding: AbrainProjectBinding,
-  matchedBy: ActiveProjectMatchKind,
-  cwd: string,
-  lookupCwd: string,
-  bindingsPath: string,
-  gitRoot: string | undefined,
-  gitRemote: string | undefined,
-): ResolveActiveProjectResult {
-  return {
-    activeProject: {
-      projectId: binding.project,
-      binding,
-      matchedBy,
-      cwd,
-      lookupCwd,
-      bindingsPath,
-      gitRoot,
-      gitRemote,
-    },
-  };
-}
-
 export function resolveActiveProject(cwd: string, opts: ResolveActiveProjectOptions): ResolveActiveProjectResult {
-  let normalizedCwd: string;
-  try { normalizedCwd = path.resolve(cwd); }
+  let rootInfo: { cwd: string; projectRoot: string; gitRoot?: string };
+  try { rootInfo = normalizeProjectRoot(cwd, opts); }
   catch {
-    const bindingsPath = opts.bindingsPath ?? abrainProjectBindingsPath(opts.abrainHome);
-    return { activeProject: null, reason: "invalid_cwd", cwd, bindingsPath };
+    return { activeProject: null, reason: "invalid_cwd", cwd };
   }
 
-  const bindingsPath = opts.bindingsPath ?? abrainProjectBindingsPath(opts.abrainHome);
   const exists = opts.existsSync ?? fs.existsSync;
   const read = opts.readFileSync ?? fs.readFileSync;
-  const gitRoot = findGitRoot(normalizedCwd, opts);
-  const gitRemote = findGitRemote(gitRoot, opts);
-  if (!exists(bindingsPath)) return { activeProject: null, reason: "bindings_missing", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
-
-  const bindings = parseProjectBindingsMarkdown(read(bindingsPath, "utf8"));
-  if (bindings.length === 0) return { activeProject: null, reason: "bindings_empty", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
-  const lookupCwd = gitRoot ?? normalizedCwd;
-
-  if (gitRoot) {
-    const exact = bindings.filter((b) => normalizeBindingCwd(b.cwd) === gitRoot);
-    const projects = uniqueProjectIds(exact);
-    if (projects.length > 1) return { activeProject: null, reason: "ambiguous_prefix", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
-    if (exact[0]) return activeProjectResult(exact[0], "git_root_exact", normalizedCwd, lookupCwd, bindingsPath, gitRoot, gitRemote);
+  const manifestPath = abrainProjectManifestPath(rootInfo.projectRoot);
+  if (!exists(manifestPath)) {
+    return { activeProject: null, reason: "manifest_missing", cwd: rootInfo.cwd, projectRoot: rootInfo.projectRoot, manifestPath, gitRoot: rootInfo.gitRoot };
   }
 
-  const currentRemote = canonicalizeGitRemote(gitRemote);
-  if (currentRemote) {
-    const remoteMatches = bindings.filter((b) => canonicalizeGitRemote(b.gitRemote) === currentRemote);
-    const projects = uniqueProjectIds(remoteMatches);
-    if (projects.length > 1) return { activeProject: null, reason: "ambiguous_remote", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
-    if (remoteMatches[0]) return activeProjectResult(remoteMatches[0], "git_remote", normalizedCwd, lookupCwd, bindingsPath, gitRoot, gitRemote);
+  let manifest: AbrainProjectManifest;
+  try { manifest = parseAbrainProjectManifest(read(manifestPath, "utf-8")); }
+  catch (e: any) {
+    return { activeProject: null, reason: "manifest_invalid", cwd: rootInfo.cwd, projectRoot: rootInfo.projectRoot, manifestPath, gitRoot: rootInfo.gitRoot, detail: e?.message ?? String(e) };
   }
 
-  const prefixMatches = bindings
-    .map((binding) => ({ binding, cwd: normalizeBindingCwd(binding.cwd) }))
-    .filter((b) => isPathPrefix(b.cwd, normalizedCwd))
-    .sort((a, b) => b.cwd.length - a.cwd.length);
-  if (prefixMatches.length > 0) {
-    const bestLen = prefixMatches[0]!.cwd.length;
-    const best = prefixMatches.filter((b) => b.cwd.length === bestLen).map((b) => b.binding);
-    const projects = uniqueProjectIds(best);
-    if (projects.length > 1) return { activeProject: null, reason: "ambiguous_prefix", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
-    return activeProjectResult(best[0]!, "cwd_prefix", normalizedCwd, lookupCwd, bindingsPath, gitRoot, gitRemote);
+  const projectId = manifest.project_id;
+  const registryPath = abrainProjectRegistryPath(opts.abrainHome, projectId);
+  const localMapPath = abrainProjectLocalMapPath(opts.abrainHome);
+  if (!exists(registryPath)) {
+    return { activeProject: null, reason: "registry_missing", cwd: rootInfo.cwd, projectRoot: rootInfo.projectRoot, projectId, manifestPath, registryPath, localMapPath, gitRoot: rootInfo.gitRoot };
   }
 
-  return { activeProject: null, reason: "unbound", cwd: normalizedCwd, bindingsPath, gitRoot, gitRemote };
+  let registry: AbrainProjectRegistry;
+  try { registry = parseAbrainProjectRegistry(read(registryPath, "utf-8")); }
+  catch (e: any) {
+    return { activeProject: null, reason: "registry_mismatch", cwd: rootInfo.cwd, projectRoot: rootInfo.projectRoot, projectId, manifestPath, registryPath, localMapPath, gitRoot: rootInfo.gitRoot, detail: e?.message ?? String(e) };
+  }
+  if (registry.project_id !== projectId) {
+    return { activeProject: null, reason: "registry_mismatch", cwd: rootInfo.cwd, projectRoot: rootInfo.projectRoot, projectId, manifestPath, registryPath, localMapPath, gitRoot: rootInfo.gitRoot, detail: `registry project_id=${registry.project_id} does not match manifest project_id=${projectId}` };
+  }
+
+  let localMap = emptyAbrainLocalProjectMap();
+  if (exists(localMapPath)) {
+    try { localMap = parseAbrainLocalProjectMap(read(localMapPath, "utf-8")); }
+    catch (e: any) {
+      return { activeProject: null, reason: "path_unconfirmed", cwd: rootInfo.cwd, projectRoot: rootInfo.projectRoot, projectId, manifestPath, registryPath, localMapPath, gitRoot: rootInfo.gitRoot, detail: e?.message ?? String(e) };
+    }
+  }
+
+  const normalizedProjectRoot = path.resolve(rootInfo.projectRoot);
+  for (const [otherProjectId, info] of Object.entries(localMap.projects)) {
+    if (otherProjectId === projectId) continue;
+    if (info.paths.some((p) => path.resolve(p.path) === normalizedProjectRoot)) {
+      return { activeProject: null, reason: "path_conflict", cwd: rootInfo.cwd, projectRoot: rootInfo.projectRoot, projectId, manifestPath, registryPath, localMapPath, gitRoot: rootInfo.gitRoot, detail: `${normalizedProjectRoot} is confirmed for project ${otherProjectId}` };
+    }
+  }
+
+  const localPath = localMap.projects[projectId]?.paths.find((p) => path.resolve(p.path) === normalizedProjectRoot);
+  if (!localPath) {
+    return { activeProject: null, reason: "path_unconfirmed", cwd: rootInfo.cwd, projectRoot: rootInfo.projectRoot, projectId, manifestPath, registryPath, localMapPath, gitRoot: rootInfo.gitRoot };
+  }
+
+  return {
+    activeProject: {
+      projectId,
+      matchedBy: "strict_local_map",
+      cwd: rootInfo.cwd,
+      lookupCwd: normalizedProjectRoot,
+      projectRoot: normalizedProjectRoot,
+      manifestPath,
+      registryPath,
+      localMapPath,
+      localPath,
+      manifest,
+      registry,
+      gitRoot: rootInfo.gitRoot,
+    },
+  };
 }
 
 /* -------- one-shot legacy data migration ------------------------------ *

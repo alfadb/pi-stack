@@ -208,7 +208,7 @@ export function buildBootVaultBashDeps(opts: PrepareBootVaultBashOptions): Vault
     writeEnvFile: (vars) => writeVaultEnvFile(opts.stateDir, vars),
     pvaultBlockReason: projectId
       ? undefined
-      : "$PVAULT_* requires an active project; current cwd is not bound to one (~/.abrain/projects/_bindings.md).",
+      : "$PVAULT_* requires a strict active project binding. Run /abrain bind (or use $GVAULT_* for global secrets).",
   };
 }
 

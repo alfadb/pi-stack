@@ -50,7 +50,7 @@ alfadb/pi-astack/
 │   │   ├── 0014-abrain-as-personal-brain.md              # ✅ ~/.abrain 重定位为数字孪生七区结构 (2026-05-09, v1.4)
 │   │   ├── 0015-memory-search-llm-driven-retrieval.md    # ✅ memory_search 双阶段 LLM rerank (2026-05-10, Accepted; Phase 0/1 implemented)
 │   │   ├── 0016-sediment-as-llm-curator.md               # ✅ sediment 从 gate-heavy extractor 转向 LLM curator (2026-05-10)
-│   │   └── 0017-project-binding-strict-mode.md           # ✅ B4.5 设计接受：.abrain-project.json + registry + local-map strict binding（待实施）
+│   │   └── 0017-project-binding-strict-mode.md           # ✅ B4.5 已实施：.abrain-project.json + registry + local-map strict binding
 │   ├── brain-redesign-spec.md         # ✅ ADR 0014/0017 详细规范 — abrain 七区拓扑/vault 双层/Lane G/V + strict project binding
 │   └── migration/
 │       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6（Phase 2 起部分被 ADR 0014 重新规划）
@@ -133,10 +133,10 @@ alfadb/pi-astack/
 | `extensions/imagine/` | ✅ 已实现 | — |
 | `extensions/model-curator/` | ✅ 已实现 | — |
 | `extensions/model-fallback/` | ✅ 已实现 | — |
-| `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks） | Phase 1.1-1.3b + ADR 0015 |
-| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator + B1 abrain workflows lane writer；writer 按需创建 `.pensieve/`；bg 在飞时不推进 checkpoint/不写 skip audit；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控。原 per-file `migration.ts` 基底于 2026-05-12 剥离；per-repo 迁移工具 `/memory migrate --go` 于 2026-05-12 ship（B4 ✅，`extensions/memory/migrate-go.ts`）。） | Phase 1.4 A1+A2+A3 + ADR 0016 |
+| `extensions/memory/` | ✅ 已实现（只读 Facade + ADR 0015 LLM search Phase 0/1 + lint/migrate dry-run/check-backlinks + B4/B4.5 strict per-repo migrate） | Phase 1.1-1.3b + ADR 0015 + ADR 0017 |
+| `extensions/sediment/` | ✅ 实现（explicit extractor + direct LLM auto-write LIVE + status FSM + memory_search-powered create/update/merge/archive/supersede/delete/skip curator + B1 abrain workflows lane writer；writer 按需创建 `.pensieve/`；bg 在飞时不推进 checkpoint/不写 skip audit；无 dry-run/readiness/rate/sampling/rolling/G2-G13 机械门控。原 per-file `migration.ts` 基底于 2026-05-12 剥离；per-repo 迁移工具 `/memory migrate --go` 于 2026-05-12 ship（B4 ✅，`extensions/memory/migrate-go.ts`）；ADR 0017 strict binding guard 已拒绝未 bound 项目的 sediment hook 写入。） | Phase 1.4 A1+A2+A3 + ADR 0016 + ADR 0017 |
 | `extensions/compaction-tuner/` | ✅ 实现（percent-based ctx.compact() trigger + hysteresis） | 计划外（2026-05-08） |
-| `extensions/abrain/` | ✅ vault P0a-c 完全 ship： backend-detect + master-key bootstrap + vaultWriter + vaultReader + /vault + /secret （default = boot-time active project，--global / --project=<id> opt-out，--all-projects 枚举） + `vault_release(key, scope?, reason?)` （pre-flight + deny-first + i18n + description rendering） + boot-aware `$VAULT_*` / `$PVAULT_*` / `$GVAULT_*` bash injection 与 default-withheld + literal redaction + read-path audit closure（release / release_denied / release_blocked / bash_inject / bash_inject_block / bash_output_release / bash_output_withhold） | ADR 0014 §D4 P0a/P0b/P0c.write/P0c.read + §D4 P1 project routing (2026-05-09 → 2026-05-11) |
+| `extensions/abrain/` | ✅ vault P0a-c + B4.5 strict binding ship： backend-detect + master-key bootstrap + vaultWriter + vaultReader + /vault + /secret （default = strict-bound active project，--global opt-out，--project=<id> 仅允许等于 bound project，--all-projects 枚举） + `/abrain bind/status` + `vault_release(key, scope?, reason?)` （pre-flight + deny-first + i18n + description rendering） + boot-aware `$VAULT_*` / `$PVAULT_*` / `$GVAULT_*` bash injection 与 default-withheld + literal redaction + read-path audit closure（release / release_denied / release_blocked / bash_inject / bash_inject_block / bash_output_release / bash_output_withhold） | ADR 0014 §D4 P0a/P0b/P0c.write/P0c.read + ADR 0017 strict project binding |
 | `extensions/browse/` | [计划] | Slice F（旧路线图） |
 | `skills/` | [计划] | Slice F |
 | `prompts/` | [计划] | Slice F |
@@ -161,7 +161,7 @@ v7 markdown+git 记忆架构的只读 Facade。注册 4 个 LLM-facing 工具：
 Human-facing 命令：
 - `/memory lint [path]`：执行 T1-T10 Timeline/frontmatter lint，不注册为 LLM tool
 - `/memory doctor-lite [path]`：汇总 lint / graph / index / migration / sediment auto-write audit 状态
-- `/memory migrate --dry-run [--report] [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划；`--report` 写 `.pi-astack/memory/migration-report.md`。B4.5（ADR 0017）后，迁移必须先 `/abrain bind --project=<id>`，`/memory migrate` 不再接受 `--project`。
+- `/memory migrate --dry-run [--report] [path]`：生成 legacy `.pensieve/` → schema v1 的迁移计划；`--report` 写 `.pi-astack/memory/migration-report.md`。迁移必须先 `/abrain bind --project=<id>`，`/memory migrate` 不再接受 `--project`。
 - `/memory check-backlinks [path]`：in-memory 构建 graph snapshot，报告 dead links 与缺失 symmetric backlinks
 - `/memory rebuild --graph [path]`：写入 derived graph index（project: `.index/graph.json`；world: `.state/index/graph.json`）
 - `/memory rebuild --index [path]`：写入 generated markdown index（`_index.md`）

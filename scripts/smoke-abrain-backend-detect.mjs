@@ -418,17 +418,19 @@ check("formatStatus A with keychain backend: shows 'master stored in: macOS Keyc
   if (!out.includes("macOS Keychain")) throw new Error("missing 'macOS Keychain' description");
 });
 
-check("formatStatus A distinguishes shipped P0c read/write from pending project routing", () => {
+check("formatStatus A states shipped P0c read/write + project routing", () => {
   // Verify status text does not mislead users: /secret write/list/forget,
-  // vault_release, and global $VAULT_* bash injection are shipped; project
-  // vault routing remains pending.
+  // vault_release, bash injection, and project vault routing are shipped.
+  // B4.5 further tightens project routing with strict binding, but routing
+  // itself is no longer pending.
   const info = detectBackend(deps({}));
   const out = formatStatus(info, false, {
     backend: "ssh-key", identity: "/x", vaultMasterPresent: true, vaultMasterMode: 0o600,
   });
-  if (!out.includes("P0c.write implemented")) throw new Error("missing shipped P0c.write note");
-  if (!out.includes("vault_release + $VAULT_* bash injection are implemented")) throw new Error("missing shipped P0c.read note");
-  if (!out.includes("project vault routing remains pending")) throw new Error("missing pending project routing note");
+  if (!out.includes("P0c.write / P0c.read / vault_release LLM tool / $VAULT_* bash injection / project vault routing all implemented")) {
+    throw new Error(`missing shipped P0c/project routing note:\n${out}`);
+  }
+  if (out.includes("remains pending")) throw new Error("stale pending project routing wording leaked");
   if (out.includes("cannot write")) throw new Error("stale cannot-write wording leaked");
 });
 
@@ -447,17 +449,20 @@ const keychainSrc = path.join(repoRoot, "extensions/abrain/keychain.ts");
 const vaultWriterSrc = path.join(repoRoot, "extensions/abrain/vault-writer.ts");
 const vaultReaderSrc = path.join(repoRoot, "extensions/abrain/vault-reader.ts");
 const vaultBashSrc = path.join(repoRoot, "extensions/abrain/vault-bash.ts");
+const brainLayoutSrc = path.join(repoRoot, "extensions/abrain/brain-layout.ts");
 fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), transpileTsToCjs(bootstrapSrc));
 fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-reader.cjs"), transpileTsToCjs(vaultReaderSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-bash.cjs"), transpileTsToCjs(vaultBashSrc));
+fs.writeFileSync(path.join(tmpDir, "brain-layout.cjs"), transpileTsToCjs(brainLayoutSrc));
 fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts")));
 // vault-reader.cjs keeps its own relative imports (./keychain, ./vault-writer),
 // so provide extensionless .js companions in the tmp dir as well.
 fs.copyFileSync(path.join(tmpDir, "keychain.cjs"), path.join(tmpDir, "keychain.js"));
 fs.copyFileSync(path.join(tmpDir, "vault-writer.cjs"), path.join(tmpDir, "vault-writer.js"));
 fs.copyFileSync(path.join(tmpDir, "vault-reader.cjs"), path.join(tmpDir, "vault-reader.js"));
+fs.copyFileSync(path.join(tmpDir, "brain-layout.cjs"), path.join(tmpDir, "brain-layout.js"));
 // _shared/runtime is required by index.ts via ../_shared/runtime; mirror that layout.
 const sharedTargetDir = path.join(tmpDir, "_shared");
 fs.mkdirSync(sharedTargetDir, { recursive: true });
@@ -474,6 +479,7 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/vault-reader"\)/g, 'require("./vault-reader.cjs")')
   .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")')
   .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
+  .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);

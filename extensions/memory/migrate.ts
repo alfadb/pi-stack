@@ -99,9 +99,9 @@ function inferLegacyArea(relPath: string): { area: string; shortTerm: boolean; u
 
 export interface MigrationDryRunOptions {
   abrainHome?: string;
-  /** Pre-resolved abrain projectId. Pass through the same value you would pass
-   *  to `/memory migrate --go --project=<id>`; pass `undefined` if you want
-   *  dry-run to render `<unresolved>` markers in target_path. */
+  /** Pre-resolved abrain projectId from ADR 0017 strict binding (/abrain bind);
+   *  pass `undefined` only for legacy diagnostics that intentionally render
+   *  `<unresolved>` markers in target_path. */
   projectId?: string;
   /** Defaults to inferring crossProject from frontmatter `cross_project: true`. */
   isCrossProject?: (relPath: string, frontmatter: Record<string, unknown>) => boolean;
@@ -129,7 +129,7 @@ function legacyTargetPath(
   const abrainHome = opts.abrainHome;
   const projectId = opts.projectId;
   if (!abrainHome || !projectId) {
-    return `<unresolved — pass --project=<id> (or run from a repo with a git remote) to see destination>`;
+    return `<unresolved — run /abrain bind --project=<id> first to see destination>`;
   }
 
   if (area === "pipelines") {
@@ -324,7 +324,7 @@ export function formatMigrationReportMarkdown(report: MigrationPlanReport): stri
   if (Object.keys(reasonCounts).length === 0) lines.push("- None");
 
   lines.push("", "## Migration Items", "");
-  lines.push("_Per-file migration substrate retired 2026-05-12. Per-repo one-shot migration: run `/memory migrate --go [--project=<id>]` (B4 shipped 2026-05-12, see `extensions/memory/migrate-go.ts`). Spec: docs/migration/abrain-pensieve-migration.md §3. Rollback: see summary printed by `--go` (pre-migration SHAs)._");
+  lines.push("_Per-file migration substrate retired 2026-05-12. Per-repo one-shot migration: run `/abrain bind --project=<id>` once, then `/memory migrate --go` (B4+B4.5 shipped 2026-05-12, see `extensions/memory/migrate-go.ts`). Spec: docs/migration/abrain-pensieve-migration.md §3. Rollback: see summary printed by `--go` (pre-migration SHAs)._");
   lines.push("");
   if (report.items.length === 0) {
     lines.push("- None");
@@ -395,9 +395,9 @@ export function formatMigrationPlan(report: MigrationPlanReport, maxItems = 12):
     // Per-file migration substrate retired 2026-05-12. Per-repo one-shot
     // migration (`/memory migrate --go`) shipped same day (B4); this dry-run
     // planner stays read-only and only surfaces what would migrate. To execute,
-    // run `/memory migrate --go [--project=<id>]`. See migrate-go.ts and
-    // docs/migration/abrain-pensieve-migration.md §3 for the apply path.
-    "Read-only plan (no writes). To execute migration: `/memory migrate --go [--project=<id>]` (B4 shipped 2026-05-12).",
+    // run `/abrain bind --project=<id>` once, then `/memory migrate --go`.
+    // See migrate-go.ts and docs/migration/abrain-pensieve-migration.md §3.
+    "Read-only plan (no writes). To execute migration: `/abrain bind --project=<id>` once, then `/memory migrate --go` (B4+B4.5 shipped 2026-05-12).",
     "target_path values below show where `--go` would route each entry into ~/.abrain/.",
   ];
 

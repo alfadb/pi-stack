@@ -177,6 +177,7 @@ async function main() {
     const { rebuildMarkdownIndex } = req("./memory/index-file.js");
     const { planMigrationDryRun, writeMigrationReport } = req("./memory/migrate.js");
     const { runMigrationGo, formatMigrationGoSummary } = req("./memory/migrate-go.js");
+    const { bindAbrainProject } = req("./_shared/runtime.js");
     const { runDoctorLite } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow } = req("./sediment/writer.js");
@@ -189,6 +190,29 @@ async function main() {
     const compactionTunerExt = req("./compaction-tuner/index.js").default;
     const { classifyDecision, DEFAULT_COMPACTION_TUNER_SETTINGS } = req("./compaction-tuner/index.js");
     const { resolveCompactionTunerSettings } = req("./compaction-tuner/settings.js");
+
+    function gitCommitIfChanged(repo, paths, message) {
+      const status = execFileSync("git", ["-C", repo, "status", "--porcelain", "--", ...paths], { encoding: "utf-8" });
+      if (!status.trim()) return;
+      execFileSync("git", ["-C", repo, "add", ...paths]);
+      execFileSync("git", ["-C", repo, "commit", "-q", "-m", message]);
+    }
+
+    async function bindMigrationProject(projectRoot, abrainHome, projectId) {
+      await bindAbrainProject({
+        abrainHome,
+        cwd: projectRoot,
+        projectId,
+        now: "2026-05-12T10:00:00.000+08:00",
+      });
+      gitCommitIfChanged(projectRoot, [".abrain-project.json"], `bind ${projectId}`);
+      const gitignorePath = path.join(abrainHome, ".gitignore");
+      const existingGitignore = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, "utf-8") : "";
+      if (!/(^|\n)\.state\/(\n|$)/.test(existingGitignore)) {
+        fs.writeFileSync(gitignorePath, `${existingGitignore}${existingGitignore && !existingGitignore.endsWith("\n") ? "\n" : ""}.state/\n`);
+      }
+      gitCommitIfChanged(abrainHome, [".gitignore", path.join("projects", projectId, "_project.json")], `bind ${projectId}`);
+    }
 
     const tools = new Map();
     const commands = new Map();
@@ -1353,6 +1377,7 @@ This is a cross-project review pipeline body with enough content.
       writeFile(path.join(goAbrain, "README.md"), "# abrain home (smoke)\n");
       execFileSync("git", ["-C", goAbrain, "add", "-A"]);
       execFileSync("git", ["-C", goAbrain, "commit", "-q", "-m", "init abrain"]);
+      await bindMigrationProject(goParent, goAbrain, "test-project");
 
       const goOpts = {
         pensieveTarget: path.join(goParent, ".pensieve"),
@@ -1388,7 +1413,7 @@ This is a cross-project review pipeline body with enough content.
       const result = await runMigrationGo(goOpts);
       assert(result.ok, `migration should succeed, got failures: ${JSON.stringify(result.preconditionFailures)}`);
       assert(result.projectId === "test-project", `projectId mismatch: ${result.projectId}`);
-      assert(result.projectIdSource === "explicit", `projectIdSource should be explicit, got ${result.projectIdSource}`);
+      assert(result.projectIdSource === "strict-binding", `projectIdSource should be strict-binding, got ${result.projectIdSource}`);
       assert(result.movedCount === 2, `expected 2 knowledge entries moved, got ${result.movedCount} (entries=${JSON.stringify(result.entries)})`);
       assert(result.workflowCount === 2, `expected 2 workflows routed, got ${result.workflowCount}`);
       assert(result.failedCount === 0, `expected 0 failures, got ${result.failedCount}`);
@@ -1541,8 +1566,16 @@ This is a cross-project review pipeline body with enough content.
       );
       execFileSync("git", ["-C", goAbrain, "reset", "--hard", result.abrainPreSha]);
       assert(
-        !fs.existsSync(path.join(goAbrain, "projects", "test-project")),
-        `rollback to abrainPreSha must remove abrain/projects/test-project/`,
+        fs.existsSync(path.join(goAbrain, "projects", "test-project", "_project.json")),
+        `rollback to abrainPreSha must preserve the pre-existing B4.5 project registry`,
+      );
+      assert(
+        !fs.existsSync(path.join(goAbrain, "projects", "test-project", "maxims", "test-rule.md")),
+        `rollback to abrainPreSha must remove migrated knowledge entries`,
+      );
+      assert(
+        !fs.existsSync(path.join(goAbrain, "projects", "test-project", "workflows", "run-when-coding.md")),
+        `rollback to abrainPreSha must remove project workflow added by migration`,
       );
       assert(
         !fs.existsSync(path.join(goAbrain, "workflows", "run-when-reviewing.md")),
@@ -1569,11 +1602,11 @@ This is a cross-project review pipeline body with enough content.
 
     // === per-repo migration --go: boundary scenarios (sonnet audit P2) ====
     //
-    // Two extra scenarios on top of the main 12 happy/preflight/idempotency
+    // Extra scenarios on top of the main happy/preflight/idempotency
     // assertions: (a) slug collision on the abrain side surfaces in
-    // failedCount + a clear reason, and (b) projectId inference from a real
-    // git remote (covers the canonicalizeGitRemote SSH path that the main
-    // smoke skipped by passing projectId explicitly).
+    // failedCount + a clear reason, (b) ADR 0017 strict binding refuses
+    // an unbound repo even when a git remote exists, and (c) strict-bound
+    // projectId migrates successfully.
 
     // (a) slug collision: abrain already has a maxim with the same slug.
     {
@@ -1598,6 +1631,7 @@ This is a cross-project review pipeline body with enough content.
       );
       execFileSync("git", ["-C", cAbrain, "add", "-A"]);
       execFileSync("git", ["-C", cAbrain, "commit", "-q", "-m", "init w/ collision"]);
+      await bindMigrationProject(cParent, cAbrain, "collide-test");
 
       const result = await runMigrationGo({
         pensieveTarget: path.join(cParent, ".pensieve"),
@@ -1618,14 +1652,15 @@ This is a cross-project review pipeline body with enough content.
       assert(/Shared Rule \(existing\)/.test(existingText), `pre-existing entry must not be overwritten by collision case`);
     }
 
-    // (b) projectId from real git remote (SSH form via canonicalizeGitRemote)
+    // (b) ADR 0017: unbound repo refuses even with SSH remote
     {
       const rParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-remote-parent-"));
       execFileSync("git", ["-C", rParent, "init", "-q"]);
       execFileSync("git", ["-C", rParent, "config", "user.email", "smoke@pi-astack.local"]);
       execFileSync("git", ["-C", rParent, "config", "user.name", "pi-astack smoke"]);
       execFileSync("git", ["-C", rParent, "config", "commit.gpgsign", "false"]);
-      // SSH-form remote: should canonicalize to host/path then take last 2 path segments.
+      // SSH-form remote is deliberately present; it must NOT be used for
+      // project identity after B4.5.
       execFileSync("git", ["-C", rParent, "remote", "add", "origin", "git@github.com:alfadb/uamp.git"]);
       writeFile(path.join(rParent, ".pensieve", "maxims", "remote-test.md"), makeEntry({ title: "Remote ID Test", kind: "maxim" }));
       execFileSync("git", ["-C", rParent, "add", "-A"]);
@@ -1640,7 +1675,9 @@ This is a cross-project review pipeline body with enough content.
       execFileSync("git", ["-C", rAbrain, "add", "-A"]);
       execFileSync("git", ["-C", rAbrain, "commit", "-q", "-m", "init"]);
 
-      // No explicit projectId — force git-remote inference path.
+      // ADR 0017 / B4.5: no projectId means migration MUST refuse even
+      // when a git remote exists. Migration is data movement; identity
+      // selection belongs to /abrain bind and active-project strict binding.
       const result = await runMigrationGo({
         pensieveTarget: path.join(rParent, ".pensieve"),
         abrainHome: rAbrain,
@@ -1648,16 +1685,18 @@ This is a cross-project review pipeline body with enough content.
         settings: DEFAULT_SETTINGS,
         migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
       });
-      assert(result.ok, `remote-id case should succeed: ${JSON.stringify(result.preconditionFailures)}`);
-      assert(result.projectIdSource === "git-remote", `projectIdSource must be git-remote, got ${result.projectIdSource}`);
-      assert(result.projectId === "alfadb-uamp", `projectId from SSH remote git@github.com:alfadb/uamp.git must be 'alfadb-uamp', got '${result.projectId}'`);
+      assert(!result.ok, `unbound repo must fail, got ok=true`);
       assert(
-        fs.existsSync(path.join(rAbrain, "projects", "alfadb-uamp", "maxims", "remote-test.md")),
-        `entry must land under projects/alfadb-uamp/`,
+        result.preconditionFailures.some((f) => /project binding status=manifest_missing/.test(f)),
+        `missing binding failure must mention manifest_missing, got: ${result.preconditionFailures.join("; ")}`,
+      );
+      assert(
+        !fs.existsSync(path.join(rAbrain, "projects", "alfadb-uamp", "maxims", "remote-test.md")),
+        `entry must NOT be migrated via git-remote inference`,
       );
     }
 
-    // (c) projectId from HTTPS git remote (covers canonicalizeGitRemote HTTPS path)
+    // (c) strict-bound projectId succeeds; HTTPS remote is ignored
     {
       const rParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-https-parent-"));
       execFileSync("git", ["-C", rParent, "init", "-q"]);
@@ -1677,17 +1716,19 @@ This is a cross-project review pipeline body with enough content.
       writeFile(path.join(rAbrain, "README.md"), "# abrain (https-remote-id smoke)\n");
       execFileSync("git", ["-C", rAbrain, "add", "-A"]);
       execFileSync("git", ["-C", rAbrain, "commit", "-q", "-m", "init"]);
+      await bindMigrationProject(rParent, rAbrain, "alfadb-kihh");
 
       const result = await runMigrationGo({
         pensieveTarget: path.join(rParent, ".pensieve"),
         abrainHome: rAbrain,
+        projectId: "alfadb-kihh",
         cwd: rParent,
         settings: DEFAULT_SETTINGS,
         migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
       });
-      assert(result.ok, `HTTPS remote case should succeed: ${JSON.stringify(result.preconditionFailures)}`);
-      assert(result.projectIdSource === "git-remote", `projectIdSource must be git-remote, got ${result.projectIdSource}`);
-      assert(result.projectId === "alfadb-kihh", `HTTPS remote https://github.com/alfadb/kihh.git must derive 'alfadb-kihh', got '${result.projectId}'`);
+      assert(result.ok, `strict-bound projectId case should succeed: ${JSON.stringify(result.preconditionFailures)}`);
+      assert(result.projectIdSource === "strict-binding", `projectIdSource must be strict-binding, got ${result.projectIdSource}`);
+      assert(result.projectId === "alfadb-kihh", `projectId from strict binding should be 'alfadb-kihh', got '${result.projectId}'`);
       assert(
         fs.existsSync(path.join(rAbrain, "projects", "alfadb-kihh", "maxims", "https-test.md")),
         `entry must land under projects/alfadb-kihh/`,
@@ -1720,8 +1761,9 @@ This is a cross-project review pipeline body with enough content.
       writeFile(path.join(dAbrain, "README.md"), "# abrain (narrow-add smoke)\n");
       execFileSync("git", ["-C", dAbrain, "add", "-A"]);
       execFileSync("git", ["-C", dAbrain, "commit", "-q", "-m", "init"]);
+      await bindMigrationProject(dParent, dAbrain, "narrow-test");
 
-      // Write `.pi-astack/` noise AFTER preflight will start — it's
+      // Write `.pi-astack/` noise AFTER binding and before migration — it's
       // gitignored so preflight `git status --porcelain` returns clean.
       // With the old `git add -A`, this would have been silently ignored
       // by gitignore too; the regression value here is that the migration
@@ -1752,10 +1794,9 @@ This is a cross-project review pipeline body with enough content.
       );
     }
 
-    // (e) abrain side has zero commits (brand-new `git init` with nothing
-    //     committed yet). gitHeadSha should return null — summary must
-    //     warn rather than crash, and rollback hint should advertise that
-    //     SHA wasn't captured (sonnet C7 #1).
+    // (e) abrain side starts as brand-new `git init`; ADR 0017 binding
+    //     bootstrap creates the first abrain HEAD (registry commit) before
+    //     migration, so preflight must capture a concrete abrainPreSha.
     {
       const eParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-empty-abrain-parent-"));
       execFileSync("git", ["-C", eParent, "init", "-q"]);
@@ -1771,7 +1812,8 @@ This is a cross-project review pipeline body with enough content.
       execFileSync("git", ["-C", eAbrain, "config", "user.email", "smoke@pi-astack.local"]);
       execFileSync("git", ["-C", eAbrain, "config", "user.name", "pi-astack smoke"]);
       execFileSync("git", ["-C", eAbrain, "config", "commit.gpgsign", "false"]);
-      // NO initial commit on abrain side — brand-new repo with no HEAD.
+      // NO initial commit on abrain side before binding — brand-new repo with no HEAD.
+      await bindMigrationProject(eParent, eAbrain, "empty-abrain-test");
 
       const result = await runMigrationGo({
         pensieveTarget: path.join(eParent, ".pensieve"),
@@ -1784,21 +1826,12 @@ This is a cross-project review pipeline body with enough content.
       // Migration itself should still succeed (the abrain commit creates
       // the first HEAD on that side).
       assert(result.ok, `empty-abrain case should succeed: ${JSON.stringify(result.preconditionFailures)}`);
-      // But abrainPreSha must be null (no HEAD existed at preflight time).
-      assert(result.abrainPreSha === null, `abrainPreSha must be null when abrain has no HEAD, got ${JSON.stringify(result.abrainPreSha)}`);
-      // parentPreSha is unaffected (parent had its init commit).
+      // Binding bootstrap created a registry commit before migration, so
+      // abrainPreSha is now concrete under B4.5 strict binding.
+      assert(typeof result.abrainPreSha === "string" && /^[0-9a-f]{40}$/.test(result.abrainPreSha), `abrainPreSha should be a valid SHA after binding bootstrap, got ${result.abrainPreSha}`);
       assert(typeof result.parentPreSha === "string" && /^[0-9a-f]{40}$/.test(result.parentPreSha), `parentPreSha should still be a valid SHA, got ${result.parentPreSha}`);
-      // Summary must surface the null gracefully (not crash, not produce
-      // a literal "undefined" or "null" in the rollback hint).
       const summary = formatMigrationGoSummary(result, eParent);
-      assert(!/git reset --hard null/i.test(summary), `summary must not say "git reset --hard null": ${summary}`);
-      assert(!/git reset --hard undefined/i.test(summary), `summary must not say "git reset --hard undefined": ${summary}`);
-      // It should fall back to a warning marker for the abrain side
-      // (HEAD~1 with ⚠️ is the documented fallback in formatMigrationGoSummary).
-      assert(
-        /pre-migration SHA not captured|HEAD~1.*⚠|⚠.*HEAD~1|abrain.*not captured/i.test(summary),
-        `summary should warn about missing abrainPreSha, got: ${summary}`,
-      );
+      assert(!/pre-migration SHA not captured|HEAD~1.*⚠|⚠.*HEAD~1|abrain.*not captured/i.test(summary), `summary should not warn about missing abrainPreSha after binding, got: ${summary}`);
     }
 
     // (f) mixed batch: 2 entries where 1 collides on abrain side and 1
@@ -1828,6 +1861,7 @@ This is a cross-project review pipeline body with enough content.
       );
       execFileSync("git", ["-C", fAbrain, "add", "-A"]);
       execFileSync("git", ["-C", fAbrain, "commit", "-q", "-m", "init w/ one collision"]);
+      await bindMigrationProject(fParent, fAbrain, "mixed-test");
 
       const result = await runMigrationGo({
         pensieveTarget: path.join(fParent, ".pensieve"),
@@ -2223,6 +2257,7 @@ This is a cross-project review pipeline body with enough content.
         fs.writeFileSync(path.join(decisionsDir, "unparseable-frontmatter.md"), badYaml);
         execFileSync("git", ["-C", parent, "add", "."]);
         execFileSync("git", ["-C", parent, "commit", "-q", "-m", "seed unparseable entry"]);
+        await bindMigrationProject(parent, abrain, "smoke-fm-unparseable");
 
         const result = await runMigrationGo({
           pensieveTarget: pensieve,
@@ -2273,6 +2308,7 @@ This is a cross-project review pipeline body with enough content.
         fs.writeFileSync(path.join(pensieve, "maxims", "x.md"), makeEntry({ title: "X", kind: "maxim" }));
         execFileSync("git", ["-C", gParent, "add", "."]);
         execFileSync("git", ["-C", gParent, "commit", "-q", "-m", "seed"]);
+        await bindMigrationProject(gParent, gAbrain, "guard-proj");
         const goRes = await runMigrationGo({
           pensieveTarget: pensieve,
           abrainHome: gAbrain,

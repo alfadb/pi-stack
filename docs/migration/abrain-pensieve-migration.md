@@ -1,6 +1,6 @@
 # Migration — `.pensieve/` → `~/.abrain/projects/<id>/`
 
-> **状态**：✅ B4 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，**18 个 smoke 场景**覆盖。**B4.5 Project Binding Strict Mode 已接受、待实施**（[ADR 0017](../adr/0017-project-binding-strict-mode.md)）：迁移前必须 `/abrain bind --project=<id>`；`/memory migrate` 从 active binding 读取 project id；`--project` 参数将被废弃；未 bound / path 未确认时拒绝迁移。接下来是先实施 B4.5，再手动逐仓迁移（§4 优先级表）。
+> **状态**：✅ B4 + B4.5 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，**18 个 smoke 场景**覆盖；[ADR 0017](../adr/0017-project-binding-strict-mode.md) strict binding 已落地：迁移前必须 `/abrain bind --project=<id>`；`/memory migrate` 从 active binding 读取 project id；`--project` 参数已废弃并拒绝；未 bound / path 未确认时拒绝迁移。接下来可按 §4 优先级表手动逐仓迁移。
 > **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [ADR 0017](../adr/0017-project-binding-strict-mode.md) / [brain-redesign-spec.md](../brain-redesign-spec.md)
 > **前置**：[vault-bootstrap.md](vault-bootstrap.md)（vault 基础设施已 ship，P0a-P0c.read）
 

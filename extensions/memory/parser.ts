@@ -64,7 +64,7 @@ export function resolveStores(cwdRaw: string | undefined, settings: MemorySettin
         }
       }
     } catch {
-      // bindings parse failure / missing _bindings.md → no dual-read, not an error
+      // Strict binding resolution failure → no project dual-read, not an error.
     }
   }
 
@@ -234,10 +234,10 @@ function makeSummary(compiledTruth: string, fallbackTitle: string): string {
  *
  * Pipeline kind is being phased out: per ADR 0014 v7.1 abrain redesign,
  * pipeline-shaped entries ("run-when-*.md" task blueprints) belong in
- * abrain `workflows/` zone, not in project knowledge. Migration is gated by
- * the abrain workflows lane writer (currently not implemented — see ADR 0014
- * "待实施" section). Until migration, parser keeps the alias so existing
- * legacy `pipelines/` and top-level `knowledge/` directories remain readable.
+ * abrain `workflows/` zone, not in project knowledge. B1 shipped the abrain
+ * workflows lane writer; until every legacy repo has migrated, parser keeps
+ * the alias so existing legacy `pipelines/` and top-level `knowledge/`
+ * directories remain readable.
  *
  * Do not add new kind aliases here — extend ENTRY_KINDS instead.
  */

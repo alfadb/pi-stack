@@ -61,6 +61,7 @@ import {
   type VaultBashRunRecord,
 } from "./vault-bash";
 import {
+  bindAbrainProject,
   listAbrainProjects,
   resolveActiveProject,
   validateAbrainProjectId,
@@ -247,40 +248,48 @@ export function resolveSecretScope(
   activeProject: ResolveActiveProjectResult | null,
 ): ResolveSecretScope {
   if (scopeArg === "global") return { ok: true, scope: "global" };
-  if (typeof scopeArg === "object" && scopeArg && "project" in scopeArg) {
-    return { ok: true, scope: { project: scopeArg.project } };
-  }
   if (!activeProject || activeProject.activeProject === null) {
-    const reason = activeProject?.reason ?? "bindings_missing";
+    const reason = activeProject?.reason ?? "manifest_missing";
     return { ok: false, reason: secretDefaultRejection(reason) };
+  }
+  if (typeof scopeArg === "object" && scopeArg && "project" in scopeArg) {
+    // B4.5 strict mode: explicit --project may not bypass local binding
+    // authorization. Only the boot-time bound project can be targeted by
+    // project-scoped vault operations; use --global for global secrets.
+    if (scopeArg.project !== activeProject.activeProject.projectId) {
+      return { ok: false, reason: `project scope '${scopeArg.project}' is not the boot-time bound project '${activeProject.activeProject.projectId}'. Start pi in that project and run /abrain bind, or use --global.` };
+    }
+    return { ok: true, scope: { project: scopeArg.project } };
   }
   return { ok: true, scope: { project: activeProject.activeProject.projectId } };
 }
 
 export function secretDefaultRejection(reason: string): string {
   switch (reason) {
-    case "bindings_missing":
-      return "no active project: ~/.abrain/projects/_bindings.md does not exist. Re-run with --global, or bind this cwd first.";
-    case "bindings_empty":
-      return "no active project: ~/.abrain/projects/_bindings.md has no entries. Re-run with --global, or bind this cwd first.";
-    case "unbound":
-      return "no active project: current cwd is not bound to any project. Re-run with --global, --project=<id>, or bind this cwd first.";
-    case "ambiguous_remote":
-      return "active project ambiguous: multiple bindings share this git remote. Pass --project=<id> or --global.";
-    case "ambiguous_prefix":
-      return "active project ambiguous: multiple bindings share this cwd prefix. Pass --project=<id> or --global.";
+    case "manifest_missing":
+      return "project is not bound to abrain: missing .abrain-project.json. Run `/abrain bind --project=<id>` or use --global.";
+    case "manifest_invalid":
+      return "project binding is invalid: .abrain-project.json is unreadable or has an invalid project_id. Fix it or use --global.";
+    case "registry_missing":
+      return "project binding is incomplete: abrain registry projects/<id>/_project.json is missing. Run `/abrain bind` or use --global.";
+    case "registry_mismatch":
+      return "project binding conflict: abrain registry does not match .abrain-project.json. Repair the binding or use --global.";
+    case "path_unconfirmed":
+      return "project binding is not confirmed on this local path. Run `/abrain bind` or use --global.";
+    case "path_conflict":
+      return "project binding conflict: this local path is already confirmed for another project. Repair local-map or use --global.";
     case "invalid_cwd":
-      return "active project unresolved: cwd is invalid. Re-run with --global or --project=<id>.";
+      return "active project unresolved: cwd is invalid. Re-run from a valid project root or use --global.";
     default:
-      return `no active project (reason=${reason}). Re-run with --global or --project=<id>.`;
+      return `no active project (reason=${reason}). Run /abrain bind or use --global.`;
   }
 }
 
 let bootActiveProject: ResolveActiveProjectResult | null = null;
 let bootActiveProjectAt: number | null = null;
 
-function snapshotBootActiveProject(): ResolveActiveProjectResult {
-  return resolveActiveProject(process.cwd(), { abrainHome: ABRAIN_HOME });
+function snapshotBootActiveProject(cwd = process.cwd()): ResolveActiveProjectResult {
+  return resolveActiveProject(cwd, { abrainHome: ABRAIN_HOME });
 }
 
 export function getBootActiveProject(): ResolveActiveProjectResult | null {
@@ -514,8 +523,9 @@ export default function activate(pi: ExtensionAPI): void {
   // sub-pi; the `smoke:vault-subpi-isolation` smoke verifies that.
   if (process.env[PI_ABRAIN_DISABLED] === "1") return;
 
-  // Boot-time snapshot per ADR 0014 §5.4: active project must not
-  // dynamically change with bash `cd`. Resolve once at activate.
+  // Boot-time snapshot per ADR 0017: active project identity comes from
+  // strict binding, not bash `cd`. /abrain bind/status may refresh it
+  // explicitly, but ordinary shell directory changes do not.
   bootActiveProject = snapshotBootActiveProject();
   bootActiveProjectAt = Date.now();
 
@@ -643,7 +653,7 @@ export default function activate(pi: ExtensionAPI): void {
         } else if (scopeRaw === "project") {
           const projectId = bootActiveProject?.activeProject?.projectId;
           if (!projectId) {
-            const reasonCode = bootActiveProject?.reason ?? "bindings_missing";
+            const reasonCode = bootActiveProject?.reason ?? "manifest_missing";
             return toolJson({
               ok: false,
               error: `vault_release(scope='project') refused: ${secretDefaultRejection(reasonCode)}`,
@@ -703,6 +713,23 @@ export default function activate(pi: ExtensionAPI): void {
   }
 
   if (typeof registry.registerCommand !== "function") return;
+
+  // /abrain command — project binding strict mode (ADR 0017 / B4.5).
+  registry.registerCommand("abrain", {
+    description: "Abrain project binding: /abrain bind [--project=<id>] | /abrain status",
+    getArgumentCompletions(prefix: string) {
+      const items = ["bind ", "bind --project=", "status"];
+      const filtered = items.filter((item) => item.startsWith(prefix));
+      return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
+    },
+    async handler(args: string, ctx: { cwd?: string; ui: { notify(message: string, type?: string): void } }): Promise<void> {
+      try {
+        await handleAbrain(args.trim(), ctx.ui, ctx.cwd);
+      } catch (err: any) {
+        ctx.ui.notify(`/abrain: ${err.message}`, "warning");
+      }
+    },
+  });
 
   // /secret command — vault write/list/forget (P0c.write).
   // Read paths (release / bash injection) are P0c.read.
@@ -1118,6 +1145,96 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
     `/secret: unknown subcommand '${sub}'. available: set / list / forget. Default scope is the boot-time active project; pass --global or --project=<id> to override.`,
     "warning",
   );
+}
+
+function parseProjectFlag(tokens: string[]): { projectId?: string; errors: string[] } {
+  const errors: string[] = [];
+  let projectId: string | undefined;
+  for (const tok of tokens) {
+    const m = tok.match(/^--project=(.+)$/);
+    if (m) {
+      const id = m[1]!.trim();
+      try { validateAbrainProjectId(id); projectId = id; }
+      catch (err: any) { errors.push(`invalid --project=<id>: ${err.message}`); }
+      continue;
+    }
+    if (tok.trim()) errors.push(`unknown argument: ${tok}`);
+  }
+  return { projectId, errors };
+}
+
+function formatBindingStatus(result: ResolveActiveProjectResult | null): string {
+  if (!result) return "Project binding: unknown (resolver not initialized)";
+  if (result.activeProject) {
+    return [
+      "Project binding: bound",
+      `  project_id: ${result.activeProject.projectId}`,
+      `  root: ${result.activeProject.projectRoot}`,
+      `  manifest: ${result.activeProject.manifestPath}`,
+      `  registry: ${result.activeProject.registryPath}`,
+      `  local_map: ${result.activeProject.localMapPath}`,
+      `  confirmed_path: ${result.activeProject.localPath.path}`,
+      `  last_seen: ${result.activeProject.localPath.last_seen}`,
+    ].join("\n");
+  }
+  const hint = result.reason === "manifest_missing"
+    ? "/abrain bind --project=<id>"
+    : "/abrain bind";
+  return [
+    `Project binding: ${result.reason}`,
+    ...(result.projectId ? [`  project_id: ${result.projectId}`] : []),
+    ...(result.projectRoot ? [`  root: ${result.projectRoot}`] : []),
+    ...(result.manifestPath ? [`  manifest: ${result.manifestPath}`] : []),
+    ...(result.registryPath ? [`  registry: ${result.registryPath}`] : []),
+    ...(result.localMapPath ? [`  local_map: ${result.localMapPath}`] : []),
+    ...(result.detail ? [`  detail: ${result.detail}`] : []),
+    `  next: ${hint}`,
+  ].join("\n");
+}
+
+async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?: string): void }, cwd = process.cwd()): Promise<void> {
+  const commandCwd = path.resolve(cwd || process.cwd());
+  const tokens = rawArgs.split(/\s+/).filter(Boolean);
+  const sub = tokens.shift() ?? "status";
+  if (sub === "status") {
+    bootActiveProject = snapshotBootActiveProject(commandCwd);
+    bootActiveProjectAt = Date.now();
+    ui.notify(formatBindingStatus(bootActiveProject), bootActiveProject.activeProject ? "info" : "warning");
+    return;
+  }
+  if (sub === "bind") {
+    const parsed = parseProjectFlag(tokens);
+    if (parsed.errors.length > 0) {
+      ui.notify(`/abrain bind: ${parsed.errors.join("; ")}`, "warning");
+      return;
+    }
+    try {
+      const result = await bindAbrainProject({
+        abrainHome: ABRAIN_HOME,
+        cwd: commandCwd,
+        projectId: parsed.projectId,
+      });
+      bootActiveProject = snapshotBootActiveProject(commandCwd);
+      bootActiveProjectAt = Date.now();
+      ui.notify([
+        `Bound current project to abrain project: ${result.projectId}`,
+        "",
+        "Wrote/updated:",
+        `- ${result.manifestPath}${result.manifestCreated ? " (created)" : " (verified)"}`,
+        `- ${result.registryPath}${result.registryCreated ? " (created)" : " (updated)"}`,
+        `- ${result.localMapPath}${result.localPathAdded ? " (path added)" : " (path refreshed)"}`,
+        `- ${result.abrainGitignorePath}${result.abrainGitignoreUpdated ? " (added .state/ ignore)" : " (verified .state/ ignore)"}`,
+        "",
+        "Commit if desired:",
+        `  cd ${result.projectRoot} && git add .abrain-project.json && git commit -m "chore: bind abrain project ${result.projectId}"`,
+        `  cd ${ABRAIN_HOME} && git add .gitignore projects/${result.projectId}/_project.json && git commit -m "project: add ${result.projectId}"`,
+      ].join("\n"), "info");
+    } catch (err: any) {
+      ui.notify(`/abrain bind failed: ${err.message}`, "warning");
+    }
+    return;
+  }
+  ui.notify(`/abrain: unknown subcommand '${sub}'. available: bind / status`, "warning");
 }
 
 function handleStatus(ui: { notify(message: string, type?: string): void }): void {
