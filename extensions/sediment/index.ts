@@ -254,7 +254,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
 
   maybePi.registerCommand("sediment", {
     description:
-      "Sediment status/dedupe: /sediment status, /sediment dedupe --title <title>",
+      "Sediment status/dedupe: /sediment status — show writer queue + audit tail; /sediment dedupe --title <title> (or bare /sediment dedupe <title> as shorthand) — check if <title> would collide with an existing project entry slug",
     getArgumentCompletions(prefix: string) {
       const items = ["status", "dedupe --title "];
       const filtered = items.filter((item) => item.startsWith(prefix));
@@ -300,6 +300,13 @@ function registerSedimentCommand(pi: ExtensionAPI) {
       }
 
       if (subcommand === "dedupe") {
+        // Two accepted forms (documented in command description):
+        //   /sediment dedupe --title <title>   — canonical
+        //   /sediment dedupe <title>           — shorthand, all remaining
+        //                                        tokens joined as the title
+        // Both produce identical results; the shorthand is here because
+        // titles often contain spaces and quoting them in the slash command
+        // line is awkward.
         const titleFlagIndex = rest.indexOf("--title");
         const title =
           titleFlagIndex >= 0
@@ -309,7 +316,7 @@ function registerSedimentCommand(pi: ExtensionAPI) {
                 .trim()
             : rest.join(" ").trim();
         if (!title) {
-          ctx.ui.notify("Usage: /sediment dedupe --title <title>", "warning");
+          ctx.ui.notify("Usage: /sediment dedupe --title <title> (or /sediment dedupe <title>)", "warning");
           return;
         }
         const result = await detectProjectDuplicate(cwd, title);

@@ -28,6 +28,15 @@
 4. **`~/.abrain` working tree clean** —— 确保 abrain 一侧 mv 后能干净 commit、出问题能用 preflight 捕获的 `abrainPreSha` 精确 rollback（详 §5；不是 `HEAD~1` —— abrain 有 N+1 commits）
 5. **projectId 可推断**。优先级：`--project=<id>` 显式 override > git remote origin（`github.com/alfadb/pi` → `alfadb-pi`）> 父仓 cwd 末二段拼接（`~/work/uamp/full` → `uamp-full`，避免多个 `full` 冲突）。最终 id 走 `validateAbrainProjectId`，不过则 `--go` 拒绝。
 
+**隐藏 hard-fail（代码 sanity check，不被上述 5 项覆盖）**：preflightMigrationGo 另外还会拒绝以下场景——这些项不可能被用户 bypass，不列为独立 preflight，但调试时需要知道它们存在：
+
+- `pensieveTarget` 路径不存在（用户输错或仓里根本没 `.pensieve/`）
+- `abrainHome` 路径不存在（`~/.abrain` 从未被 `/vault init` 创建过）
+- 父仓 root 不存在（`gitToplevel(parentRepoRoot)` 返回 null，表明 cwd 不在 git 仓内）
+- `abrainHome` 是普通目录而非 git repo（`gitIsClean` 不能判定，后续 commit/rollback 会失败）
+
+加上这 4 项，`/memory migrate --go` 实际运行时总共检查 9 项。spec 上面只列 5 项是因为那五项是「用户可能遇到 + 能够手工修复」的路径，这四项是 sanity guard。
+
 dry-run（`/memory migrate` 默认 / `/memory migrate --dry-run`）仅列出 legacy entry、不检 precondition；它是护栏前的调查工具，不是迁移预览。要看 per-repo 迁移的 dry-run，要么手动检查上述 5 项，要么直接 `--go` 让它 fail-fast。
 
 ## 3. 迁移动作（`/memory migrate --go` 内部步骤）
@@ -35,9 +44,16 @@ dry-run（`/memory migrate` 默认 / `/memory migrate --dry-run`）仅列出 leg
 ```
 1. 验证 precondition（§2）
 2. 读取 .pensieve/ 所有 entry 的 frontmatter
-3. frontmatter normalize：legacy entry（无 kind 字段）自动补 kind
-   - pipelines/run-when-*.md → kind: pipeline（read-only legacy alias）
-   - 其他无 kind → 按目录推断（maxims/ → maxim、decisions/ → decision、staging/ → smell、其余 → fact）
+3. frontmatter normalize（实际是 **full rewrite + selective preserve**，不是「仅补缺失 kind」）：
+   - **重写的标准字段**（`buildNormalizedFrontmatter`取代原值）：
+     `id` / `scope` / `kind` / `status` / `confidence` / `schema_version=1` / `title` / `created` / `updated`
+   - **从原 frontmatter 保留的非标准字段**（`preservedFrontmatterLines`）：
+     `tags` / `trigger` / `trigger_phrases` / `relations` / `evidence` / 其他用户自定义 key 都原样摇进新 frontmatter。
+   - **kind 推断优先级**：`frontmatter.kind` > `frontmatter.type`（legacy alias） > `inferKindFromPath(relSource)`。
+     - pipelines/run-when-*.md → kind: pipeline（read-only legacy alias）
+     - 其他无 kind → 按目录推断（maxims/ → maxim、decisions/ → decision、staging/ → smell、其余 → fact）
+   - **表字段提取隐藏行为**：confidence 缺失时走 `defaultConfidence(kind)`（不同 kind 默认不同）；created/updated 缺失时填入 migrationTimestamp（不是原文件 mtime）。这意味着迁移后原锁定的「创建时间」会被覆写为迁移日期。保留原创建时间要求在原 frontmatter 里显式写 `created: <iso>`。
+   - **损坏 frontmatter 检测**：若 frontmatter 区存在但 `parseFrontmatter` 返回空对象（YAML 语法损坏），normalize 会在报告中加 `frontmatter-unparseable` note——与 `missing frontmatter`（原本就没有 frontmatter）区分，避免静默 fallback 默认值。
    - 数字注：~/.pi Phase 1 历史扫到 178 条候选；其中 5 条是 .index/.state 派生文件被 migrate-go 预过滤掉，实际计入 lint 报告与 apply-checklist 的「173 → 0 pending」是同一批用户 entry。
 4. pipeline-型条目路由：
    - **唯一权威信号是 frontmatter `cross_project: true`**（文件名 `run-when-*` 不再做隐式启发——多项目可能撞名，2026-05-12 决策）

@@ -1559,6 +1559,115 @@ This is a cross-project review pipeline body with enough content.
       );
     }
 
+    // (e) abrain side has zero commits (brand-new `git init` with nothing
+    //     committed yet). gitHeadSha should return null — summary must
+    //     warn rather than crash, and rollback hint should advertise that
+    //     SHA wasn't captured (sonnet C7 #1).
+    {
+      const eParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-empty-abrain-parent-"));
+      execFileSync("git", ["-C", eParent, "init", "-q"]);
+      execFileSync("git", ["-C", eParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", eParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", eParent, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(eParent, ".pensieve", "maxims", "empty-abrain.md"), makeEntry({ title: "Empty Abrain Test", kind: "maxim" }));
+      execFileSync("git", ["-C", eParent, "add", "-A"]);
+      execFileSync("git", ["-C", eParent, "commit", "-q", "-m", "init"]);
+
+      const eAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-empty-abrain-abrain-"));
+      execFileSync("git", ["-C", eAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", eAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", eAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", eAbrain, "config", "commit.gpgsign", "false"]);
+      // NO initial commit on abrain side — brand-new repo with no HEAD.
+
+      const result = await runMigrationGo({
+        pensieveTarget: path.join(eParent, ".pensieve"),
+        abrainHome: eAbrain,
+        projectId: "empty-abrain-test",
+        cwd: eParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
+      });
+      // Migration itself should still succeed (the abrain commit creates
+      // the first HEAD on that side).
+      assert(result.ok, `empty-abrain case should succeed: ${JSON.stringify(result.preconditionFailures)}`);
+      // But abrainPreSha must be null (no HEAD existed at preflight time).
+      assert(result.abrainPreSha === null, `abrainPreSha must be null when abrain has no HEAD, got ${JSON.stringify(result.abrainPreSha)}`);
+      // parentPreSha is unaffected (parent had its init commit).
+      assert(typeof result.parentPreSha === "string" && /^[0-9a-f]{40}$/.test(result.parentPreSha), `parentPreSha should still be a valid SHA, got ${result.parentPreSha}`);
+      // Summary must surface the null gracefully (not crash, not produce
+      // a literal "undefined" or "null" in the rollback hint).
+      const summary = formatMigrationGoSummary(result, eParent);
+      assert(!/git reset --hard null/i.test(summary), `summary must not say "git reset --hard null": ${summary}`);
+      assert(!/git reset --hard undefined/i.test(summary), `summary must not say "git reset --hard undefined": ${summary}`);
+      // It should fall back to a warning marker for the abrain side
+      // (HEAD~1 with ⚠️ is the documented fallback in formatMigrationGoSummary).
+      assert(
+        /pre-migration SHA not captured|HEAD~1.*⚠|⚠.*HEAD~1|abrain.*not captured/i.test(summary),
+        `summary should warn about missing abrainPreSha, got: ${summary}`,
+      );
+    }
+
+    // (f) mixed batch: 2 entries where 1 collides on abrain side and 1
+    //     succeeds. Verify movedCount=1 / failedCount=1 simultaneously,
+    //     parent commit still happens (the survivor was git rm'd), and
+    //     the colliding entry stays in .pensieve untouched (sonnet C7 #3).
+    {
+      const fParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-mixed-parent-"));
+      execFileSync("git", ["-C", fParent, "init", "-q"]);
+      execFileSync("git", ["-C", fParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", fParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", fParent, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(fParent, ".pensieve", "maxims", "will-collide.md"), makeEntry({ title: "Will Collide", kind: "maxim" }));
+      writeFile(path.join(fParent, ".pensieve", "maxims", "will-succeed.md"), makeEntry({ title: "Will Succeed", kind: "maxim" }));
+      execFileSync("git", ["-C", fParent, "add", "-A"]);
+      execFileSync("git", ["-C", fParent, "commit", "-q", "-m", "init"]);
+
+      const fAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-mixed-abrain-"));
+      execFileSync("git", ["-C", fAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", fAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", fAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", fAbrain, "config", "commit.gpgsign", "false"]);
+      // Plant ONE colliding entry on abrain side (matches will-collide).
+      writeFile(
+        path.join(fAbrain, "projects", "mixed-test", "maxims", "will-collide.md"),
+        makeEntry({ title: "Will Collide (existing)", kind: "maxim" }),
+      );
+      execFileSync("git", ["-C", fAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", fAbrain, "commit", "-q", "-m", "init w/ one collision"]);
+
+      const result = await runMigrationGo({
+        pensieveTarget: path.join(fParent, ".pensieve"),
+        abrainHome: fAbrain,
+        projectId: "mixed-test",
+        cwd: fParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
+      });
+      assert(result.ok, `mixed case should still complete: ${JSON.stringify(result.preconditionFailures)}`);
+      assert(result.movedCount === 1, `expected movedCount=1, got ${result.movedCount}`);
+      assert(result.failedCount === 1, `expected failedCount=1, got ${result.failedCount}`);
+      assert(result.parentCommitSha, `parent commit must still happen for the survivor, got ${result.parentCommitSha}`);
+      assert(result.abrainCommitSha, `abrain commit must still happen for the survivor, got ${result.abrainCommitSha}`);
+      // Survivor: removed from .pensieve, present in abrain.
+      assert(
+        !fs.existsSync(path.join(fParent, ".pensieve", "maxims", "will-succeed.md")),
+        `will-succeed.md should be git-rm'd from .pensieve`,
+      );
+      assert(
+        fs.existsSync(path.join(fAbrain, "projects", "mixed-test", "maxims", "will-succeed.md")),
+        `will-succeed.md should land under abrain/projects/mixed-test/maxims/`,
+      );
+      // Collider: still in .pensieve (NOT removed since write failed),
+      // and the pre-existing abrain copy is unchanged.
+      assert(
+        fs.existsSync(path.join(fParent, ".pensieve", "maxims", "will-collide.md")),
+        `will-collide.md should remain in .pensieve when its target collides (no destructive cleanup)`,
+      );
+      const existingText = fs.readFileSync(path.join(fAbrain, "projects", "mixed-test", "maxims", "will-collide.md"), "utf-8");
+      assert(/Will Collide \(existing\)/.test(existingText), `pre-existing colliding entry must not be overwritten: ${existingText.slice(0, 120)}`);
+    }
+
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));
   } finally {
     if (process.env.PI_ASTACK_KEEP_SMOKE_TMP !== "1") fs.rmSync(outRoot, { recursive: true, force: true });

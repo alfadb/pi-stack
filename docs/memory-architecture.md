@@ -507,12 +507,29 @@ sediment 启动时自动注册当前 project（upsert by project_id）。Gate 2 
 CLI 命令（全部只读，写操作由 sediment 代理）——2026-05-11 修订：pi-astack 里这些是 pi 内部的 slash 命令（`/memory ...`），不是 shell binary；实际注册在 `extensions/memory/index.ts` 的是 `/memory` 下的 `lint` / `migrate` / `doctor-lite` / `check-backlinks` / `rebuild --graph|--index`。原列表中 `graph` / `neighbors` / `doctor` 三个子命令未落地（`graph` 被 `rebuild --graph` 合并；`neighbors` 同 memory_neighbors 工具重复；`doctor` 被轻量 `doctor-lite` 取代）：
 
 ```text
+# memory 维护（extensions/memory/index.ts）
 /memory lint                # frontmatter 与结构 lint
 /memory migrate [--dry-run|--go] [--project=<id>] [--report]  # dry-run 或 per-repo 一次性迁移到 ~/.abrain/projects/<id>/
 /memory doctor-lite         # 快速健康报告
 /memory check-backlinks     # 反向链接完整性检查
 /memory rebuild --graph | --index | --graph --index   # 重建派生索引 artifact（两个可同时给，顺序执行）
+
+# sediment 运维（extensions/sediment/index.ts）
+/sediment status                                  # writer 队列 + audit tail
+/sediment dedupe --title <title>                  # 或 /sediment dedupe <title> 简写。检查标题 slug 是否与现有项目 entry 冲突
+
+# vault / secret（extensions/abrain/index.ts）
+/vault status
+/vault init [--backend=<name>]                    # ssh-key | gpg-file | passphrase-only | macos | secret-service | pass
+/secret set <key>=<value> [--global | --project=<id>]
+/secret list [--global | --project=<id> | --all-projects]
+/secret forget <key> [--global | --project=<id>]
+
+# 上下文压缩调优（extensions/compaction-tuner/index.ts）
+/compaction-tuner [status | trigger]              # 查看/人工触发 context window compaction
 ```
+
+**列表权威性**：ri-astack 有 5 个 extension，上表 5 组全部列出。实际注册面以 `grep -rn 'registerCommand' extensions/` 为准；何时新增命令请同步更新本表。
 
 ---
 

@@ -576,7 +576,17 @@ async function analyzeEntry(
   const updated = scalarString(frontmatter.updated) || migrationTimestamp;
 
   const notes: string[] = [];
-  if (!frontmatterText) notes.push("missing frontmatter");
+  if (!frontmatterText) {
+    notes.push("missing frontmatter");
+  } else if (Object.keys(frontmatter).length === 0) {
+    // frontmatterText was non-empty but parseFrontmatter (lenient line-by-
+    // line key:value regex) didn't recognize a single field. The entry is
+    // either corrupted YAML, indented-only content, or uses syntax the
+    // parser doesn't handle (e.g. nested mappings without keys). Surface
+    // this distinctly from "missing frontmatter" so reviewers don't think
+    // the migration silently filled defaults on a fully-populated entry.
+    notes.push("frontmatter-unparseable");
+  }
   if (isEmptyFrontmatterValue(frontmatter.schema_version)) notes.push("missing schema_version");
   for (const field of REQUIRED_FRONTMATTER_FIELDS) {
     if (isEmptyFrontmatterValue(frontmatter[field])) notes.push(`missing ${field}`);
