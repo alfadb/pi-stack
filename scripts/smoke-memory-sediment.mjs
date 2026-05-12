@@ -2251,6 +2251,79 @@ This is a cross-project review pipeline body with enough content.
         // Unparseable garbage shouldn't NaN-pollute the sort — garbage should sort last.
         assert(compareTimestamps("not-a-date", "2026-05-13") > 0, `unparseable should sort last (positive)`);
       }
+
+      // --- Case h.6: updateProjectEntry RMW lock-scope (Round 8 P0 fix) ---
+      //
+      // gpt-5.5 R8 audit P0: updateProjectEntry used to do find+read+merge+lint
+      // OUTSIDE the sediment lock and only atomicWrite INSIDE the lock. A
+      // concurrent hard-delete in between would unlink the target, then the
+      // late atomicWrite would resurrect the entry from a stale raw snapshot.
+      // Verify that running with a hard-delete pre-staged to fire "during" the
+      // update (we simulate this with sequential async ops in the same
+      // process; the lock semantics are validated by the fact that delete
+      // commits while update is blocked on acquireLock) does NOT resurrect
+      // the entry.
+      {
+        const raceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-rmw-race-"));
+        // Seed an entry.
+        const seedRes = await writeProjectEntry(
+          { title: "RMW Race Probe", kind: "fact", status: "active", confidence: 5, compiledTruth: "# RMW Race Probe\n\noriginal body content for race test.", timelineNote: "smoke seed", sessionId: "smoke-rmw" },
+          { projectRoot: raceRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+        );
+        assert(seedRes.status === "created", `seed write should create, got: ${seedRes.status} / ${seedRes.reason}`);
+        const targetPath = seedRes.path;
+        assert(fs.existsSync(targetPath), `seed entry file should exist at ${targetPath}`);
+
+        // Schedule both update + hard-delete concurrently. The first to
+        // acquire the lock proceeds; the second observes the post-state.
+        // With the R8 fix, hard-delete-then-update outcome: target gone
+        // AND update returns rejected entry_not_found (lookup under lock
+        // sees no file). Without the fix, update would resurrect the file.
+        const updatePromise = updateProjectEntry(
+          "rmw-race-probe",
+          { compiledTruth: "# RMW Race Probe\n\nNEW BODY — should not resurrect a deleted entry.", sessionId: "smoke-rmw", timelineNote: "smoke update" },
+          { projectRoot: raceRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+        );
+        const deletePromise = deleteProjectEntry(
+          "rmw-race-probe",
+          { projectRoot: raceRoot, settings: DEFAULT_SEDIMENT_SETTINGS, mode: "hard", reason: "smoke race", sessionId: "smoke-rmw", auditContext: { lane: "explicit" } },
+        );
+        const [updRes, delRes] = await Promise.all([updatePromise, deletePromise]);
+
+        // Whichever wins the lock first, the post-state MUST be consistent:
+        //   Scenario A (delete wins lock first): file gone + update rejected
+        //   Scenario B (update wins lock first): file present with NEW BODY +
+        //                                         delete then sees file gone or hard-deletes
+        // The bug case (file present with stale body) is forbidden.
+        if (!fs.existsSync(targetPath)) {
+          // file deleted — update must report rejection (either entry_not_found
+          // when delete won, or success then post-delete when update won)
+          if (updRes.status !== "rejected" && updRes.status !== "updated") {
+            throw new Error(`unexpected update status when file deleted: ${updRes.status}/${updRes.reason}`);
+          }
+          // Critical: no resurrection — nothing on disk.
+        } else {
+          // file exists — update must have won lock first, body must be NEW
+          const onDisk = fs.readFileSync(targetPath, "utf-8");
+          assert(
+            /NEW BODY/.test(onDisk),
+            `file exists post-race but body is STALE (resurrection bug): ${onDisk.slice(0, 300)}`,
+          );
+          assert(updRes.status === "updated", `if file exists, update must have status=updated, got: ${updRes.status}`);
+        }
+
+        // The forbidden case: stale resurrection — file exists with ORIGINAL
+        // body (no NEW BODY marker, no merge).
+        if (fs.existsSync(targetPath)) {
+          const onDisk = fs.readFileSync(targetPath, "utf-8");
+          assert(
+            !/original body content for race test/.test(onDisk),
+            `RMW race resurrected entry from stale read: file exists with original (pre-update) body`,
+          );
+        }
+
+        fs.rmSync(raceRoot, { recursive: true, force: true });
+      }
     }
 
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));

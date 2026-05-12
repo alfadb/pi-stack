@@ -744,74 +744,117 @@ export async function updateProjectEntry(
   const slug = slugify(slugRaw);
   const resultCtx = resultAuditFields(opts, patch.sessionId);
 
-  const target = await findProjectEntryFile(projectRoot, slug);
-  if (!target) {
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
-      operation: "reject",
-      reason: "entry_not_found",
-      target: `project:${slug}`,
-      duration_ms: Date.now() - started,
-    }));
-    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, ...resultCtx };
+  // Round 8 P0 (gpt-5.5 audit fix): the full read-modify-write (find target +
+  // readFile + merge + lint + write) MUST happen inside the sediment lock.
+  // Previously read/merge/lint happened lock-OUTSIDE and only atomicWrite
+  // was lock-INSIDE — a textbook lost-update race:
+  //
+  //   Process A: read raw → prepare merged markdown → (no lock yet)
+  //   Process B: acquire lock → deleteProjectEntry hard delete: unlink(target)
+  //              → audit row says deleted → release lock
+  //   Process A: acquire lock → atomicWrite(target, merged) → entry RESURRECTED
+  //
+  // Same race applies for concurrent update overlaps (older raw overwrites
+  // newer state) and for archive/supersede vs update (older active-status
+  // snapshot overwrites the post-archive state).
+  //
+  // The dry-run path stays lock-OUTSIDE (read-only preview; tolerating a
+  // brief race window here is acceptable because no disk mutation happens).
+  // The real RMW path is wrapped end-to-end in the lock and re-does the
+  // find+read+merge+lint after acquireLock so any concurrent unlink /
+  // atomicWrite is observed.
+
+  // Helper: prepare merged markdown + lint, returning either ok result or
+  // a rejected response. Used by both dry-run preview and locked RMW path.
+  async function prepareMergedMarkdown(): Promise<
+    | { ok: true; target: string; merged: { markdown: string; sanitizedReplacements: string[] }; lintErrors: number; lintWarnings: number }
+    | { ok: false; response: WriteProjectEntryResult }
+  > {
+    const target = await findProjectEntryFile(projectRoot, slug);
+    if (!target) {
+      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason: "entry_not_found",
+        target: `project:${slug}`,
+        duration_ms: Date.now() - started,
+      }));
+      return { ok: false, response: { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, ...resultCtx } };
+    }
+    let raw: string;
+    try {
+      raw = await fs.readFile(target, "utf-8");
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason: `read_error: ${message}`,
+        target: `project:${slug}`,
+        duration_ms: Date.now() - started,
+      }));
+      return { ok: false, response: { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath, ...resultCtx } };
+    }
+    const merged = mergeUpdateMarkdown(raw, patch, slug, projectRoot);
+    if ("error" in merged) {
+      const reason = merged.error.startsWith("credential pattern detected") ? merged.error : merged.error.split(":")[0];
+      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason,
+        target: `project:${slug}`,
+        detail: merged.error,
+        duration_ms: Date.now() - started,
+      }));
+      return { ok: false, response: { slug, path: target, status: "rejected", reason, auditPath, ...resultCtx } };
+    }
+    const lint = lintMarkdown(merged.markdown, target);
+    const lintErrors = lint.filter((issue) => issue.severity === "error").length;
+    const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
+    if (lintErrors > 0) {
+      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+        operation: "reject",
+        reason: "lint_error",
+        target: `project:${slug}`,
+        lintErrors,
+        lintWarnings,
+        duration_ms: Date.now() - started,
+      }));
+      return { ok: false, response: { slug, path: target, status: "rejected", reason: "lint_error", lintErrors, lintWarnings, auditPath, ...resultCtx } };
+    }
+    return { ok: true, target, merged, lintErrors, lintWarnings };
   }
 
-  let raw: string;
-  try {
-    raw = await fs.readFile(target, "utf-8");
-  } catch (e: unknown) {
-    const message = e instanceof Error ? e.message : String(e);
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
-      operation: "reject",
-      reason: `read_error: ${message}`,
-      target: `project:${slug}`,
-      duration_ms: Date.now() - started,
-    }));
-    return { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath, ...resultCtx };
-  }
-
-  const merged = mergeUpdateMarkdown(raw, patch, slug, projectRoot);
-  if ("error" in merged) {
-    const reason = merged.error.startsWith("credential pattern detected") ? merged.error : merged.error.split(":")[0];
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
-      operation: "reject",
-      reason,
-      target: `project:${slug}`,
-      detail: merged.error,
-      duration_ms: Date.now() - started,
-    }));
-    return { slug, path: target, status: "rejected", reason, auditPath, ...resultCtx };
-  }
-
-  const lint = lintMarkdown(merged.markdown, target);
-  const lintErrors = lint.filter((issue) => issue.severity === "error").length;
-  const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
-  if (lintErrors > 0) {
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
-      operation: "reject",
-      reason: "lint_error",
-      target: `project:${slug}`,
-      lintErrors,
-      lintWarnings,
-      duration_ms: Date.now() - started,
-    }));
-    return { slug, path: target, status: "rejected", reason: "lint_error", lintErrors, lintWarnings, auditPath, ...resultCtx };
-  }
-
+  // Dry-run path: lock-outside preview. Stale reads are acceptable here
+  // because no disk mutation happens; callers requesting dry_run already
+  // accept best-effort semantics.
   if (opts.dryRun) {
+    const preview = await prepareMergedMarkdown();
+    if (!preview.ok) return preview.response;
     return {
       slug,
-      path: target,
+      path: preview.target,
       status: "dry_run",
-      lintErrors,
-      lintWarnings,
-      sanitizedReplacements: merged.sanitizedReplacements,
+      lintErrors: preview.lintErrors,
+      lintWarnings: preview.lintWarnings,
+      sanitizedReplacements: preview.merged.sanitizedReplacements,
       ...resultCtx,
     };
   }
 
   let lock: LockHandle | undefined;
+  let target = "";
+  let lintErrors = 0;
+  let lintWarnings = 0;
+  let mergedForCatch: { markdown: string; sanitizedReplacements: string[] } | undefined;
   try {
     lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
+    // Re-do the find+read+merge+lint cycle INSIDE the lock to observe any
+    // concurrent state changes (hard delete, prior atomic write).
+    const prepared = await prepareMergedMarkdown();
+    if (!prepared.ok) return prepared.response;
+    target = prepared.target;
+    lintErrors = prepared.lintErrors;
+    lintWarnings = prepared.lintWarnings;
+    mergedForCatch = prepared.merged;
+    const merged = prepared.merged;
     await atomicWrite(target, merged.markdown);
     const operation = opts.auditOperation || "update";
     const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `${operation} ${slug}`) : null;
