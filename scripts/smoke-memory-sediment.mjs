@@ -1909,6 +1909,178 @@ This is a cross-project review pipeline body with enough content.
       }
     }
 
+    // === h: smoke gaps surfaced in Round 6 sonnet coverage audit =========
+    //
+    // sonnet's 14-command smoke matrix flagged two user-facing paths with
+    // ZERO smoke coverage:
+    //   - /memory check-backlinks  — checkBacklinks + formatBacklinkReport
+    //   - migrate-go frontmatter-unparseable branch (migrate-go.ts:597)
+    // Both are reachable by users today; either silently regressing means
+    // "the assert that catches it doesn't exist". Fill the gaps.
+    {
+      const { checkBacklinks, formatBacklinkReport } = req("./memory/graph.js");
+      const { DEFAULT_SETTINGS: memSettings } = req("./memory/settings.js");
+      const { runMigrationGo } = req("./memory/migrate-go.js");
+
+      // --- Case h.1: checkBacklinks reports dead [[wikilink]] correctly ---
+      // Fixture: one entry that links to a non-existent slug — the report
+      // must surface deadLinkCount > 0 and formatBacklinkReport must mention
+      // the missing slug.
+      {
+        const tgt = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-backlinks-"));
+        const decisionsDir = path.join(tgt, "decisions");
+        fs.mkdirSync(decisionsDir, { recursive: true });
+        const fm = [
+          "---",
+          "id: live-entry",
+          "scope: project",
+          "kind: decision",
+          "status: live",
+          "confidence: 7",
+          "schema_version: 1",
+          "title: Live entry pointing at a ghost",
+          "created: '2026-05-12T12:00:00.000+08:00'",
+          "updated: '2026-05-12T12:00:00.000+08:00'",
+          "---",
+          "",
+          "# Live entry pointing at a ghost",
+          "",
+          "## Compiled Truth",
+          "",
+          "See [[ghost-entry-does-not-exist]] for context.",
+          "",
+          "## Timeline",
+          "",
+          "- 2026-05-12: created",
+          "",
+        ].join("\n");
+        fs.writeFileSync(path.join(decisionsDir, "live-entry.md"), fm);
+
+        const report = await checkBacklinks(tgt, memSettings, undefined, tgt);
+        assert(
+          report.deadLinkCount > 0,
+          `checkBacklinks should report deadLinkCount > 0 for [[ghost-entry-does-not-exist]], got ${report.deadLinkCount}`,
+        );
+        assert(
+          Array.isArray(report.issues) && report.issues.some((i) => i.problem === "dead_link" && /ghost-entry/.test(i.to)),
+          `checkBacklinks issues should include dead_link to ghost-entry, got ${JSON.stringify(report.issues)}`,
+        );
+        const formatted = formatBacklinkReport(report);
+        assert(
+          /ghost-entry-does-not-exist/.test(formatted),
+          `formatBacklinkReport output should mention the dead slug, got: ${formatted.slice(0, 200)}`,
+        );
+        fs.rmSync(tgt, { recursive: true, force: true });
+      }
+
+      // --- Case h.2: checkBacklinks zero-dead-links baseline ---
+      // Same fixture shape but link points at an existing entry —
+      // deadLinkCount must be 0. Catches false-positive regressions.
+      {
+        const tgt = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-backlinks-clean-"));
+        const decisionsDir = path.join(tgt, "decisions");
+        fs.mkdirSync(decisionsDir, { recursive: true });
+        const writeEntry = (slug, body) =>
+          fs.writeFileSync(
+            path.join(decisionsDir, `${slug}.md`),
+            [
+              "---",
+              `id: ${slug}`,
+              "scope: project",
+              "kind: decision",
+              "status: live",
+              "confidence: 7",
+              "schema_version: 1",
+              `title: ${slug}`,
+              "created: '2026-05-12T12:00:00.000+08:00'",
+              "updated: '2026-05-12T12:00:00.000+08:00'",
+              "---",
+              "",
+              `# ${slug}`,
+              "",
+              "## Compiled Truth",
+              "",
+              body,
+              "",
+              "## Timeline",
+              "",
+              "- 2026-05-12: created",
+              "",
+            ].join("\n"),
+          );
+        writeEntry("alpha", "See [[beta]] for context.");
+        writeEntry("beta", "References [[alpha]] back.");
+
+        const report = await checkBacklinks(tgt, memSettings, undefined, tgt);
+        assert(
+          report.deadLinkCount === 0,
+          `checkBacklinks clean fixture should report deadLinkCount=0, got ${report.deadLinkCount}`,
+        );
+        fs.rmSync(tgt, { recursive: true, force: true });
+      }
+
+      // --- Case h.3: migrate-go frontmatter-unparseable note path ---
+      // Fixture: a .pensieve entry with frontmatter that's structurally
+      // present (delimited by ---) but where parseFrontmatter returns an
+      // empty object (e.g. lines that aren't `key: value` scalars). The
+      // migration must NOT skip the entry — it must migrate with notes
+      // containing "frontmatter-unparseable", per migrate-go.ts:597.
+      {
+        const parent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-fm-unparse-parent-"));
+        const abrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-fm-unparse-abrain-"));
+        for (const r of [parent, abrain]) {
+          execFileSync("git", ["-C", r, "init", "-q"]);
+          execFileSync("git", ["-C", r, "config", "user.email", "smoke@pi-astack.local"]);
+          execFileSync("git", ["-C", r, "config", "user.name", "pi-astack smoke"]);
+          execFileSync("git", ["-C", r, "config", "commit.gpgsign", "false"]);
+          execFileSync("git", ["-C", r, "commit", "-q", "--allow-empty", "-m", "init"]);
+        }
+        const pensieve = path.join(parent, ".pensieve");
+        const decisionsDir = path.join(pensieve, "decisions");
+        fs.mkdirSync(decisionsDir, { recursive: true });
+        // Frontmatter delimiters present, but body between them does not
+        // yield key:value pairs (just a stray non-scalar comment line).
+        const badYaml = [
+          "---",
+          "# stray comment, no key:value pairs at all",
+          "---",
+          "",
+          "# An entry with intact body but blank parseable frontmatter",
+          "",
+          "## Compiled Truth",
+          "",
+          "This should still migrate; analyzeEntry must flag the note.",
+          "",
+          "## Timeline",
+          "",
+          "- 2026-05-12: created",
+          "",
+        ].join("\n");
+        fs.writeFileSync(path.join(decisionsDir, "unparseable-frontmatter.md"), badYaml);
+        execFileSync("git", ["-C", parent, "add", "."]);
+        execFileSync("git", ["-C", parent, "commit", "-q", "-m", "seed unparseable entry"]);
+
+        const result = await runMigrationGo({
+          pensieveTarget: pensieve,
+          abrainHome: abrain,
+          projectId: "smoke-fm-unparseable",
+          cwd: parent,
+          settings: DEFAULT_SETTINGS,
+          migrationTimestamp: "2026-05-12T12:00:00.000+08:00",
+        });
+        assert(result.ok === true, `migrate-go should succeed despite unparseable frontmatter, got: ${JSON.stringify(result, null, 2).slice(0, 400)}`);
+        const entry = (result.entries || []).find((e) => /unparseable-frontmatter/.test(e.source || ""));
+        assert(entry, `migrate-go should report the unparseable entry; entry sources=${JSON.stringify(result.entries?.map((e) => e.source))}`);
+        assert(
+          Array.isArray(entry.normalizationNotes) && entry.normalizationNotes.includes("frontmatter-unparseable"),
+          `unparseable entry must carry normalizationNotes=['frontmatter-unparseable'], got=${JSON.stringify(entry.normalizationNotes)}`,
+        );
+        assert(entry.action === "migrated", `unparseable entry should still be migrated (notes is informational), got action=${entry.action}`);
+        fs.rmSync(parent, { recursive: true, force: true });
+        fs.rmSync(abrain, { recursive: true, force: true });
+      }
+    }
+
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));
   } finally {
     if (process.env.PI_ASTACK_KEEP_SMOKE_TMP !== "1") fs.rmSync(outRoot, { recursive: true, force: true });

@@ -81,6 +81,15 @@ export interface MigrationGoEntryReport {
   route: "knowledge" | "workflow-project" | "workflow-cross-project";
   action: "migrated" | "skipped" | "failed";
   reason?: string;
+  /** notes from analyzeEntry frontmatter normalization, e.g.
+   *  ["missing frontmatter"], ["frontmatter-unparseable"],
+   *  ["missing schema_version", "missing kind"]. Empty for entries that
+   *  arrived with fully-populated, parseable frontmatter. Round 6 sonnet
+   *  P1 audit fix: previously computed inside analyzeEntry but silently
+   *  dropped when populating the entry report — the
+   *  "frontmatter-unparseable" branch was dead code from a reporter
+   *  standpoint. Now surfaced so reviewers can see what was synthesized. */
+  normalizationNotes?: string[];
 }
 
 export interface MigrationGoResult {
@@ -773,6 +782,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
           },
           { abrainHome, settings: DEFAULT_SEDIMENT_SETTINGS },
         );
+        const notes = analyzed.normalizationNotes.length > 0 ? analyzed.normalizationNotes : undefined;
         if (result.status === "created") {
           await gitRmOrUnlink(parentRepoRoot, file);
           workflowCount += 1;
@@ -784,6 +794,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
             kind: "workflow",
             route: analyzed.route,
             action: "migrated",
+            normalizationNotes: notes,
           });
         } else {
           failedCount += 1;
@@ -796,12 +807,14 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
             route: analyzed.route,
             action: "failed",
             reason: result.reason || result.status,
+            normalizationNotes: notes,
           });
         }
         continue;
       }
 
       // knowledge route: atomic write + git rm source
+      const knowledgeNotes = analyzed.normalizationNotes.length > 0 ? analyzed.normalizationNotes : undefined;
       if (fsSync.existsSync(analyzed.targetAbs)) {
         failedCount += 1;
         entries.push({
@@ -813,6 +826,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
           route: "knowledge",
           action: "failed",
           reason: "target already exists in abrain projects dir (slug collision)",
+          normalizationNotes: knowledgeNotes,
         });
         continue;
       }
@@ -827,6 +841,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
         kind: analyzed.kind,
         route: "knowledge",
         action: "migrated",
+        normalizationNotes: knowledgeNotes,
       });
     } catch (e: unknown) {
       failedCount += 1;
