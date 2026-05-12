@@ -96,6 +96,8 @@ blast_radius_factor: world (5)      > project (1)
 
 每个 lane 的 settings 用 lane 前缀：
 
+> ⚠️ **以下 Lane C settings 已被 ADR 0016 删除**（autoWriteDisallowMaxim / autoWriteMaxConfidence / autoWriteForceProvisional 等 G2-G13 gate 参数全部移除；curator LLM 决策替代机械门控）。本段仅作历史记录，**不要据此修改 settings.json**——这些 key 写进去也不会生效。
+
 ```jsonc
 "sediment": {
   // Lane C (auto-write LLM bg)

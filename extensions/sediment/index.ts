@@ -933,16 +933,14 @@ export default function (pi: ExtensionAPI) {
             // more messages → new entries in the branch. Check immediately
             // and start another cycle if there's a backlog, rather than
             // waiting for the next agent_end (which might not come soon).
-            scheduleDrainIfBacklog({
-              cwd,
-              sessionId,
-              settings,
-              getBranch,
-              notify,
-              setStatus,
-              modelRegistry,
-              settingsSnapshot,
-            });
+            //
+            // scheduleDrainIfBacklog is a closure over (cwd, sessionId,
+            // settings, getBranch, notify, setStatus, modelRegistry,
+            // settingsSnapshot) declared above — it takes no args. An
+            // earlier draft passed those as an object literal; JS runtime
+            // silently ignored the extra arg but tsc --strict would flag
+            // it. Keep this call argument-free.
+            scheduleDrainIfBacklog();
           }
         })();
         autoWriteInFlight.set(sessionId, bgPromise);

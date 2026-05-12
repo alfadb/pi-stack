@@ -144,17 +144,17 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 
 ## 实施现状
 
-**P0a-P0c shipped（2026-05-09 → 2026-05-11）**，**P0d / P1+ 待实施**。完整 plan 在 [migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)（§1 8-phase plan）与 [migration/vault-bootstrap.md](../migration/vault-bootstrap.md)。
+**P0a-P0c shipped（2026-05-09 → 2026-05-11）+ B1 / B3+B7 / B4 shipped（2026-05-12）**，**P0d / B5 / Lane G 待实施**。完整 plan 在 [migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)（§1 per-repo 一次性迁移模型；原 8-phase plan 已于 v7.1 废止）与 [migration/vault-bootstrap.md](../migration/vault-bootstrap.md)。
 
 ### 当前已 ship（vault 子系统 P0）
 
 | 子 phase | 动作 | 验收证据 |
 |---|---|---|
-| **P0a** | `backend-detect.ts` 七种 backend 探测 + `$SECRETS_BACKEND` env override | `extensions/abrain/backend-detect.ts:130-227` + `scripts/smoke-abrain-backend-detect.mjs` |
+| **P0a** | `backend-detect.ts` 七种 backend 探测 + `$SECRETS_BACKEND` env override | `extensions/abrain/backend-detect.ts:127-227` (detectBackend) + `scripts/smoke-abrain-backend-detect.mjs` |
 | **P0b** | `bootstrap.ts` master key 生成 / age envelope / tmp 安装 / cleanup（inv1-inv6 事务安全） | `extensions/abrain/bootstrap.ts` + `scripts/smoke-abrain-bootstrap.mjs` |
-| **P0c.write** | `vault-writer.ts` set/list/forget + age 公钥加密（不接触 master） + atomic lock + audit | `extensions/abrain/vault-writer.ts:361-450` + `scripts/smoke-abrain-vault-writer.mjs` |
+| **P0c.write** | `vault-writer.ts` set/list/forget + age 公钥加密（不接触 master） + atomic lock + audit | `extensions/abrain/vault-writer.ts:368-449` (writeSecret) + `:478-537` (listSecrets) + `:538-595` (forgetSecret) + `scripts/smoke-abrain-vault-writer.mjs` |
 | **P0c.read** | `vault-reader.ts` unlock master + per-key decrypt + `vault_release(key, scope?, reason?)` LLM tool（pre-flight + deny-first + i18n + description rendering）+ `$VAULT_` / `$PVAULT_` / `$GVAULT_` bash injection （default-withheld stdout）+ literal redaction + read-path audit closure | `extensions/abrain/vault-reader.ts` + `extensions/abrain/vault-bash.ts` + `extensions/abrain/index.ts:607-628` |
-| **P1（vault 侧）** | boot-time active project resolver + `/secret` 默认 active project + `--global` / `--project=<id>` / `--all-projects` | `extensions/_shared/runtime.ts:397-440` + `scripts/smoke-abrain-active-project.mjs` + `scripts/smoke-abrain-secret-scope.mjs` |
+| **P1（vault 侧）** | boot-time active project resolver + `/secret` 默认 active project + `--global` / `--project=<id>` / `--all-projects` | `extensions/_shared/runtime.ts:409-457` (resolveActiveProject) + `scripts/smoke-abrain-active-project.mjs` + `scripts/smoke-abrain-secret-scope.mjs` |
 | **B1: workflows lane writer** | `writeAbrainWorkflow` substrate 接受 pipeline-型条目，按 `crossProject` flag 路由到 `~/.abrain/workflows/`（跨项目）或 `~/.abrain/projects/<id>/workflows/`（项目特定）；独立 abrain-side lock（`<abrainHome>/.state/sediment/locks/workflow.lock`）+ audit（`<abrainHome>/.state/sediment/audit.jsonl`，lane="workflow"）+ git commit（abrain repo） | `extensions/sediment/writer.ts:writeAbrainWorkflow` + `scripts/smoke-memory-sediment.mjs:abrain-workflows-lane-writer` 覆盖 10 个场景（cross-project / project-specific / 4 种 validation / sanitize / dedupe / dry_run / audit / git） |
 | **B3+B7: per-file migration substrate 剥离** | 删除 `extensions/sediment/migration.ts` + `/sediment migrate-one` + `/sediment migration-backups` slash 命令与 backup 子系统；文档重写为 per-repo 一次性迁移模型（abrain-pensieve-migration.md 重写 ±200 行） | commit `b33f0e4` 净 +178/-1609 行；smoke 26 transpiled files 全过 |
 | **B4: per-repo 迁移执行器** | `/memory migrate` 默认 dry-run（表格预览），`/memory migrate --go` 执行：preflight 检查父仓 + abrain 仓 git clean + `.pensieve` tracked + 有用户条目→逐文件 frontmatter 归一化（kind/scope/schema_version/Timeline）→ pipelines 走 `writeAbrainWorkflow` 路由→ knowledge kinds atomic write 到 `~/.abrain/projects/<id>/<kind-dir>/`→ `git rm` 原件→两边仓各一个 commit（`chore: migrate .pensieve → ~/.abrain/projects/<id>` / `migrate(in): <id> (...)`） | `extensions/memory/migrate-go.ts` + `scripts/smoke-memory-sediment.mjs:per-repo migration --go` 覆盖 12 个场景（dirty parent 拒绝 / dirty abrain 拒绝 / happy path 2 knowledge + 2 workflow / legacy frontmatter 归一化 / .index .state 预过滤 / commits / rollback summary / 幂等带保护） |
@@ -184,23 +184,23 @@ ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "au
 
 ```jsonc
 // abrain audit (~/.abrain/.state/sediment/audit.jsonl) — lane 字段枚举
-// project-side audit (.pensieve/.state/sediment-events.jsonl) 同 schema，
+// project-side audit (<projectRoot>/.pi-astack/sediment/audit.jsonl) 同 schema，
 // 只是 lane 取值集合更小（不会出现 workflow / about_me / vault_write）
 {
   "lane": "explicit"      // Lane A — 仍有效（project 端）
          | "auto_write"    // Lane C — 仍有效（project 端）
          | "workflow"      // B1 新增 — writeAbrainWorkflow 写入（abrain 端独立 lane）
-         | "about_me"      // Lane G — 新增（abrain 端）
-         | "vault_write"   // Lane V — 新增。记录到独立 log `vault-events.jsonl`（§下）
+         | "about_me"      // Lane G — 待 Lane G writer ship 后启用（当前 grep 0 命中）
+         // 注：vault writes 走独立 schema（vault-events.jsonl，op-based），不在此 lane enum 集合
          | "system" | "window"  // 内部 skip / 调度标签（不在 ADR 决策面，仅诊断用）
          // “promote” / “auto_promote” 不再处于枚举内——abrain 内部无 promote
 }
 ```
 
-**三处 audit log**（命名实际差异，2026-05-12 校对）：
-- `<projectRoot>/.pensieve/.state/sediment-events.jsonl`：project 端 Lane A / C 走这里
-- `~/.abrain/.state/sediment/audit.jsonl`：abrain 端 Lane G / workflow 走这里（B1 引入；文件名是 `audit.jsonl` 不是 `sediment-events.jsonl`）
-- `~/.abrain/.state/vault-events.jsonl`：**Lane V 独立 log**（vault 写入是 sediment 同步处理但在不同事务路径，另走一份 log 避免与 agent_end 异步事件联屏造成验证混乱）
+**三处 audit log**（命名实际差异，源码权威：`extensions/_shared/runtime.ts` `sedimentAuditPath` / `vaultAuditPath` / abrain-side equivalent）：
+- `<projectRoot>/.pi-astack/sediment/audit.jsonl`：project 端 Lane A / C 走这里（曾用 `.pensieve/.state/sediment-events.jsonl`，已由 `ensureSedimentLegacyMigrated()` 一次性迁移，仅 read-only 兼容）
+- `~/.abrain/.state/sediment/audit.jsonl`：abrain 端 Lane G / workflow 走这里（B1 引入）
+- `~/.abrain/.state/vault-events.jsonl`：**Lane V 独立 schema**（op-based，不是 lane-based；与上面两个 sediment audit row schema 不共用 `lane` 字段）
 
 [memory-architecture.md](../memory-architecture.md) 的 supersede banner 同步修正为："audit row schema → 扩展 lane 字段，见 ADR 0014"。
 

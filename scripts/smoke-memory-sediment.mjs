@@ -1464,6 +1464,101 @@ This is a cross-project review pipeline body with enough content.
       );
     }
 
+    // (c) projectId from HTTPS git remote (covers canonicalizeGitRemote HTTPS path)
+    {
+      const rParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-https-parent-"));
+      execFileSync("git", ["-C", rParent, "init", "-q"]);
+      execFileSync("git", ["-C", rParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", rParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", rParent, "config", "commit.gpgsign", "false"]);
+      execFileSync("git", ["-C", rParent, "remote", "add", "origin", "https://github.com/alfadb/kihh.git"]);
+      writeFile(path.join(rParent, ".pensieve", "maxims", "https-test.md"), makeEntry({ title: "HTTPS Remote ID Test", kind: "maxim" }));
+      execFileSync("git", ["-C", rParent, "add", "-A"]);
+      execFileSync("git", ["-C", rParent, "commit", "-q", "-m", "init"]);
+
+      const rAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-https-abrain-"));
+      execFileSync("git", ["-C", rAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", rAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", rAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", rAbrain, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(rAbrain, "README.md"), "# abrain (https-remote-id smoke)\n");
+      execFileSync("git", ["-C", rAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", rAbrain, "commit", "-q", "-m", "init"]);
+
+      const result = await runMigrationGo({
+        pensieveTarget: path.join(rParent, ".pensieve"),
+        abrainHome: rAbrain,
+        cwd: rParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
+      });
+      assert(result.ok, `HTTPS remote case should succeed: ${JSON.stringify(result.preconditionFailures)}`);
+      assert(result.projectIdSource === "git-remote", `projectIdSource must be git-remote, got ${result.projectIdSource}`);
+      assert(result.projectId === "alfadb-kihh", `HTTPS remote https://github.com/alfadb/kihh.git must derive 'alfadb-kihh', got '${result.projectId}'`);
+      assert(
+        fs.existsSync(path.join(rAbrain, "projects", "alfadb-kihh", "maxims", "https-test.md")),
+        `entry must land under projects/alfadb-kihh/`,
+      );
+    }
+
+    // (d) parent-side commit narrowing (pathspec=".pensieve"): unrelated
+    //     `.pi-astack/` working-tree changes (mimics sediment auto-commit
+    //     staging that's been gitignored) must NOT be swept into the
+    //     migration commit. This is the regression guard for the
+    //     gitCommitAll pathspec parameter (was missing in 37f03a6).
+    {
+      const dParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-narrow-parent-"));
+      execFileSync("git", ["-C", dParent, "init", "-q"]);
+      execFileSync("git", ["-C", dParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", dParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", dParent, "config", "commit.gpgsign", "false"]);
+      // `.pi-astack/` is normally gitignored in real repos (per pi convention).
+      // Match that here so parent preflight stays clean.
+      writeFile(path.join(dParent, ".gitignore"), ".pi-astack/\n");
+      writeFile(path.join(dParent, ".pensieve", "maxims", "narrow.md"), makeEntry({ title: "Narrow Add Test", kind: "maxim" }));
+      execFileSync("git", ["-C", dParent, "add", "-A"]);
+      execFileSync("git", ["-C", dParent, "commit", "-q", "-m", "init"]);
+
+      const dAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-narrow-abrain-"));
+      execFileSync("git", ["-C", dAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", dAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", dAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", dAbrain, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(dAbrain, "README.md"), "# abrain (narrow-add smoke)\n");
+      execFileSync("git", ["-C", dAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", dAbrain, "commit", "-q", "-m", "init"]);
+
+      // Write `.pi-astack/` noise AFTER preflight will start — it's
+      // gitignored so preflight `git status --porcelain` returns clean.
+      // With the old `git add -A`, this would have been silently ignored
+      // by gitignore too; the regression value here is that the migration
+      // commit's file list comes from a pathspec-narrowed `git add --
+      // .pensieve`, not a wide `add -A` that *could* sweep newly added
+      // files. We assert that property directly.
+      writeFile(path.join(dParent, ".pi-astack", "sediment", "concurrent-noise.jsonl"), `{"unrelated":true}\n`);
+
+      const result = await runMigrationGo({
+        pensieveTarget: path.join(dParent, ".pensieve"),
+        abrainHome: dAbrain,
+        projectId: "narrow-test",
+        cwd: dParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
+      });
+      assert(result.ok, `narrow-add case should succeed: ${JSON.stringify(result.preconditionFailures)}`);
+      // Parent migration commit must only touch .pensieve/.
+      const parentCommitFiles = execFileSync("git", ["-C", dParent, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf-8" }).trim().split(/\n+/).filter(Boolean);
+      assert(
+        parentCommitFiles.length > 0 && parentCommitFiles.every((f) => f.startsWith(".pensieve")),
+        `parent migration commit must only touch .pensieve/, got: ${JSON.stringify(parentCommitFiles)}`,
+      );
+      // `.pi-astack/` content still exists on disk but is unstaged / untracked.
+      assert(
+        fs.existsSync(path.join(dParent, ".pi-astack", "sediment", "concurrent-noise.jsonl")),
+        `.pi-astack noise file should still exist on disk after migration`,
+      );
+    }
+
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));
   } finally {
     if (process.env.PI_ASTACK_KEEP_SMOKE_TMP !== "1") fs.rmSync(outRoot, { recursive: true, force: true });

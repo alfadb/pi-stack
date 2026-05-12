@@ -7,6 +7,8 @@
 - **依赖**: ADR 0002（superseded by memory-architecture.md）/ ADR 0003（主会话只读）/ ADR 0009（multi-agent 自由化，但 sediment 不再借用）
 - **互补**: ~~ADR 0012（v6.8 双 target，已 superseded by memory-architecture.md）~~ → ADR 0015（lookup-tools loop 落地） + ADR 0016（curator 决策模型：create/update/merge/archive/supersede/delete/skip）
 
+> ⚠️ **本节为 v6.6 历史快照**。以下技术细节描述的 protocol（`SKIP` / `SKIP_DUPLICATE` / `## GBRAIN` 终结符 / `runGbrainAgent` / `gbrain put` / `gbrain_search` 等）当前**代码中不存在**——已由 ADR 0015 D7（curator dedupe + frontmatter + compiled truth + `## Timeline`）+ ADR 0016（LLM curator pipeline）取代。当前 sediment 实际模块组成见 `extensions/sediment/` 直接读源（curator.ts / dedupe.ts / extractor.ts / llm-extractor.ts / writer.ts 等）。
+
 ## 背景
 
 ADR 0004 设计了 v6.5 的三模型投票 + JSON schema + quorum 聚合 + schema-enforcer 二次生成 流水线。在端到端调试中暴露了五个根本问题：

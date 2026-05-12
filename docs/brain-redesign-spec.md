@@ -839,7 +839,14 @@ vault forget prod-db-password               # 未来项目级读写路径：rm/s
 
 ## 7. .pensieve → abrain 迁移
 
-### 7.1 一次性 migrate（推荐）
+### 7.1 一次性 migrate（推荐） — 用 `/memory migrate --go`
+
+> ✅ **首选做法**：用 `/memory migrate --go`（B4，2026-05-12 ship；spec 见
+> [migration/abrain-pensieve-migration.md §3](./migration/abrain-pensieve-migration.md#3-迁移动作memory-migrate---go-内部步骤)）。
+> 该 slash command 内置 preflight + frontmatter 归一化 + pipeline 路由 +
+> 索引重建 + pre-migration SHA rollback，自动化原生 git mv 的所有步骤。
+> 下面列的 raw bash 步骤是 fallback，仅在 slash command 不可用时手动执行
+> （例如 abrain pi extension 未启用、要 batch-migrate 多仓时）。
 
 ```bash
 # 对每个有 .pensieve/ 的项目
@@ -930,7 +937,7 @@ echo ".pensieve" >> <cwd>/.gitignore
 | Multi-channel inbox（IM 接入） | OpenClaw 的方向，不是这套架构的方向 |
 | Lane D auto-promote | brain 内部无 promote 概念；ADR 0013 的 Lane D 在新架构下直接消失 |
 
-**重申**：这些不是"以后绝不做"，是"现在不做、等真实使用反馈再决定"。如果跑两个月后发现共享 brain 不够、真的需要主体协调——再开 ADR 0015。
+**重申**：这些不是"以后绝不做"，是"现在不做、等真实使用反馈再决定"。如果跑两个月后发现共享 brain 不够、真的需要主体协调——再另开 ADR（当前下一个空号是 0017；0015 / 0016 已分别被 memory-search LLM retrieval / sediment-as-llm-curator 占用）。
 
 ---
 

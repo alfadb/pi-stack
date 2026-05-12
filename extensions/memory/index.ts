@@ -87,11 +87,13 @@ function registerMemoryCommand(pi: ExtensionAPI) {
     getArgumentCompletions(prefix: string) {
       const items = [
         "lint", "lint .pensieve",
-        "migrate", "migrate --dry-run", "migrate --dry-run --report", "migrate --go", "migrate --go .pensieve",
+        "migrate", "migrate --dry-run", "migrate --dry-run --report",
+        "migrate --go", "migrate --go .pensieve", "migrate --go --project=",
         "doctor-lite", "doctor-lite .pensieve",
         "check-backlinks", "check-backlinks .pensieve",
         "rebuild --graph", "rebuild --graph .pensieve",
         "rebuild --index", "rebuild --index .pensieve",
+        "rebuild --graph --index", "rebuild --graph --index .pensieve",
       ];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
@@ -115,8 +117,16 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         // Slash surface (per user preference): `/memory migrate` defaults to
         // dry-run; `--go` executes per-repo migration. Mutually exclusive.
         // No `--apply --yes` double-confirmation — git working tree clean
-        // is the precondition, `git reset --hard HEAD~1` is the rollback
-        // (see docs/migration/abrain-pensieve-migration.md §5).
+        // is the precondition. Rollback uses the pre-migration SHA captured
+        // during preflight and printed at the end of the --go summary
+        // (NOT `HEAD~1` — abrain side has N+1 commits when N workflow
+        // entries are routed; see docs/migration/abrain-pensieve-migration.md
+        // §5).
+        //
+        // Flag scope:
+        //   --dry-run            : default. Supports --report. --project is ignored.
+        //   --go                 : execute. Supports --project. --report is ignored.
+        //   --dry-run + --go     : rejected (mutually exclusive).
         const dryRun = rest.includes("--dry-run") || rest.includes("-n");
         const goMode = rest.includes("--go");
         if (dryRun && goMode) {
@@ -132,6 +142,12 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         const target = targetArg ? path.resolve(cwd, targetArg) : path.join(cwd, ".pensieve");
 
         if (goMode) {
+          // Out-of-scope flag warnings (was previously silent — gpt-5.5
+          // audit flagged): --report is dry-run-only; warn so users don't
+          // assume migrate-in writes a report file.
+          if (writeReport) {
+            ctx.ui.notify("/memory migrate --go: --report is dry-run-only and was ignored (see `/memory migrate --dry-run --report`).", "warning");
+          }
           const abrainHome = process.env.ABRAIN_ROOT
             ? process.env.ABRAIN_ROOT.replace(/^~(?=$|\/)/, os.homedir())
             : path.join(os.homedir(), ".abrain");
@@ -148,6 +164,11 @@ function registerMemoryCommand(pi: ExtensionAPI) {
           return;
         }
 
+        // Dry-run path: --project is meaningless (no abrain write happens).
+        // Warn so users who typed `--project=foo --dry-run` know it's a no-op.
+        if (projectIdFlag) {
+          ctx.ui.notify(`/memory migrate --dry-run: --project=${projectIdFlag} is ignored in dry-run mode (only affects --go). Run `/memory migrate --go --project=${projectIdFlag}` to execute.`, "warning");
+        }
         const report = await planMigrationDryRun(target, settings, undefined, cwd);
         const messages = [formatMigrationPlan(report)];
         if (writeReport) {

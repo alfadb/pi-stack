@@ -247,9 +247,45 @@ async function gitRmOrUnlink(cwd: string, file: string): Promise<void> {
   try { await fs.unlink(file); } catch {}
 }
 
-async function gitCommitAll(cwd: string, message: string): Promise<string | null> {
+/**
+ * Stage and commit changes in `cwd`.
+ *
+ * `pathspec` narrows `git add` to a specific path (e.g. ".pensieve" on the
+ * parent side) so concurrent sediment auto-commits or unrelated working-
+ * tree changes can't accidentally piggyback into the migration commit.
+ * Pass `null` to `git add -A` (used on the abrain side where the whole
+ * repo is the migration's domain).
+ *
+ * Returns the new HEAD SHA on success, or `null` on any git failure
+ * (caller decides whether that's fatal).
+ */
+async function gitCommitAll(
+  cwd: string,
+  message: string,
+  pathspec: string | null = null,
+): Promise<string | null> {
   try {
-    await execFileAsync("git", ["-C", cwd, "add", "-A"], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    // Stage with `git add -A` (so deletes are included). When pathspec is
+    // given, narrow to that path — but it's OK if pathspec doesn't match
+    // any working-tree files (common case: migration cleared .pensieve/
+    // entirely so the dir was rmdir'd; the deletions are already staged
+    // via prior `git rm` calls). Silently swallow that one specific error
+    // and proceed to commit.
+    const addArgs = pathspec
+      ? ["-C", cwd, "add", "-A", "--", pathspec]
+      : ["-C", cwd, "add", "-A"];
+    try {
+      await execFileAsync("git", addArgs, { timeout: 10_000, maxBuffer: 1024 * 1024 });
+    } catch (err) {
+      // "pathspec did not match any files" — expected when target was
+      // emptied. Rely on already-staged content (`git rm` outputs); if
+      // there is nothing staged either, the next `commit` will fail with
+      // "nothing to commit" and the outer catch returns null.
+      const msg = (err as { stderr?: string; message?: string })?.stderr
+        || (err as { message?: string })?.message
+        || "";
+      if (!/did not match any files/i.test(msg)) throw err;
+    }
     await execFileAsync("git", ["-C", cwd, "commit", "-m", message], { timeout: 20_000, maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], { timeout: 3000, maxBuffer: 64 * 1024 });
     return stdout.trim() || null;
@@ -816,10 +852,18 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   // writeAbrainWorkflow's gitCommit hit a soft failure we don't want to
   // leave orphans).
   const parentBasename = path.basename(parentRepoRoot);
+  // Parent side: narrow `git add` to `.pensieve` so we don't sweep in
+  // unrelated working-tree noise (e.g. concurrent sediment auto-commit
+  // staging files in `.pi-astack/`). pensieveAbs may be the canonical
+  // `.pensieve` or a custom path; relativize against parentRepoRoot.
+  const parentPensieveRel = path.relative(parentRepoRoot, pensieveAbs) || ".pensieve";
   const parentCommitSha = await gitCommitAll(
     parentRepoRoot,
     `chore: migrate .pensieve → ~/.abrain/projects/${projectId} (${movedCount + workflowCount} entries)`,
+    parentPensieveRel,
   );
+  // Abrain side: whole repo IS the migration target (knowledge entries +
+  // rebuilt index files + workflow commits' staging), so add -A is correct.
   const abrainCommitSha = await gitCommitAll(
     abrainHome,
     `migrate(in): ${projectId} (${movedCount} knowledge + ${workflowCount} workflow entries from ${parentBasename})`,

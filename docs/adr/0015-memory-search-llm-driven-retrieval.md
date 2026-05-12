@@ -172,7 +172,7 @@ ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment curator 在 c
 
 **决策**：每次 `memory_search` 调用追加一行 JSON 到 `<project>/.pi-astack/memory/search-metrics.jsonl`（`extensions/memory/llm-search.ts` `logSearchMetrics:9-18` + `extensions/_shared/runtime.ts` `memorySearchMetricsPath:80-82`）。
 
-**状态**：experimental。schema 未冻结，以 `llm-search.ts` `logSearchMetrics` 实际写入字段为准。当前实现（`llm-search.ts:514-521`）：
+**状态**：experimental。schema 未冻结，以 `llm-search.ts` `logSearchMetrics` 实际写入字段为准。当前实现（`llm-search.ts:515-521`）：
 
 ```jsonl
 {

@@ -25,7 +25,7 @@
 1. **父仓 git working tree clean**（`git status --porcelain` 为空）—— dirty 时阻止，提示先 commit
 2. **`.pensieve/` 内文件 tracked > 0** —— sub2api 这种 untracked 仓需要先 `git add .pensieve && git commit` 否则失去 git 回滚网
 3. **`.pensieve/` 内有至少 1 个用户 entry­**（排除 `.state/`/`.index/` 下的派生文件）——避免幂等双迁时跟仓中只剩 derived 文件仍提交一个空迁移 commit
-4. **`~/.abrain` working tree clean** —— 确保 abrain 一侧 mv 后能干净 commit、出问题能 `git reset --hard HEAD~1`
+4. **`~/.abrain` working tree clean** —— 确保 abrain 一侧 mv 后能干净 commit、出问题能用 preflight 捕获的 `abrainPreSha` 精确 rollback（详 §5；不是 `HEAD~1` —— abrain 有 N+1 commits）
 5. **projectId 可推断**。优先级：`--project=<id>` 显式 override > git remote origin（`github.com/alfadb/pi` → `alfadb-pi`）> 父仓 cwd 末二段拼接（`~/work/uamp/full` → `uamp-full`，避免多个 `full` 冲突）。最终 id 走 `validateAbrainProjectId`，不过则 `--go` 拒绝。
 
 dry-run（`/memory migrate` 默认 / `/memory migrate --dry-run`）仅列出 legacy entry、不检 precondition；它是护栏前的调查工具，不是迁移预览。要看 per-repo 迁移的 dry-run，要么手动检查上述 5 项，要么直接 `--go` 让它 fail-fast。
@@ -44,10 +44,12 @@ dry-run（`/memory migrate` 默认 / `/memory migrate --dry-run`）仅列出 leg
    - cross_project: true → ~/.abrain/workflows/（写 `writeAbrainWorkflow({crossProject: true})`）
    - 缺省 → ~/.abrain/projects/<id>/workflows/
    - 调用 writeAbrainWorkflow (B1 已 ship)
-5. 其他 7 kind entry 物理 mv：
+5. 其他 7 kind entry 物理跨仓 mv（实现走 atomic write + `git rm`）：
    .pensieve/<kind-dir>/<slug>.md → ~/.abrain/projects/<id>/<kind-dir>/<slug>.md
-   - 用 git mv 保留 .pensieve 仓内的 add+delete 记录
-   - abrain 仓内 git add
+   - 跨仓 `git mv` 不可行（两个独立 git repo）——实际实现：
+     - abrain 一侧 `atomicWrite()`（tmp + rename，防 partial）
+     - 父仓一侧 `gitRmOrUnlink()`（先 `git rm`，失败 fallback `fs.unlink`）
+   - 父仓 commit pathspec 限定为 `.pensieve`（不扫入并发 sediment auto-commit 的 `.pi-astack/` 改动）
    - **kind → 子目录映射**（与 `extensions/memory/migrate-go.ts` 中 `KNOWLEDGE_KIND_DIR` 严格一致）：
      | kind | 子目录 | 备注 |
      |---|---|---|
