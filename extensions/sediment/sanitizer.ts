@@ -36,18 +36,73 @@ const CREDENTIAL_PATTERNS: Array<{ name: string; re: RegExp }> = [
   { name: "openai_api_key", re: /\bsk-[A-Za-z0-9_-]{20,}\b/g },
   { name: "anthropic_api_key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}\b/g },
   { name: "github_token", re: /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g },
-  { name: "generic_secret_assignment", re: /\b(api[_-]?key|token|secret|password)\s*[:=]\s*['"]?[A-Za-z0-9_./+\-=]{16,}/gi },
+  // Round 8 P1 (opus R8 audit): keyword set expanded to include common
+  // aliases that were silently bypassing the gate:
+  //   - passwd / passphrase  — widely used in Linux/SSH contexts
+  //   - access[_-]?key       — AWS / GCP / Azure naming
+  //   - private[_-]?key      — "PRIVATE_KEY=..." assignment form
+  //   - client[_-]?secret    — OAuth 2 / OIDC
+  //   - bearer (Authorization header alias)
+  { name: "generic_secret_assignment", re: /\b(api[_-]?key|token|secret|password|passwd|passphrase|access[_-]?key|private[_-]?key|client[_-]?secret|bearer)\s*[:=]\s*['"]?[A-Za-z0-9_./+\-=]{16,}/gi },
   { name: "jwt_token", re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g },
   { name: "pem_private_key", re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/g },
   { name: "aws_access_key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  // Round 8 P1 (opus R8 audit): connection_url originally covered only
+  // a tiny list of DB/cache schemes. http(s) URLs with embedded basic-auth
+  // credentials (user:pass@host) leaked through. Now matches any scheme
+  // with `://user:pass@` syntax in addition to the explicit DB list.
   { name: "connection_url", re: /\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp|amqps):\/\/[^\s"'<>]{6,}/gi },
+  { name: "http_basic_auth_url", re: /\bhttps?:\/\/[^\s"'<>/:]+:[^\s"'<>@]+@[^\s"'<>]+/gi },
+  // Round 8 P1 (opus R8 audit): vendor-format tokens missing from R7:
+  //   - Bearer <token>: Authorization header form — widely pasted from
+  //     curl debug output / browser devtools
+  //   - xoxa/xoxb/xoxp/xoxr-... Slack tokens
+  //   - AIza... Google API keys (35 chars, dash + underscore allowed)
+  //   - sk_live_ / sk_test_ / pk_live_ / rk_live_... Stripe keys (underscore)
+  { name: "bearer_token", re: /\bBearer\s+[A-Za-z0-9._\-/+=]{20,}\b/g },
+  { name: "slack_token", re: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g },
+  { name: "google_api_key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
+  { name: "stripe_key", re: /\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{20,}\b/g },
 ];
+
+// Round 8 P1 (opus R8 audit): Unicode bypass shapes — zero-width spaces
+// and bidi/RTL overrides between e.g. `pass` and `word` defeat the
+// `\b` boundary and keyword tokenization. Strip these before matching
+// (NFKC also folds some homoglyph fullwidth chars, but does NOT fold
+// Cyrillic `ѕ` → Latin `s`; that would require a confusables map and
+// is out of scope here — documented as a known residual).
+const INVISIBLE_BYPASS_CHARS = /[\u200B-\u200D\u2060\u202A-\u202E\u00AD\uFEFF]/g;
 
 export function sanitizeForMemory(input: string): SanitizeResult {
   const replacements: string[] = [];
   let text = input;
 
+  // Round 8 P1 (opus R8 audit): pre-normalize for regex scanning so
+  // zero-width / bidi-control bypass forms don't dodge keyword matching.
+  // We normalize a SCAN buffer separately; the output (replacements'd)
+  // text retains its original codepoints, because users may legitimately
+  // care about preserving them in literature / non-credential content.
+  const scanText = input.normalize("NFKC").replace(INVISIBLE_BYPASS_CHARS, "");
+
   for (const pattern of CREDENTIAL_PATTERNS) {
+    pattern.re.lastIndex = 0;
+    if (pattern.re.test(scanText)) {
+      pattern.re.lastIndex = 0;
+      return {
+        ok: false,
+        error: `credential pattern detected: ${pattern.name}`,
+        replacements,
+      };
+    }
+    pattern.re.lastIndex = 0;
+  }
+
+  // Second pass on the original text (keyword formats that DON'T benefit
+  // from invisible-char stripping but still need credential gating). We
+  // already covered the major vendor formats above; this second loop is
+  // intentionally empty to avoid double-matching and inflating the cost.
+  // Reserved for future patterns that must inspect original codepoints.
+  for (const pattern of [] as Array<{ name: string; re: RegExp }>) {
     pattern.re.lastIndex = 0;
     if (pattern.re.test(text)) {
       pattern.re.lastIndex = 0;

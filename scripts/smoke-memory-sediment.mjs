@@ -688,6 +688,30 @@ END_MEMORY`;
       // Negative: ordinary IP/email/$HOME paths still must not match credential rules.
       const benign = sanitizeForMemory("user@example.com on 127.0.0.1 at /home/worker/projects");
       assert(benign.ok, `benign content should pass: ${JSON.stringify(benign)}`);
+
+      // Round 8 P1 (opus R8 audit): credential pattern coverage gaps.
+      // Each of these used to bypass the gate — now must hard-reject.
+      const bearer = sanitizeForMemory("curl -H 'Authorization: Bearer ya29.a0AfH6SMBxxxxxxxxxxxxxxxxxxxxxxx'");
+      assert(!bearer.ok && /bearer_token/.test(bearer.error || ""), `bearer_token must reject: ${JSON.stringify(bearer)}`);
+      const slackToken = "xox" + "b-12345678901-1234567890-AbCdEfGhIjKlMnOpQrStUvWx";
+      const slack = sanitizeForMemory(`slackbot config: ${slackToken}`);
+      assert(!slack.ok && /slack_token/.test(slack.error || ""), `slack_token must reject: ${JSON.stringify(slack)}`);
+      const google = sanitizeForMemory("GOOGLE_API_KEY=AIzaSyB1234567890ABCDEFGHIJKLMNOPQRSTUV");
+      assert(!google.ok && /(google_api_key|generic_secret_assignment)/.test(google.error || ""), `google_api_key must reject: ${JSON.stringify(google)}`);
+      const stripeKey = "sk" + "_live_4eC39HqLyjWDarjtT1zdp7dc";
+      const stripeLive = sanitizeForMemory(`STRIPE_SECRET_KEY=${stripeKey}`);
+      assert(!stripeLive.ok && /(stripe_key|generic_secret_assignment)/.test(stripeLive.error || ""), `stripe_key must reject: ${JSON.stringify(stripeLive)}`);
+      const httpAuth = sanitizeForMemory("clone: https://admin:hunter2@private.git.example.com/repo.git");
+      assert(!httpAuth.ok && /http_basic_auth_url/.test(httpAuth.error || ""), `http_basic_auth_url must reject: ${JSON.stringify(httpAuth)}`);
+      const passwd = sanitizeForMemory("server config: passwd: superSecretPassword12345");
+      assert(!passwd.ok && /generic_secret_assignment/.test(passwd.error || ""), `passwd keyword must reject: ${JSON.stringify(passwd)}`);
+
+      // Round 8 P1 (opus R8 audit): zero-width / bidi-control bypass
+      // forms must NOT defeat keyword scanning. Insert U+200B between
+      // "pass" and "word" — the original gate would lexically miss
+      // "password" because of the invisible char.
+      const zwsp = sanitizeForMemory("config\u200B: pass\u200Bword: superSecretPassword12345");
+      assert(!zwsp.ok && /generic_secret_assignment/.test(zwsp.error || ""), `zero-width-space bypass must still reject: ${JSON.stringify(zwsp)}`);
     }
 
     // compiledTruth body containing a bare `---` line gets escaped
@@ -2323,6 +2347,97 @@ This is a cross-project review pipeline body with enough content.
         }
 
         fs.rmSync(raceRoot, { recursive: true, force: true });
+      }
+
+      // --- Case h.7: writeAbrainWorkflow status enum validation (R8 P1) ---
+      //
+      // gpt-5.5 R8 audit: validateWorkflowDraft only checked
+      // `typeof status === "string"`, letting arbitrary strings land in
+      // the workflow's frontmatter. Now must reject status NOT in
+      // ENTRY_STATUSES.
+      {
+        const wfRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-wf-enum-"));
+        const wfBad = await writeAbrainWorkflow(
+          {
+            title: "Bad Status Workflow",
+            trigger: "on test",
+            body: "this body is long enough for workflow validation gate",
+            crossProject: true,
+            status: "deleted",  // not in ENTRY_STATUSES
+          },
+          { abrainHome: wfRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "workflow" } },
+        );
+        assert(wfBad.status === "rejected", `bad workflow status must reject, got: ${wfBad.status}`);
+        assert(
+          /status/i.test(wfBad.reason || "") || /validation/i.test(wfBad.reason || ""),
+          `bad workflow status rejection should mention validation, got: ${wfBad.reason}`,
+        );
+
+        // Positive: legitimate status enum value must succeed.
+        const wfOk = await writeAbrainWorkflow(
+          {
+            title: "Good Status Workflow",
+            trigger: "on test",
+            body: "this body is long enough for workflow validation gate",
+            crossProject: true,
+            status: "active",
+          },
+          { abrainHome: wfRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "workflow" } },
+        );
+        assert(wfOk.status === "created", `good workflow status should create: ${wfOk.status} / ${wfOk.reason}`);
+        fs.rmSync(wfRoot, { recursive: true, force: true });
+      }
+
+      // --- Case h.8: frontmatterPatch protected key denylist (R8 P1) ---
+      //
+      // gpt-5.5 R8 audit: updateProjectEntry used to let frontmatterPatch
+      // overwrite system-managed keys (id/scope/kind/status/confidence/etc).
+      // Now must throw an Error mentioning the protected key.
+      {
+        const denyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-fmpatch-deny-"));
+        const seed = await writeProjectEntry(
+          { title: "Patch Denylist Probe", kind: "fact", status: "active", confidence: 5, compiledTruth: "# Patch Denylist Probe\n\nsome body content here.", timelineNote: "seed", sessionId: "smoke-deny" },
+          { projectRoot: denyRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+        );
+        assert(seed.status === "created", `seed write should create: ${seed.status}`);
+
+        // Attempt to override `kind` (a protected key) via frontmatterPatch.
+        // The throw inside mergeUpdateMarkdown is caught by updateProjectEntry's
+        // lock-internal try/catch which converts it to status="rejected" +
+        // reason carrying the error message — NOT an awaited throw.
+        const denyKind = await updateProjectEntry(
+          "patch-denylist-probe",
+          { compiledTruth: "# Patch Denylist Probe\n\nupdated body content here.", sessionId: "smoke-deny", frontmatterPatch: { kind: "workflow" } },
+          { projectRoot: denyRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+        );
+        assert(denyKind.status === "rejected", `frontmatterPatch protected key 'kind' must be rejected, got: ${denyKind.status}`);
+        assert(
+          /protected key 'kind'/.test(denyKind.reason || ""),
+          `protected key rejection should mention 'kind', got reason: ${denyKind.reason}`,
+        );
+
+        // Bad key shape (newline injection attempt) must also be rejected.
+        const denyBadKey = await updateProjectEntry(
+          "patch-denylist-probe",
+          { compiledTruth: "# Patch Denylist Probe\n\nupdated body content here.", sessionId: "smoke-deny", frontmatterPatch: { "good\ninjected": "x" } },
+          { projectRoot: denyRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+        );
+        assert(denyBadKey.status === "rejected", `frontmatterPatch bad key shape must be rejected, got: ${denyBadKey.status}`);
+        assert(
+          /invalid characters/.test(denyBadKey.reason || ""),
+          `bad key shape rejection should mention invalid characters, got reason: ${denyBadKey.reason}`,
+        );
+
+        // Non-protected key still works (positive case).
+        const okPatch = await updateProjectEntry(
+          "patch-denylist-probe",
+          { compiledTruth: "# Patch Denylist Probe\n\nupdated body content here.", sessionId: "smoke-deny", frontmatterPatch: { tags: ["r8-smoke"] } },
+          { projectRoot: denyRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+        );
+        assert(okPatch.status === "updated", `non-protected frontmatterPatch should succeed: ${okPatch.status} / ${okPatch.reason}`);
+        const onDisk = fs.readFileSync(okPatch.path, "utf-8");
+        assert(/^tags:/m.test(onDisk), `non-protected patch should write 'tags:' to frontmatter; got: ${onDisk.slice(0, 400)}`);
+        fs.rmSync(denyRoot, { recursive: true, force: true });
       }
     }
 

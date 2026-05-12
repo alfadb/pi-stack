@@ -106,8 +106,14 @@ async function atomicWriteCheckpoint(projectRoot: string, file: CheckpointFile):
   const dest = checkpointPath(projectRoot);
   await fs.mkdir(path.dirname(dest), { recursive: true });
   const tmp = `${dest}.tmp-${process.pid}-${Date.now()}`;
-  await fs.writeFile(tmp, JSON.stringify(file, null, 2) + "\n", "utf-8");
-  await fs.rename(tmp, dest);
+  // Round 8 P1 (deepseek R8 audit): finally-cleanup tmp file so a crash
+  // between writeFile and rename doesn't leak `checkpoint.json.tmp-*`.
+  try {
+    await fs.writeFile(tmp, JSON.stringify(file, null, 2) + "\n", "utf-8");
+    await fs.rename(tmp, dest);
+  } finally {
+    await fs.unlink(tmp).catch(() => {});
+  }
 }
 
 /**

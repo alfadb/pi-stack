@@ -199,8 +199,13 @@ function pushEntryDetail(lines: string[], entry: MemoryEntry): void {
 async function atomicWrite(file: string, content: string) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const tmp = path.join(path.dirname(file), `.tmp-${path.basename(file)}-${process.pid}-${Date.now()}`);
-  await fs.writeFile(tmp, content, "utf-8");
-  await fs.rename(tmp, file);
+  // Round 8 P1 (deepseek R8 audit): finally-cleanup tmp file.
+  try {
+    await fs.writeFile(tmp, content, "utf-8");
+    await fs.rename(tmp, file);
+  } finally {
+    await fs.unlink(tmp).catch(() => {});
+  }
 }
 
 export async function rebuildMarkdownIndex(

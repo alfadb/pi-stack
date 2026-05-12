@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
-import { type EntryKind, type EntryStatus, validateProjectEntryDraft } from "./validation";
+import { type EntryKind, type EntryStatus, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
 import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
 import type { Jsonish } from "../memory/types";
@@ -398,6 +398,35 @@ function mergeUpdateMarkdown(
     ...triggerPhraseSanitizes.flatMap((s) => s.replacements),
   ];
 
+  // Round 8 P1 (gpt-5.5 R8 audit): `frontmatterPatch` was applied AFTER
+  // validateProjectEntryDraft, letting callers slip in arbitrary keys
+  // including the lifecycle-controlled ones (`id`, `scope`, `kind`,
+  // `status`, `confidence`, `schema_version`, `title`, `created`,
+  // `updated`). All in-repo callers (`mergeProjectEntries`,
+  // `supersedeProjectEntry`) only set relation keys (`derives_from`,
+  // `superseded_by`), so the current blast radius is theoretical — but
+  // the API contract leaves an obvious foot-gun if a future Lane G /
+  // curator path starts passing patches LLM-driven. Enforce a denylist
+  // of system-managed keys so the validator/lint contract is preserved.
+  const PROTECTED_FRONTMATTER_KEYS = new Set([
+    "id", "scope", "kind", "status", "confidence", "schema_version",
+    "title", "created", "updated",
+  ]);
+  const userPatch = patch.frontmatterPatch ?? {};
+  for (const k of Object.keys(userPatch)) {
+    if (PROTECTED_FRONTMATTER_KEYS.has(k)) {
+      throw new Error(
+        `frontmatterPatch cannot override protected key '${k}'. " +
+        "Use the dedicated WriteProjectEntryOptions field (e.g. status " +
+        "flows through ProjectEntryUpdateDraft.status) so validation runs.`,
+      );
+    }
+    // Also guard key shape (no newline/control chars in keys themselves):
+    if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(k)) {
+      throw new Error(`frontmatterPatch key contains invalid characters: ${JSON.stringify(k)}`);
+    }
+  }
+
   const nextFrontmatter: Record<string, Jsonish> = {
     ...frontmatter,
     id: frontmatter.id ?? `project:${projectSlug(projectRoot)}:${slug}`,
@@ -409,9 +438,9 @@ function mergeUpdateMarkdown(
     title: safeTitle,
     created: frontmatter.created ?? timestamp,
     updated: timestamp,
-    ...(patch.frontmatterPatch ?? {}),
+    ...userPatch,
   };
-  for (const [key, value] of Object.entries(patch.frontmatterPatch ?? {})) {
+  for (const [key, value] of Object.entries(userPatch)) {
     if (value === undefined) delete nextFrontmatter[key];
   }
   if (triggerPhrases) {
@@ -497,8 +526,17 @@ async function acquireLock(projectRoot: string, timeoutMs: number): Promise<Lock
 async function atomicWrite(file: string, content: string) {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const tmp = path.join(path.dirname(file), `.tmp-${path.basename(file)}-${process.pid}-${Date.now()}`);
-  await fs.writeFile(tmp, content, "utf-8");
-  await fs.rename(tmp, file);
+  // Round 8 P1 (deepseek R8 audit): if writeFile succeeds but rename
+  // throws (ENOSPC / EXDEV / fs full / EACCES), or if writeFile throws
+  // mid-write, the tmp file used to leak. Idempotent cleanup via finally
+  // catches both paths. Successful rename leaves nothing for unlink to do
+  // (ENOENT swallowed).
+  try {
+    await fs.writeFile(tmp, content, "utf-8");
+    await fs.rename(tmp, file);
+  } finally {
+    await fs.unlink(tmp).catch(() => { /* tmp already renamed or never written */ });
+  }
 }
 
 async function gitCommit(projectRoot: string, filePath: string, slug: string): Promise<string | null> {
@@ -1188,8 +1226,15 @@ function validateWorkflowDraft(draft: WorkflowDraft): Array<{ field: string; mes
       catch (e) { issues.push({ field: "projectId", message: (e as Error).message }); }
     }
   }
-  if (draft.status !== undefined && typeof draft.status !== "string") {
-    issues.push({ field: "status", message: "status must be a string" });
+  // Round 8 P1 (gpt-5.5 R8 audit): validate status against ENTRY_STATUSES
+  // enum, not just `typeof === "string"`. Previously any string would
+  // pass and land in YAML as `status: <whatever>`, producing entries that
+  // the read-side validator wouldn't recognize (and dual-read dedup
+  // tiebreak / search filters silently misbehave).
+  if (draft.status !== undefined) {
+    if (typeof draft.status !== "string" || !(ENTRY_STATUSES as readonly string[]).includes(draft.status)) {
+      issues.push({ field: "status", message: `status must be one of: ${ENTRY_STATUSES.join(", ")}` });
+    }
   }
   return issues;
 }
