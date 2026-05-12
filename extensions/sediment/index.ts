@@ -662,7 +662,13 @@ export default function (pi: ExtensionAPI) {
                         signal: undefined,
                         correlationId: corrId,
                       });
-                      // ... audit + notify (same as main bg path) ...
+                      // Round 8 P1 (sonnet R8 audit fix): drain loop now
+                      // writes audit rows for ALL outcomes (wrote /
+                      // ineligible / llm_skip / llm_error / threw),
+                      // mirroring main bg path. Previously only `wrote`
+                      // produced an audit row — every other outcome was
+                      // silent, leaving operators with no forensic trail
+                      // for drain failures.
                       if (auto.kind === "wrote") {
                         await appendAudit(cwd, {
                           operation: "auto_write",
@@ -681,6 +687,7 @@ export default function (pi: ExtensionAPI) {
                           raw_text_truncated: auto.rawTextTruncated,
                           checkpoint_advanced: true,
                           background_async: true,
+                          drain: true,
                         });
                         const compact = compactResultSummary(auto.results);
                         applySedimentStatus(
@@ -690,6 +697,22 @@ export default function (pi: ExtensionAPI) {
                           compact,
                         );
                       } else {
+                        // R8 P1-A fix: was silent. Now record skip with
+                        // reason so drain-only failures (network blips,
+                        // model unavailable) don't disappear from audit.
+                        await appendAudit(cwd, {
+                          operation: "skip",
+                          lane: "auto_write",
+                          session_id: sessionId,
+                          ...checkpointSummary(win),
+                          extractor: "llm_extractor",
+                          parser_version: PARSER_VERSION,
+                          settings_snapshot: settingsSnapshot,
+                          correlation_id: corrId,
+                          reason: auto.kind,
+                          background_async: true,
+                          drain: true,
+                        }).catch(() => { /* best-effort: don't break drain on audit failure */ });
                         applySedimentStatus(
                           setStatus,
                           sessionId,
@@ -698,6 +721,20 @@ export default function (pi: ExtensionAPI) {
                         );
                       }
                     } catch (err: any) {
+                      // R8 P1-A fix: was silent (just setStatus failed).
+                      // Now also write an audit row so post-mortem can
+                      // see the error message + correlation id.
+                      await appendAudit(cwd, {
+                        operation: "skip",
+                        lane: "auto_write",
+                        session_id: sessionId,
+                        ...checkpointSummary(win),
+                        correlation_id: corrId,
+                        reason: "drain_threw",
+                        error: err?.message ? String(err.message).slice(0, 200) : String(err).slice(0, 200),
+                        background_async: true,
+                        drain: true,
+                      }).catch(() => {});
                       applySedimentStatus(
                         setStatus,
                         sessionId,
@@ -712,9 +749,36 @@ export default function (pi: ExtensionAPI) {
                   })();
                   autoWriteInFlight.set(sessionId, bg);
                 })
-                .catch(() => {});
+                .catch((err: unknown) => {
+                  // R8 P1 (deepseek): saveSessionCheckpoint failures used
+                  // to be silent. Surface as audit + status so drain
+                  // doesn't die invisibly when checkpoint disk is wedged.
+                  const message = err instanceof Error ? err.message : String(err);
+                  appendAudit(cwd, {
+                    operation: "skip",
+                    lane: "auto_write",
+                    session_id: sessionId,
+                    reason: "drain_checkpoint_save_failed",
+                    error: message.slice(0, 200),
+                    drain: true,
+                  }).catch(() => {});
+                  applySedimentStatus(setStatus, sessionId, "failed", `cp_save: ${message.slice(0, 40)}`);
+                });
             })
-            .catch(() => {});
+            .catch((err: unknown) => {
+              // R8 P1 (deepseek): loadSessionCheckpoint failures (corrupt
+              // JSON / EACCES / disk full) used to be silent.
+              const message = err instanceof Error ? err.message : String(err);
+              appendAudit(cwd, {
+                operation: "skip",
+                lane: "auto_write",
+                session_id: sessionId,
+                reason: "drain_checkpoint_load_failed",
+                error: message.slice(0, 200),
+                drain: true,
+              }).catch(() => {});
+              applySedimentStatus(setStatus, sessionId, "failed", `cp_load: ${message.slice(0, 40)}`);
+            });
         };
 
         if (autoWriteInFlight.has(sessionId)) {

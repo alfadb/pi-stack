@@ -1392,6 +1392,22 @@ This is a cross-project review pipeline body with enough content.
       assert(/^chore: migrate \.pensieve → ~\/\.abrain\/projects\/test-project/m.test(parentLog), `parent commit message mismatch:\n${parentLog}`);
       assert(result.parentCommitSha && /^[0-9a-f]{40}$/.test(result.parentCommitSha), `parent commit sha invalid: ${result.parentCommitSha}`);
 
+      // Round 8 P1 (sonnet R8 audit fix): a single migrate_go audit row
+      // must be written to ~/.abrain/.state/sediment/audit.jsonl with
+      // per-entry source→target mapping (first 200 entries), so crash
+      // mid-migration leaves forensic trail.
+      const migAuditPath = path.join(goAbrain, ".state", "sediment", "audit.jsonl");
+      assert(fs.existsSync(migAuditPath), `migrate_go audit log must exist at ${migAuditPath}`);
+      const migAuditRows = fs.readFileSync(migAuditPath, "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
+      const migRow = migAuditRows.find((r) => r.operation === "migrate_go" && r.projectId === "test-project");
+      assert(migRow, `migrate_go audit row missing; rows=${migAuditRows.map((r) => r.operation).join(",")}`);
+      assert(migRow.movedCount === result.movedCount, `audit movedCount mismatch: ${migRow.movedCount} vs result ${result.movedCount}`);
+      assert(migRow.workflowCount === result.workflowCount, `audit workflowCount mismatch: ${migRow.workflowCount} vs result ${result.workflowCount}`);
+      assert(Array.isArray(migRow.entries) && migRow.entries.length > 0, `audit entries array missing`);
+      assert(migRow.entries.every((e) => e.source && e.action), `audit entries must each carry source+action; got=${JSON.stringify(migRow.entries[0])}`);
+      assert(migRow.parentPreSha === result.parentPreSha, `audit parentPreSha mismatch`);
+      assert(migRow.lane === "system", `audit lane should be 'system' for migration meta event, got: ${migRow.lane}`);
+
       // 10) Abrain repo commit: workflows commit themselves individually +
       // the migrate(in) commit captures knowledge entries.
       const abrainLog = execFileSync("git", ["-C", goAbrain, "log", "--pretty=%s"], { encoding: "utf-8" });

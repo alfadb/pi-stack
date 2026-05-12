@@ -21,6 +21,7 @@ import { clamp, normalizeBareSlug, prettyPath, slugify, titleFromSlug, throwIfAb
 import {
   abrainProjectDir,
   abrainProjectWorkflowsDir,
+  abrainSedimentAuditPath,
   abrainWorkflowsDir,
   canonicalizeGitRemote,
   formatLocalIsoTimestamp,
@@ -918,6 +919,50 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
     migratedAt: migrationTimestamp,
     projectId,
   });
+  // Round 8 P1 (sonnet R8 audit fix): write a single migration audit row
+  // to the abrain-side sediment audit log so post-migration forensics
+  // can reconstruct "which entries came from which project's .pensieve
+  // at what time". Previously the only persisted migration trail was the
+  // parent + abrain git commit messages (entry-count only, no per-entry
+  // source→target mapping). Crashes mid-migration left no jsonl record
+  // of which entries were already written. Best-effort: if audit append
+  // fails (ENOSPC etc), do NOT block the migration return — the abrain
+  // git history still has the canonical truth.
+  try {
+    const auditPath = abrainSedimentAuditPath(abrainHome);
+    await fs.mkdir(path.dirname(auditPath), { recursive: true });
+    const row = {
+      timestamp: migrationTimestamp,
+      operation: "migrate_go",
+      lane: "system",
+      projectId,
+      projectIdSource: pre.projectIdSource,
+      parentRepoRoot,
+      abrainProjectDir: projectAbrainDir,
+      movedCount,
+      workflowCount,
+      skippedCount,
+      failedCount,
+      parentPreSha: pre.parentPreSha ?? null,
+      abrainPreSha: pre.abrainPreSha ?? null,
+      // Per-entry mapping. Limit to avoid huge audit lines on giant
+      // migrations — first 200 entries inline, rest summarized by count.
+      entries: entries.slice(0, 200).map((e) => ({
+        source: e.source,
+        target: e.target,
+        slug: e.slug,
+        kind: e.kind,
+        route: e.route,
+        action: e.action,
+        ...(e.reason ? { reason: e.reason } : {}),
+      })),
+      entries_total: entries.length,
+      entries_truncated: entries.length > 200,
+    };
+    await fs.appendFile(auditPath, JSON.stringify(row) + "\n", "utf-8");
+  } catch {
+    // best-effort — audit failure does not abort migration
+  }
   const parentCommitSha = await gitCommitAll(
     parentRepoRoot,
     `chore: migrate .pensieve → ~/.abrain/projects/${projectId} (${movedCount + workflowCount} entries)`,
