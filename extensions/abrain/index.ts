@@ -1085,8 +1085,20 @@ async function handleSecret(args: string, ui: { notify(message: string, type?: s
     try {
       const result = await forgetSecret(ABRAIN_HOME, resolved.scope, key);
       const label = scopeReadableLabel(resolved.scope);
-      if (result.removed) ui.notify(`/secret forget: removed ${label}:${key}`, "info");
-      else ui.notify(`/secret forget: ${label}:${key} was not present (no-op, audit row recorded)`, "info");
+      // Round 7 P0 (gpt-5.5): forget outcome is tri-state. "absent" is a
+      // no-op; "removed" is success; "removal_failed" means the encrypted
+      // file is still on disk and plaintext is still recoverable — must
+      // NOT be reported as no-op.
+      if (result.status === "removed") {
+        ui.notify(`/secret forget: removed ${label}:${key}`, "info");
+      } else if (result.status === "absent") {
+        ui.notify(`/secret forget: ${label}:${key} was not present (no-op, audit row recorded)`, "info");
+      } else {
+        ui.notify(
+          `/secret forget FAILED: ${label}:${key} encrypted file is still on disk; plaintext remains recoverable. Reason: ${result.error}. Audit row 'forget_failed' written.`,
+          "warning",
+        );
+      }
     } catch (err: any) {
       ui.notify(`/secret forget failed: ${err.message}`, "warning");
     }

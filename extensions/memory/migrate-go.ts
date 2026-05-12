@@ -679,13 +679,22 @@ function buildNormalizedBody(
   main = main.replace(/^---$/gm, " ---");
   if (!/^#\s+/m.test(main)) main = `# ${title}\n\n${main}`;
   const tlLines = ["## Timeline", ""];
-  tlLines.push(`- ${migrationTimestamp} | migration | migrated-from-legacy | one-shot per-repo migration to abrain projects substrate`);
+  // Round 7 P0 (sonnet audit fix): legacy timeline rows come first (oldest
+  // first), then the migration meta-row last (newest). Previously the
+  // migration row was pushed BEFORE the legacy rows, producing reverse-
+  // chronological output:
+  //   - 2026-05-12T... | migration | migrated-from-legacy   ← NEWEST first (wrong)
+  //   - 2026-05-08      | smoke | captured | ok               ← OLDER second
+  // That tripped lint T5 chronological-order warning on every migrated
+  // entry with a non-empty legacy timeline, and made LLM stage-2 rerank
+  // read the migration meta as "most recent state".
   for (const line of timeline) {
     const trimmed = line.trim();
     if (trimmed.length === 0) continue;
     // existing lines already start with `- ts | ...`; keep verbatim
     tlLines.push(trimmed.startsWith("- ") ? trimmed : `- ${trimmed}`);
   }
+  tlLines.push(`- ${migrationTimestamp} | migration | migrated-from-legacy | one-shot per-repo migration to abrain projects substrate`);
   return `${main.trim()}\n\n${tlLines.join("\n")}`;
 }
 

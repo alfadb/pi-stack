@@ -220,6 +220,7 @@ export type VaultEventOp =
   | "create"
   | "rotate"
   | "forget"
+  | "forget_failed"
   | "recovered_missing_audit"
   | "release"
   | "release_denied"
@@ -251,6 +252,10 @@ export interface VaultEvent {
   variables?: Array<{ varName: string; scopeKey: string }>;
   /** Read-path: truncated bash command preview — variable refs only, never plaintext. */
   command_preview?: string;
+  /** `forget_failed` op carries the underlying errno chain (shred + unlink).
+   *  Plaintext is NOT involved — this is the OS error string, not the
+   *  secret. Round 7 P0 (gpt-5.5 audit fix). */
+  error?: string;
 }
 
 /**
@@ -535,7 +540,21 @@ export function listSecrets(abrainHome: string, scope: VaultScope): ListSecretsR
  * 'forget' row to _meta/<key>.md timeline; append 'forget' row to vault-events.
  * The _meta file is RETAINED so audit history persists.
  */
-export async function forgetSecret(abrainHome: string, scope: VaultScope, key: string): Promise<{ removed: boolean }> {
+/** Round 7 P0 (gpt-5.5 audit fix): forget outcome is tri-state.
+ *  - `removed`: encrypted file deleted (shred or fallback unlink succeeded)
+ *  - `absent`: no encrypted file existed to begin with (clean no-op)
+ *  - `removal_failed`: encrypted file exists but both shred and unlink
+ *    threw / failed (errno=EACCES, EBUSY, read-only fs, kernel lock). The
+ *    plaintext is still recoverable by anyone with the recipient key.
+ *  Previously this returned `{ removed: false }` indiscriminately for both
+ *  "absent" and "removal_failed" — the handler then reported "was not
+ *  present (no-op)", a serious security misreport. */
+export type ForgetOutcome =
+  | { status: "removed" }
+  | { status: "absent" }
+  | { status: "removal_failed"; error: string };
+
+export async function forgetSecret(abrainHome: string, scope: VaultScope, key: string): Promise<ForgetOutcome> {
   validateKey(key);
 
   const vaultDir = vaultDirForScope(abrainHome, scope);
@@ -546,36 +565,67 @@ export async function forgetSecret(abrainHome: string, scope: VaultScope, key: s
   try {
     lock = await acquireLock(lockFile);
 
-    let removed = false;
-    if (fs.existsSync(encryptedPath)) {
-      // attempt shred; fall back to unlink
+    let outcome: ForgetOutcome;
+    if (!fs.existsSync(encryptedPath)) {
+      outcome = { status: "absent" };
+    } else {
+      // attempt shred; fall back to unlink. Capture root-cause errors.
+      let shredErr: string | null = null;
+      let unlinkErr: string | null = null;
       try {
         await new Promise<void>((res, rej) => {
           const c = spawn("shred", ["-u", encryptedPath], { stdio: "ignore" });
           c.on("error", rej);
           c.on("close", (code) => code === 0 ? res() : rej(new Error(`shred exit ${code}`)));
         });
-        removed = !fs.existsSync(encryptedPath);
-      } catch {
-        try { fs.unlinkSync(encryptedPath); removed = true; } catch { /* ignore */ }
+      } catch (e: unknown) {
+        shredErr = e instanceof Error ? e.message : String(e);
+      }
+      // Whether shred succeeded or not, double-check file is gone. If shred
+      // succeeded the file is shredded+unlinked; if it failed we try plain
+      // unlink as fallback.
+      if (fs.existsSync(encryptedPath)) {
+        try { fs.unlinkSync(encryptedPath); } catch (e: unknown) {
+          unlinkErr = e instanceof Error ? e.message : String(e);
+        }
+      }
+      if (fs.existsSync(encryptedPath)) {
+        // Both attempts left the file in place — plaintext still recoverable.
+        outcome = {
+          status: "removal_failed",
+          error: [shredErr && `shred: ${shredErr}`, unlinkErr && `unlink: ${unlinkErr}`]
+            .filter(Boolean).join("; ") || "unknown removal failure",
+        };
+      } else {
+        outcome = { status: "removed" };
       }
     }
 
     const ts = new Date().toISOString();
     const scopeStr = scope === "global" ? "global" : `project:${scope.project}`;
 
-    // append _meta timeline (file should exist; if not, this throws which is fine)
-    if (fs.existsSync(metaFilePath(vaultDir, key))) {
-      appendMetaTimeline(vaultDir, key, {
-        ts, op: "forgotten", scope: scopeStr, by: process.env.USER ?? "unknown",
+    // Only write "forgotten" timeline + "forget" audit when the encrypted
+    // file is actually gone (status === "removed" or "absent"). On
+    // removal_failed we write a distinct `forget_failed` audit row so the
+    // attempt is captured but downstream tooling doesn't conflate it with
+    // a successful forget.
+    if (outcome.status === "removed" || outcome.status === "absent") {
+      if (fs.existsSync(metaFilePath(vaultDir, key))) {
+        appendMetaTimeline(vaultDir, key, {
+          ts, op: "forgotten", scope: scopeStr, by: process.env.USER ?? "unknown",
+        });
+      }
+      await appendVaultEvent(abrainHome, {
+        ts, op: "forget", scope: scopeStr, key,
       });
+    } else {
+      // removal_failed: audit the attempt, do NOT mark forgotten.
+      await appendVaultEvent(abrainHome, {
+        ts, op: "forget_failed", scope: scopeStr, key, error: outcome.error,
+      } as VaultEvent);
     }
 
-    await appendVaultEvent(abrainHome, {
-      ts, op: "forget", scope: scopeStr, key,
-    });
-
-    return { removed };
+    return outcome;
   } finally {
     if (lock) lock.release();
   }

@@ -1305,6 +1305,25 @@ This is a cross-project review pipeline body with enough content.
       assert(/^id: project:test-project:test-rule$/m.test(modernText), `modern id mismatch:\n${modernText}`);
       assert(/^kind: maxim$/m.test(modernText), `modern kind preserved`);
       assert(/migrated-from-legacy/.test(modernText), `modern entry should also gain migration timeline marker`);
+      // Round 7 P0-B (sonnet audit fix): legacy timeline rows must appear
+      // BEFORE the migration meta-row (chronological order). The modern
+      // fixture (makeEntry) has a single legacy row `- 2026-05-08 | smoke
+      // | captured | ok` followed by the migration row; verify ordering.
+      {
+        const tlSection = modernText.split(/^## Timeline\s*$/m)[1] || "";
+        const lines = tlSection.split("\n").filter((l) => l.startsWith("- "));
+        assert(lines.length >= 2, `modern entry should have at least 2 timeline rows after migration, got: ${JSON.stringify(lines)}`);
+        // First non-empty timeline row must be the legacy smoke row (oldest).
+        assert(
+          /smoke \| captured \| ok/.test(lines[0]),
+          `legacy timeline row should come FIRST (oldest), got: ${lines[0]}`,
+        );
+        // Last timeline row must be the migration meta-row (newest).
+        assert(
+          /migrated-from-legacy/.test(lines[lines.length - 1]),
+          `migration meta-row should come LAST (newest), got: ${lines[lines.length - 1]}`,
+        );
+      }
 
       // 7) Pipeline routing: project-specific → ~/.abrain/projects/<id>/workflows/
       const wfProj = path.join(goAbrain, "projects", "test-project", "workflows", "run-when-coding.md");

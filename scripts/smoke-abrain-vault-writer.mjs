@@ -262,7 +262,7 @@ await check("forgetSecret: removes encrypted file but keeps _meta", async () => 
   const { home } = freshAbrainHome();
   await vw.writeSecret({ abrainHome: home, scope: "global", key: "victim", value: "delete-me" });
   const result = await vw.forgetSecret(home, "global", "victim");
-  if (!result.removed) throw new Error("forget should report removed=true");
+  if (result.status !== "removed") throw new Error(`forget should report status=removed, got: ${JSON.stringify(result)}`);
   if (fs.existsSync(path.join(home, "vault", "victim.md.age"))) throw new Error("encrypted file still exists");
   if (!fs.existsSync(path.join(home, "vault", "_meta", "victim.md"))) throw new Error("_meta should be retained");
 });
@@ -362,12 +362,59 @@ await check("forgetSecret: idempotent on already-forgotten key (no encrypted fil
   const { home } = freshAbrainHome();
   await vw.writeSecret({ abrainHome: home, scope: "global", key: "k", value: "v" });
   await vw.forgetSecret(home, "global", "k");
-  // Second forget should not throw, but should record an audit row
+  // Second forget should not throw; status flips from "removed" to "absent"
+  // and still records a forget audit row.
   const result = await vw.forgetSecret(home, "global", "k");
-  if (result.removed) throw new Error("second forget should NOT report removed");
+  if (result.status !== "absent") throw new Error(`second forget should report status=absent, got: ${JSON.stringify(result)}`);
   const events = fs.readFileSync(path.join(home, ".state", "vault-events.jsonl"), "utf8").split("\n").filter(Boolean).map(JSON.parse);
   const forgetCount = events.filter((e) => e.op === "forget" && e.key === "k").length;
   if (forgetCount !== 2) throw new Error(`expected 2 forget events, got ${forgetCount}`);
+});
+
+// Round 7 P0-A (gpt-5.5 audit fix): tri-state outcome. When the encrypted
+// path exists but neither shred -u nor fs.unlinkSync can delete it (e.g.
+// because the path is actually a directory — EISDIR is a portable POSIX
+// errno that doesn't require root or chattr), forgetSecret must NOT
+// report success; it must NOT write a "forgotten" _meta timeline row,
+// and must write a distinct `forget_failed` audit row.
+await check("forgetSecret: removal_failed when encrypted path cannot be deleted", async () => {
+  const { home } = freshAbrainHome();
+  // Pre-create _meta so the timeline can be inspected after the failed
+  // forget attempt (writeSecret would normally create it, but we replace
+  // the encrypted file with a directory so writeSecret isn't usable here).
+  await vw.writeSecret({ abrainHome: home, scope: "global", key: "locked", value: "v" });
+  const vaultDir = path.join(home, "vault");
+  const encryptedPath = path.join(vaultDir, "locked.md.age");
+  // Replace the .md.age file with a directory containing a child file so
+  // both `shred -u <path>` and `fs.unlinkSync(<path>)` fail with EISDIR
+  // (or ENOTEMPTY/EBUSY — anything non-deleting). The parent vault dir
+  // remains writable, so acquireLock still succeeds; we exercise ONLY the
+  // shred-then-unlink failure path.
+  fs.unlinkSync(encryptedPath);
+  fs.mkdirSync(encryptedPath);
+  fs.writeFileSync(path.join(encryptedPath, "child.txt"), "so-rmdir-also-fails");
+  const result = await vw.forgetSecret(home, "global", "locked");
+  if (result.status !== "removal_failed") throw new Error(`expected status=removal_failed, got: ${JSON.stringify(result)}`);
+  if (!result.error) throw new Error("removal_failed must carry root-cause error string");
+  // The encrypted path must still exist on disk.
+  if (!fs.existsSync(encryptedPath)) {
+    throw new Error("removal_failed but encrypted path was actually deleted — inconsistent");
+  }
+  // _meta MUST NOT have a "forgotten" timeline row (the secret isn't forgotten).
+  const metaText = fs.readFileSync(path.join(vaultDir, "_meta", "locked.md"), "utf8");
+  if (/\| forgotten \|/.test(metaText)) {
+    throw new Error("removal_failed but _meta timeline shows 'forgotten' — false success report");
+  }
+  // vault-events MUST have forget_failed, NOT forget.
+  const events = fs.readFileSync(path.join(home, ".state", "vault-events.jsonl"), "utf8")
+    .split("\n").filter(Boolean).map(JSON.parse);
+  const failed = events.filter((e) => e.op === "forget_failed" && e.key === "locked");
+  const succeeded = events.filter((e) => e.op === "forget" && e.key === "locked");
+  if (failed.length !== 1) throw new Error(`expected 1 forget_failed row, got ${failed.length}`);
+  if (succeeded.length !== 0) throw new Error(`expected 0 forget rows for failed removal, got ${succeeded.length}`);
+  if (!failed[0].error) throw new Error("forget_failed row should carry error string");
+  // Cleanup so the test harness can rm -rf.
+  fs.rmSync(encryptedPath, { recursive: true, force: true });
 });
 
 // ── 7. flock concurrency ────────────────────────────────────────
