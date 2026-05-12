@@ -120,9 +120,11 @@ Stage 2 (精排，可配模型，默认 deepseek-v4-flash，thinking=off)：
 
 graceful degradation 原则（memory-architecture.md §3 第 8 条）**显式让位于准确度**——这是设计选择，不是 bug。
 
-### D6. 不缓存
+### D6. 不做 result-level 缓存
 
-同 5 分钟内重复 query 不复用前次结果。理由：sediment 高频写入，cache 反而误（刚写入的 entry 不在 cache 里）。每次重读 `_index.md`（~30k token I/O，ms 级）。
+同 5 分钟内重复 query **不复用前次的最终 stage 2 返回结果**（slug 列表 + score）。理由：sediment 高频写入，result cache 反而误导（刚写入的 entry 不在 cache 里，但它应该被召回）。每次重读 `_index.md`（~30k token I/O，ms 级）。
+
+本决策仅关 result-level cache。provider-side prompt KV cache 是另一层，在 [D9](#d9-provider-side-prefix-kv-cache-主动优化) 中主动优化（不矛盾：同一份 `_index.md` 作为 prefix 可被 provider KV 复用，不影响“刚写入的 entry 被召回”语义）。
 
 ### D8. 新鲜度与时间精度
 
@@ -150,6 +152,51 @@ sediment 新写入的 `created` / `updated` / timeline 时间戳改为本地 ISO
 ### D7. 副作用：为 sediment curator 解决 D6 自重复提供 lookup 内核
 
 ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment curator 在 create 前调 `memory_search("找与这个候选知识语义相关、可能应被更新/合并/跳过的旧条目：...")`，LLM 返回相关旧 entry 及 timeline/freshness 证据。ADR 0016 进一步修正：目标不是把语义近邻简化成 `duplicate => reject`，而是让 curator 输出 update/merge/skip/create 等 operation，从 append-only 转向知识自我演化。
+
+### D9. provider-side prefix KV cache 主动优化
+
+**决策**：Stage 1 / Stage 2 prompt 采用 **instructions-first / index-first ordering**，主动让支持 prefix-level KV cache 的 provider（Anthropic / OpenAI / DeepSeek 都支持不同程度）复用上一次 call 的前缀 tokens。
+
+**实现位置**：
+- Stage 1：`extensions/memory/llm-search.ts` `makeStage1Prompt`——instructions 块及 `_index.md` 放在 query 之前。
+- Stage 2：`extensions/memory/llm-search.ts` `makeStage2Prompt:242-275`——instructions 块（约 1K tokens）固定列首，candidates 和 query 可变但 prefix 仍可被缓存。
+
+**与 D6 的关系**：
+- D6 关的是 **result cache**（“5 分钟内同 query 复用上次返回的 slug 列表”）——锁闭，避免 sediment 刚写入的条目不被召回。
+- D9 开的是 **prompt KV cache**（“provider 看到相同 prefix tokens 复用 attention KV”）——主动优化，减少 input token 计费与延迟。
+- 两者不矛盾：provider KV cache 复用的是 “token 序列的计算结果”而不是 “LLM 输出的 slug”；sediment 刚写入的 entry 会出现在新的 `_index.md` 里，LLM 还是会看到它并被召回。
+
+**可观测性**：cache hit/write tokens 被记到 D10 描述的 `search-metrics.jsonl`（`s1.hit / s1.write / s2.hit / s2.write`），供 alfadb 调优 stage1/2 model 选型时作依据。
+
+### D10. search-metrics.jsonl 可观测性
+
+**决策**：每次 `memory_search` 调用追加一行 JSON 到 `<project>/.pi-astack/memory/search-metrics.jsonl`（`extensions/memory/llm-search.ts` `logSearchMetrics:9-18` + `extensions/_shared/runtime.ts` `memorySearchMetricsPath:94-96`）。
+
+**状态**：experimental。schema 未冻结，以 `llm-search.ts` `logSearchMetrics` 实际写入字段为准。当前实现（`llm-search.ts:514-521`）：
+
+```jsonl
+{
+  "ts":      "2026-05-12T03:14:15.926Z",   // ISO timestamp
+  "query":   "找关于 XXX 的 durable rule",     // 前 80 字符
+  "s1":      { "in": <n>, "out": <n>, "hit"?: <n>, "write"?: <n> } | null,
+  "s2":      { "in": <n>, "out": <n>, "hit"?: <n>, "write"?: <n> } | null,
+  "results": <n>                              // 最终返回 slug 数
+}
+```
+
+- `hit` / `write` 字段仅在 provider 返回 cache 元数据时出现：
+  - Anthropic：`cacheRead = cache_read_input_tokens` / `cacheWrite = cache_creation_input_tokens`
+  - OpenAI：`cacheRead = input_tokens_details.cached_tokens` / `cacheWrite = 0`（不报 write）
+  - DeepSeek：pi-ai 包装读不到则两个字段省略
+- 写入是 best-effort（写入失败静默 swallow），不影响 search 主路径
+- 读存放目录权限 0o700，文件 ignored by git（`.pi-astack/` 顶层）
+
+**用途**：
+- 诊断：cache hit 率过低 → prompt 顺序 / stage1 model 变动过频
+- 成本：加总 input/output token 估算某项目的 search 月成本
+- 实验：调 stage1Model / stage2Model 后对比指标变化
+
+**未决**：schema 是否 冻结、是否应该提供 `pi memory metrics-summary` 之类的 CLI 聚合工具 —— 保留为开放问题，等 alfadb 使用一段时间后决定。
 
 ## 实施路线
 

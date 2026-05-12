@@ -1,11 +1,11 @@
 # ADR 0010 — sediment 单 agent + lookup tools 写入策略（v6.6，v6.8 仍用）
 
-- **状态**: Accepted。**核心思想保留，tools 已过时**（2026-05-07/2026-05-11）— 单 agent + lookup tools 的 sediment 内核被 [memory-architecture.md](../memory-architecture.md) 与 ADR 0016 继承。但 lookup tools 从 `gbrain_search/get` 变为 `memory_search/get`，写入从 `gbrain put` 变为 sediment 内部 writer substrate（create/update/merge/archive/supersede/delete/skip），不暴露 LLM-facing 写工具。本 ADR 的 markdown 终结符协议（SKIP / SKIP_DUPLICATE / ## GBRAIN）需适配为新的 frontmatter + compiled truth + ## Timeline 格式。
+- **状态**: Accepted (evolved 2026-05-10)。单-agent 内核保留并由 [ADR 0016](0016-sediment-as-llm-curator.md) 继承为 LLM curator；lookup-tools loop 内核由 [ADR 0015](0015-memory-search-llm-driven-retrieval.md) D7 落地为 curator dedup（create 前调 `memory_search` 识别语义近邻）；markdown 终结符协议（SKIP / SKIP_DUPLICATE / ## GBRAIN）已被 frontmatter + compiled truth + `## Timeline` 格式取代。写入 substrate 从 `gbrain put` 转为 sediment 内部 writer（create/update/merge/archive/supersede/delete/skip），不暴露 LLM-facing 写工具。
 - **日期**: 2026-05-06
 - **决策者**: alfadb
 - **替代**: ADR 0004（v6.5 三模型投票方案）
 - **依赖**: ADR 0002（superseded by memory-architecture.md）/ ADR 0003（主会话只读）/ ADR 0009（multi-agent 自由化，但 sediment 不再借用）
-- **互补**: ADR 0012（v6.8 双 target 架构）
+- **互补**: ~~ADR 0012（v6.8 双 target，已 superseded by memory-architecture.md）~~ → ADR 0015（lookup-tools loop 落地） + ADR 0016（curator 决策模型：create/update/merge/archive/supersede/delete/skip）
 
 ## 背景
 
