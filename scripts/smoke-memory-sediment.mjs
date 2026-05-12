@@ -1697,6 +1697,139 @@ This is a cross-project review pipeline body with enough content.
       assert(/Will Collide \(existing\)/.test(existingText), `pre-existing colliding entry must not be overwritten: ${existingText.slice(0, 120)}`);
     }
 
+    // (g) Stale-lock reclaim: verify both writer locks recover when the
+    //     previous holder crashed without releasing. Round 5 audit
+    //     (deepseek-v4-pro) found that acquireLock + acquireAbrainWorkflow-
+    //     Lock had no reclaim path — a kill -9 mid-write caused permanent
+    //     deadlock until manual `rm sediment.lock`.
+    //
+    //     Test matrix (each lock):
+    //       - stale lock (mtime > SEDIMENT_LOCK_STEAL_AFTER_MS=30s) → reclaimed, write succeeds
+    //       - fresh lock (mtime < 30s) → NOT reclaimed, write times out
+    {
+      const gParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-stale-lock-parent-"));
+      execFileSync("git", ["-C", gParent, "init", "-q"]);
+      execFileSync("git", ["-C", gParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", gParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", gParent, "config", "commit.gpgsign", "false"]);
+      execFileSync("git", ["-C", gParent, "commit", "-q", "--allow-empty", "-m", "init"]);
+
+      const gAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-stale-lock-abrain-"));
+      execFileSync("git", ["-C", gAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", gAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", gAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", gAbrain, "config", "commit.gpgsign", "false"]);
+      execFileSync("git", ["-C", gAbrain, "commit", "-q", "--allow-empty", "-m", "init"]);
+
+      const lockSettings = { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false, lockTimeoutMs: 1000 };
+
+      // --- Case g.1: stale sediment.lock (project side) gets reclaimed ---
+      {
+        const sedimentLockPath = path.join(gParent, ".pi-astack", "sediment", "locks", "sediment.lock");
+        fs.mkdirSync(path.dirname(sedimentLockPath), { recursive: true });
+        fs.writeFileSync(sedimentLockPath, JSON.stringify({ pid: 999999, created_at: "2026-05-12T00:00:00.000+08:00" }));
+        // Set mtime to 60s ago (well past the 30s SEDIMENT_LOCK_STEAL_AFTER_MS).
+        const past = (Date.now() - 60_000) / 1000;
+        fs.utimesSync(sedimentLockPath, past, past);
+
+        const w = await writeProjectEntry(
+          { title: "Stale Lock Reclaim Test", kind: "maxim", confidence: 5, compiledTruth: "This validates that a crashed-holder sediment.lock is reclaimed after the steal-after threshold." },
+          { projectRoot: gParent, settings: lockSettings, dryRun: false },
+        );
+        assert(w.status === "created" || w.status === "updated", `stale sediment.lock should be reclaimed, got status=${w.status} reason=${w.reason}`);
+      }
+
+      // --- Case g.2: fresh sediment.lock blocks write (timeout) ---
+      // Note: writeProjectEntry catches lock-timeout internally and returns
+      // status:"rejected" + reason containing the timeout message, rather
+      // than throwing. We assert on that shape, not on a thrown exception.
+      {
+        const gParent2 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-fresh-lock-parent-"));
+        execFileSync("git", ["-C", gParent2, "init", "-q"]);
+        execFileSync("git", ["-C", gParent2, "config", "user.email", "smoke@pi-astack.local"]);
+        execFileSync("git", ["-C", gParent2, "config", "user.name", "pi-astack smoke"]);
+        execFileSync("git", ["-C", gParent2, "config", "commit.gpgsign", "false"]);
+        execFileSync("git", ["-C", gParent2, "commit", "-q", "--allow-empty", "-m", "init"]);
+
+        const sedimentLockPath = path.join(gParent2, ".pi-astack", "sediment", "locks", "sediment.lock");
+        fs.mkdirSync(path.dirname(sedimentLockPath), { recursive: true });
+        fs.writeFileSync(sedimentLockPath, JSON.stringify({ pid: process.pid, created_at: "2026-05-12T10:00:00.000+08:00" }));
+        // Leave mtime fresh (just now). acquireLock should refuse to steal
+        // and the outer try/catch in writeProjectEntry should surface a
+        // status:"rejected" with reason="sediment lock timeout".
+
+        const r = await writeProjectEntry(
+          { title: "Fresh Lock Block Test", kind: "maxim", confidence: 5, compiledTruth: "This validates that a fresh sediment.lock is NOT stolen and write reports a lock timeout in result.reason." },
+          { projectRoot: gParent2, settings: lockSettings, dryRun: false },
+        );
+        assert(r.status === "rejected", `fresh sediment.lock must NOT be reclaimed; expected rejected, got status=${r.status}`);
+        assert(/sediment lock timeout/i.test(r.reason || ""), `expected sediment lock timeout in reason, got: ${r.reason}`);
+        // Lock file is still on disk (we didn't crash, we just blocked).
+        assert(
+          fs.existsSync(sedimentLockPath),
+          `fresh sediment.lock should remain on disk after a blocked write attempt`,
+        );
+        fs.rmSync(gParent2, { recursive: true, force: true });
+      }
+
+      // --- Case g.3: stale workflow.lock (abrain side) gets reclaimed ---
+      {
+        const workflowLockPath = path.join(gAbrain, ".state", "sediment", "locks", "workflow.lock");
+        fs.mkdirSync(path.dirname(workflowLockPath), { recursive: true });
+        fs.writeFileSync(workflowLockPath, JSON.stringify({ pid: 999999, created_at: "2026-05-12T00:00:00.000+08:00" }));
+        const past = (Date.now() - 60_000) / 1000;
+        fs.utimesSync(workflowLockPath, past, past);
+
+        const w = await writeAbrainWorkflow(
+          {
+            title: "Stale Workflow Lock Reclaim",
+            trigger: "smoke trigger phrase",
+            body: "## Task Blueprint\n\nValidate stale workflow.lock reclaim.",
+            crossProject: true,
+            tags: ["smoke"],
+            sessionId: "smoke-stale-workflow",
+          },
+          { abrainHome: gAbrain, settings: lockSettings },
+        );
+        assert(w.status === "created" || w.status === "updated", `stale workflow.lock should be reclaimed, got status=${w.status} reason=${w.reason}`);
+      }
+
+      // --- Case g.4: fresh workflow.lock blocks write (timeout) ---
+      // Same shape as g.2: writeAbrainWorkflow surfaces lock timeout as
+      // status:"rejected" with reason, not as a thrown exception.
+      {
+        const gAbrain2 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-fresh-workflow-abrain-"));
+        execFileSync("git", ["-C", gAbrain2, "init", "-q"]);
+        execFileSync("git", ["-C", gAbrain2, "config", "user.email", "smoke@pi-astack.local"]);
+        execFileSync("git", ["-C", gAbrain2, "config", "user.name", "pi-astack smoke"]);
+        execFileSync("git", ["-C", gAbrain2, "config", "commit.gpgsign", "false"]);
+        execFileSync("git", ["-C", gAbrain2, "commit", "-q", "--allow-empty", "-m", "init"]);
+
+        const workflowLockPath = path.join(gAbrain2, ".state", "sediment", "locks", "workflow.lock");
+        fs.mkdirSync(path.dirname(workflowLockPath), { recursive: true });
+        fs.writeFileSync(workflowLockPath, JSON.stringify({ pid: process.pid, created_at: "2026-05-12T10:00:00.000+08:00" }));
+
+        const r = await writeAbrainWorkflow(
+          {
+            title: "Fresh Workflow Lock Block",
+            trigger: "smoke trigger phrase",
+            body: "## Task Blueprint\n\nValidate that fresh workflow.lock blocks.",
+            crossProject: true,
+            tags: ["smoke"],
+            sessionId: "smoke-fresh-workflow-block",
+          },
+          { abrainHome: gAbrain2, settings: lockSettings },
+        );
+        assert(r.status === "rejected", `fresh workflow.lock must NOT be reclaimed; expected rejected, got status=${r.status}`);
+        assert(/workflow lock timeout|abrain workflow lock timeout/i.test(r.reason || ""), `expected workflow lock timeout in reason, got: ${r.reason}`);
+        assert(
+          fs.existsSync(workflowLockPath),
+          `fresh workflow.lock should remain on disk after a blocked write attempt`,
+        );
+        fs.rmSync(gAbrain2, { recursive: true, force: true });
+      }
+    }
+
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));
   } finally {
     if (process.env.PI_ASTACK_KEEP_SMOKE_TMP !== "1") fs.rmSync(outRoot, { recursive: true, force: true });
