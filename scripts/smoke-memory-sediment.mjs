@@ -149,7 +149,7 @@ async function main() {
     const { planMigrationDryRun, writeMigrationReport } = req("./memory/migrate.js");
     const { runDoctorLite } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
-    const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry } = req("./sediment/writer.js");
+    const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow } = req("./sediment/writer.js");
     const { listMigrationBackups, migrateOne, restoreMigrationBackup } = req("./sediment/migration.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     const { buildRunWindow, saveCheckpoint, loadCheckpoint, loadSessionCheckpoint, saveSessionCheckpoint } = req("./sediment/checkpoint.js");
@@ -1031,6 +1031,145 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
     writeFile(path.join(world, "facts", "w.md"), makeEntry({ title: "World Fact", extraFrontmatter: "scope: world\n" }).replace("scope: project\n", ""));
     const worldGraph = await rebuildGraphIndex(path.join(world, "facts", "w.md"), DEFAULT_SETTINGS, undefined, world);
     assert(worldGraph.graph_path === ".state/index/graph.json", "world graph path mismatch");
+
+    // === abrain workflows lane writer (B1) ==================================
+    // Strategy: use a fresh fake abrain home (already git-inited here), exercise
+    // writeAbrainWorkflow for: cross-project route, project-specific route,
+    // validation failures, sanitize fail-closed, dedupe collision, audit row,
+    // git commit observation. Stays offline (no real network / LLM).
+    {
+      const wfHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-wf-"));
+      // abrain repo must be a git repo for gitCommitAbrain.
+      execFileSync("git", ["-C", wfHome, "init", "-q"]);
+      execFileSync("git", ["-C", wfHome, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", wfHome, "config", "user.name", "pi-astack smoke"]);
+      const wfSettings = DEFAULT_SEDIMENT_SETTINGS;
+
+      // 1) cross-project workflow → ~/.abrain/workflows/<slug>.md
+      const wfX = await writeAbrainWorkflow(
+        {
+          title: "Run when reviewing code",
+          trigger: "用户说 review / 代码审查 / 检查代码",
+          body: "## Task Blueprint\n\n### Task 1: Identify hotspots\n- Read recent commits\n- Spot signal/noise\n\n### Task 2: Produce review notes\n- Reference taste-review knowledge",
+          crossProject: true,
+          tags: ["workflow", "review"],
+          sessionId: "smoke-wf-1",
+        },
+        { abrainHome: wfHome, settings: wfSettings },
+      );
+      assert(wfX.status === "created", `cross-project workflow should create, got ${JSON.stringify(wfX)}`);
+      assert(wfX.crossProject === true, `wfX.crossProject must be true`);
+      assert(wfX.lane === "workflow", `wfX.lane must be 'workflow', got ${wfX.lane}`);
+      assert(wfX.path === path.join(wfHome, "workflows", "run-when-reviewing-code.md"), `unexpected cross-project path: ${wfX.path}`);
+      assert(fs.existsSync(wfX.path), `cross-project workflow file missing: ${wfX.path}`);
+      const wfXText = fs.readFileSync(wfX.path, "utf-8");
+      assert(/^id: workflow:run-when-reviewing-code$/m.test(wfXText), `cross-project id missing:\n${wfXText}`);
+      assert(/^cross_project: true$/m.test(wfXText), `cross_project: true missing`);
+      assert(/^scope: workflow$/m.test(wfXText), `scope: workflow missing`);
+      assert(/^kind: workflow$/m.test(wfXText), `kind: workflow missing`);
+      assert(/## Timeline\s*\n- .* smoke-wf-1/m.test(wfXText), `Timeline session id missing`);
+
+      // 2) project-specific workflow → ~/.abrain/projects/<id>/workflows/<slug>.md
+      // Note: writer does not auto-create projects/<id>/, mkdir -p inside atomicWrite handles it.
+      const wfP = await writeAbrainWorkflow(
+        {
+          title: "Update Claude plugins",
+          trigger: "用户要求更新插件 / upgrade plugins",
+          body: "Run `claude plugins marketplace update`; verify success message.",
+          projectId: "home-dot-claude",
+          tags: ["workflow", "claude", "plugins"],
+          sessionId: "smoke-wf-2",
+        },
+        { abrainHome: wfHome, settings: wfSettings },
+      );
+      assert(wfP.status === "created", `project workflow should create, got ${JSON.stringify(wfP)}`);
+      assert(wfP.crossProject === false, `wfP.crossProject must be false, got ${wfP.crossProject}`);
+      assert(wfP.projectId === "home-dot-claude", `wfP.projectId mismatch`);
+      assert(wfP.path === path.join(wfHome, "projects", "home-dot-claude", "workflows", "update-claude-plugins.md"), `unexpected project path: ${wfP.path}`);
+      const wfPText = fs.readFileSync(wfP.path, "utf-8");
+      assert(/^id: project:home-dot-claude:workflow:update-claude-plugins$/m.test(wfPText), `project-scoped id missing:\n${wfPText}`);
+      assert(/^cross_project: false$/m.test(wfPText), `cross_project: false missing`);
+      assert(/^project_id: home-dot-claude$/m.test(wfPText), `project_id field missing`);
+
+      // 3) validation: missing trigger
+      const v1 = await writeAbrainWorkflow(
+        { title: "x", trigger: "", body: "x".repeat(50), crossProject: true },
+        { abrainHome: wfHome, settings: wfSettings },
+      );
+      assert(v1.status === "rejected" && v1.reason === "validation_error", `empty trigger must reject: ${JSON.stringify(v1)}`);
+      assert(v1.validationErrors.some((e) => e.field === "trigger"), `validationErrors must include trigger`);
+
+      // 4) validation: missing projectId when crossProject=false (default)
+      const v2 = await writeAbrainWorkflow(
+        { title: "y", trigger: "t", body: "y".repeat(50) },
+        { abrainHome: wfHome, settings: wfSettings },
+      );
+      assert(v2.status === "rejected" && v2.reason === "validation_error", `missing projectId must reject`);
+      assert(v2.validationErrors.some((e) => e.field === "projectId"), `validationErrors must include projectId`);
+
+      // 5) validation: body too short
+      const v3 = await writeAbrainWorkflow(
+        { title: "z", trigger: "t", body: "short", crossProject: true },
+        { abrainHome: wfHome, settings: wfSettings },
+      );
+      assert(v3.status === "rejected" && v3.validationErrors.some((e) => e.field === "body"), `short body must reject`);
+
+      // 6) sanitize fail-closed: AWS access key in body → reject
+      const sec = await writeAbrainWorkflow(
+        {
+          title: "leaks aws key",
+          trigger: "never",
+          body: "Run with AKIAIOSFODNN7EXAMPLE which is a fake-looking AWS key pattern.",
+          crossProject: true,
+        },
+        { abrainHome: wfHome, settings: wfSettings },
+      );
+      assert(sec.status === "rejected", `sanitize should reject AWS-pattern body: ${JSON.stringify(sec)}`);
+      assert(sec.reason && sec.reason !== "validation_error", `sanitize rejection should not be validation_error: ${sec.reason}`);
+
+      // 7) dedupe: writing same slug twice → second rejected with duplicate_slug
+      const dup = await writeAbrainWorkflow(
+        {
+          title: "Run when reviewing code",
+          trigger: "same as wf1",
+          body: "A different body that's long enough to pass validation.",
+          crossProject: true,
+        },
+        { abrainHome: wfHome, settings: wfSettings },
+      );
+      assert(dup.status === "rejected" && dup.reason === "duplicate_slug", `duplicate slug must reject: ${JSON.stringify(dup)}`);
+
+      // 8) dry-run: does not write
+      const dr = await writeAbrainWorkflow(
+        {
+          title: "Sync upstream",
+          trigger: "upstream sync request",
+          body: "Pull, rebase, push. Verify CI green before promoting.",
+          crossProject: true,
+        },
+        { abrainHome: wfHome, settings: wfSettings, dryRun: true },
+      );
+      assert(dr.status === "dry_run", `dry-run status mismatch: ${JSON.stringify(dr)}`);
+      assert(!fs.existsSync(dr.path), `dry-run should not write file: ${dr.path}`);
+
+      // 9) audit rows: ~/.abrain/.state/sediment/audit.jsonl exists and contains expected ops
+      const auditPath = path.join(wfHome, ".state", "sediment", "audit.jsonl");
+      assert(fs.existsSync(auditPath), `audit jsonl missing: ${auditPath}`);
+      const auditRows = fs.readFileSync(auditPath, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+      const ops = auditRows.map((r) => r.operation);
+      assert(ops.includes("create"), `audit must include create op, got ${ops.join(",")}`);
+      assert(ops.includes("reject"), `audit must include reject op (validation/sanitize/dedupe)`);
+      assert(ops.includes("dry_run"), `audit must include dry_run op`);
+      assert(auditRows.every((r) => r.lane === "workflow"), `every audit row must have lane=workflow, got: ${[...new Set(auditRows.map((r) => r.lane))].join(",")}`);
+      const createRow = auditRows.find((r) => r.operation === "create" && r.cross_project === true);
+      assert(createRow, `expected at least one create row with cross_project=true`);
+      assert(createRow.git_commit && /^[0-9a-f]{40}$/.test(createRow.git_commit), `create row should carry git_commit sha, got ${createRow.git_commit}`);
+
+      // 10) git history: at least 2 workflow: commits in abrain repo
+      const gitLog = execFileSync("git", ["-C", wfHome, "log", "--pretty=%s"], { encoding: "utf-8" });
+      const workflowCommits = gitLog.split("\n").filter((s) => s.startsWith("workflow: ")).length;
+      assert(workflowCommits >= 2, `expected ≥2 workflow commits in abrain git log, got ${workflowCommits}:\n${gitLog}`);
+    }
 
     console.log(JSON.stringify({ ok: true, transpiledFiles: count, tools: [...tools.keys()], commands: [...commands.keys()] }, null, 2));
   } finally {

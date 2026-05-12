@@ -21,7 +21,17 @@ import type { Jsonish } from "../memory/types";
 // exactly this bug on first production fire (2026-05-08); we now
 // always slugify titles directly.
 import { slugify } from "../memory/utils";
-import { ensureSedimentLegacyMigrated, formatLocalIsoTimestamp, sedimentAuditPath, sedimentLocksDir } from "../_shared/runtime";
+import {
+  abrainProjectWorkflowsDir,
+  abrainSedimentAuditPath,
+  abrainSedimentLocksDir,
+  abrainWorkflowsDir,
+  ensureSedimentLegacyMigrated,
+  formatLocalIsoTimestamp,
+  sedimentAuditPath,
+  sedimentLocksDir,
+  validateAbrainProjectId,
+} from "../_shared/runtime";
 
 const AUDIT_SCHEMA_VERSION = 2;
 
@@ -887,6 +897,434 @@ export async function writeProjectEntry(
       duration_ms: Date.now() - started,
     }));
     return { slug, path: target, status: "rejected", reason: message, lintErrors, lintWarnings, auditPath, ...resultCtx };
+  } finally {
+    await lock?.release();
+  }
+}
+
+// ══ abrain workflows lane writer (B1) ═════════════════════════════════════
+//
+// `writeAbrainWorkflow` writes pipeline-shaped entries ("run-when-*" task
+// blueprints, sediment-event-style automations) into the abrain `workflows/`
+// zone instead of the project `.pensieve/` knowledge tree.
+//
+// Why a separate API instead of extending writeProjectEntry / ENTRY_KINDS:
+//   - ENTRY_KINDS is the 7-kind knowledge contract (maxim / decision /
+//     pattern / anti-pattern / fact / preference / smell). Pipeline is NOT
+//     knowledge; it's a flow. Mixing it into ENTRY_KINDS pollutes the kind
+//     model that sediment curator + memory_search rely on.
+//   - abrain workflows live outside the per-project pensieve git tree
+//     (cross-project workflows are global; project-specific live under
+//     ~/.abrain/projects/<id>/workflows/), so substrate paths (lock /
+//     audit / git commit) target abrainHome, not projectRoot.
+//   - workflow frontmatter shape differs from knowledge entries: it has
+//     `trigger`, `tags`, no `confidence`, no `compiled_truth` section.
+//
+// What it shares with writeProjectEntry (intentionally, to avoid drift):
+//   - sanitize gate (sanitizeForMemory, fail-closed on secrets)
+//   - atomic write (tmp + rename)
+//   - markdown lint (lintMarkdown)
+//   - lockfile + atomic stale reclaim
+//   - git commit + audit row append (lane="workflow")
+//
+// Callers (today only future /memory migrate --go, B4): can produce both
+// cross-project (~/.abrain/workflows/<slug>.md) and project-specific
+// (~/.abrain/projects/<id>/workflows/<slug>.md) outputs via the
+// `crossProject` flag.
+
+export interface WorkflowDraft {
+  /** Human-readable workflow title, e.g. "更新 Claude Code 插件" */
+  title: string;
+  /** Trigger description: when this workflow should run (e.g. "用户要求更新插件" or "触发词: update plugins") */
+  trigger: string;
+  /** Workflow body markdown (Task Blueprint, completion criteria, etc). Min 20 chars. */
+  body: string;
+  /** true → ~/.abrain/workflows/ (cross-project); false (default) → ~/.abrain/projects/<id>/workflows/ */
+  crossProject?: boolean;
+  /** Required when crossProject=false; ignored otherwise. Must pass validateAbrainProjectId. */
+  projectId?: string;
+  /** Optional tags, sanitized like everything else. */
+  tags?: string[];
+  /** Optional slug override (defaults to slugify(title)) for stable rename to `run-when-*` style. */
+  slug?: string;
+  /** Status enum, default "provisional". */
+  status?: EntryStatus;
+  /** Optional session id for audit correlation. */
+  sessionId?: string;
+  /** Optional Timeline note; defaults to "created by sediment workflow writer". */
+  timelineNote?: string;
+}
+
+export interface WriteWorkflowOptions {
+  abrainHome: string;
+  settings: SedimentSettings;
+  dryRun?: boolean;
+  auditContext?: WriterAuditContext;
+}
+
+export interface WriteWorkflowResult {
+  slug: string;
+  path: string;
+  status: "created" | "skipped" | "dry_run" | "rejected";
+  reason?: string;
+  lintErrors?: number;
+  lintWarnings?: number;
+  gitCommit?: string | null;
+  auditPath?: string;
+  sanitizedReplacements?: string[];
+  validationErrors?: Array<{ field: string; message: string }>;
+  crossProject?: boolean;
+  projectId?: string;
+  lane?: string;
+  sessionId?: string;
+  correlationId?: string;
+  candidateId?: string;
+}
+
+function validateWorkflowDraft(draft: WorkflowDraft): Array<{ field: string; message: string }> {
+  const issues: Array<{ field: string; message: string }> = [];
+  if (typeof draft.title !== "string" || draft.title.trim().length === 0) {
+    issues.push({ field: "title", message: "title is required" });
+  }
+  if (typeof draft.trigger !== "string" || draft.trigger.trim().length === 0) {
+    issues.push({ field: "trigger", message: "trigger is required" });
+  }
+  if (typeof draft.body !== "string" || draft.body.trim().length < 20) {
+    issues.push({ field: "body", message: "body must be at least 20 characters" });
+  }
+  if (draft.crossProject === false || draft.crossProject === undefined) {
+    if (typeof draft.projectId !== "string" || draft.projectId.length === 0) {
+      issues.push({ field: "projectId", message: "projectId is required when crossProject is false (default)" });
+    } else {
+      try { validateAbrainProjectId(draft.projectId); }
+      catch (e) { issues.push({ field: "projectId", message: (e as Error).message }); }
+    }
+  }
+  if (draft.status !== undefined && typeof draft.status !== "string") {
+    issues.push({ field: "status", message: "status must be a string" });
+  }
+  return issues;
+}
+
+function buildWorkflowMarkdown(draft: WorkflowDraft, slug: string): string {
+  const timestamp = nowIso();
+  const status = draft.status ?? "provisional";
+  const crossProject = draft.crossProject === true;
+  const id = crossProject ? `workflow:${slug}` : `project:${draft.projectId}:workflow:${slug}`;
+  const timelineSession = draft.sessionId || "sediment";
+  const timelineNote = draft.timelineNote || "created by sediment workflow writer";
+  const tags = (draft.tags ?? []).map((t) => t.trim()).filter(Boolean);
+
+  const fmLines: string[] = [];
+  fmLines.push("---");
+  fmLines.push(`id: ${yamlString(id)}`);
+  // T7 frontmatter-required (lint.ts REQUIRED_FRONTMATTER_FIELDS): title +
+  // confidence are mandatory for every markdown entry. Workflows aren't
+  // ranked by confidence in retrieval, but we set a deterministic mid
+  // value (5) to satisfy the storage contract; the field is informational
+  // for workflows.
+  fmLines.push(`title: ${yamlString(draft.title)}`);
+  fmLines.push(`scope: workflow`);
+  fmLines.push(`kind: workflow`);
+  fmLines.push(`cross_project: ${crossProject ? "true" : "false"}`);
+  if (!crossProject) fmLines.push(`project_id: ${yamlString(draft.projectId!)}`);
+  fmLines.push(`status: ${yamlString(status)}`);
+  fmLines.push(`confidence: 5`);
+  fmLines.push(`trigger: ${yamlString(draft.trigger)}`);
+  fmLines.push(...yamlList("tags", tags));
+  fmLines.push(`created: ${yamlString(timestamp)}`);
+  fmLines.push(`updated: ${yamlString(timestamp)}`);
+  fmLines.push(`schema_version: 1`);
+  fmLines.push("---");
+
+  // Body normalization: ensure body starts with `# <title>`; escape bare `---` lines
+  // (same defensive escape as normalizeCompiledTruth, frontmatter break-out guard).
+  let body = draft.body.trim();
+  body = body.replace(/^##\s+Timeline\s*[\s\S]*$/m, "").trim();
+  body = body.replace(/^---$/gm, " ---");
+  if (!/^#\s+/m.test(body)) body = `# ${draft.title}\n\n**Trigger**: ${draft.trigger}\n\n${body}`;
+
+  // Timeline format aligns with buildMarkdown (project entries):
+  // `- <ts> | <session> | <action> | <note>` pipe-separated columns.
+  const timeline = `## Timeline\n- ${timestamp} | ${timelineSession} | created | ${timelineNote}`;
+
+  return `${fmLines.join("\n")}\n\n${body.trim()}\n\n${timeline}\n`;
+}
+
+async function acquireAbrainWorkflowLock(abrainHome: string, timeoutMs: number): Promise<LockHandle> {
+  const lockDir = abrainSedimentLocksDir(abrainHome);
+  const lockPath = path.join(lockDir, "workflow.lock");
+  await fs.mkdir(lockDir, { recursive: true });
+  const start = Date.now();
+  while (true) {
+    try {
+      const handle = await fs.open(lockPath, "wx");
+      await handle.writeFile(JSON.stringify({ pid: process.pid, created_at: formatLocalIsoTimestamp() }));
+      await handle.close();
+      return {
+        async release() { await fs.unlink(lockPath).catch(() => undefined); },
+      };
+    } catch (e: any) {
+      if (e?.code !== "EEXIST") throw e;
+      if (Date.now() - start > timeoutMs) throw new Error(`abrain workflow lock timeout after ${timeoutMs}ms`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
+async function appendAbrainWorkflowAudit(abrainHome: string, event: Record<string, unknown>): Promise<string> {
+  const auditPath = abrainSedimentAuditPath(abrainHome);
+  await fs.mkdir(path.dirname(auditPath), { recursive: true });
+  const enriched = {
+    timestamp: formatLocalIsoTimestamp(),
+    audit_version: AUDIT_SCHEMA_VERSION,
+    pid: process.pid,
+    abrain_home: path.resolve(abrainHome),
+    lane: "workflow",
+    ...event,
+  };
+  await fs.appendFile(auditPath, `${JSON.stringify(enriched)}\n`, "utf-8");
+  return auditPath;
+}
+
+async function gitCommitAbrain(abrainHome: string, filePath: string, slug: string): Promise<string | null> {
+  try {
+    const rel = path.relative(abrainHome, filePath);
+    await execFileAsync("git", ["-C", abrainHome, "add", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
+    await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `workflow: ${slug}`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write a workflow entry to the abrain workflows zone.
+ *
+ * Routing:
+ *   - draft.crossProject === true  → ~/.abrain/workflows/<slug>.md
+ *   - otherwise (default)          → ~/.abrain/projects/<projectId>/workflows/<slug>.md
+ *
+ * Substrate (mirrors writeProjectEntry):
+ *   1. validation (schema)
+ *   2. sanitize all free-text fields (fail-closed on secrets/PII)
+ *   3. build markdown (frontmatter v1 + body + Timeline)
+ *   4. lint (warnings recorded; errors reject)
+ *   5. dedupe (slug collision)
+ *   6. lock (abrain-side, separate from project sediment lock)
+ *   7. atomic write + git commit in abrain repo + audit row in abrain audit
+ */
+export async function writeAbrainWorkflow(
+  draft: WorkflowDraft,
+  opts: WriteWorkflowOptions,
+): Promise<WriteWorkflowResult> {
+  const started = Date.now();
+  const abrainHome = path.resolve(opts.abrainHome);
+  const crossProject = draft.crossProject === true;
+  const projectId = !crossProject ? draft.projectId : undefined;
+  const lane = "workflow";
+  const sessionId = opts.auditContext?.sessionId ?? draft.sessionId;
+  const resultCtx = {
+    lane,
+    sessionId,
+    correlationId: opts.auditContext?.correlationId,
+    candidateId: opts.auditContext?.candidateId,
+  };
+
+  const validationErrors = validateWorkflowDraft(draft);
+  if (validationErrors.length > 0) {
+    const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
+      operation: "reject",
+      reason: "validation_error",
+      title: draft.title,
+      validationErrors,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug: slugify(draft.title || "workflow"),
+      path: abrainHome,
+      status: "rejected",
+      reason: "validation_error",
+      validationErrors,
+      auditPath,
+      crossProject,
+      projectId,
+      ...resultCtx,
+    };
+  }
+
+  // Sanitize free-text fields (title, trigger, body, tags, timelineNote).
+  const titleSan = sanitizeForMemory(draft.title);
+  const triggerSan = sanitizeForMemory(draft.trigger);
+  const bodySan = sanitizeForMemory(draft.body);
+  const noteSan = draft.timelineNote
+    ? sanitizeForMemory(draft.timelineNote)
+    : { ok: true as const, text: undefined, replacements: [] as string[] };
+  const tagSans = (draft.tags ?? []).map((t) => sanitizeForMemory(t));
+  const failed = [titleSan, triggerSan, bodySan, noteSan, ...tagSans].find((r) => !r.ok);
+  if (failed) {
+    const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
+      operation: "reject",
+      reason: (failed as { ok: false; error: string }).error,
+      title: draft.title,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug: slugify(draft.title),
+      path: abrainHome,
+      status: "rejected",
+      reason: (failed as { ok: false; error: string }).error,
+      auditPath,
+      crossProject,
+      projectId,
+      ...resultCtx,
+    };
+  }
+
+  const sanitizedReplacements = [
+    ...titleSan.replacements,
+    ...triggerSan.replacements,
+    ...bodySan.replacements,
+    ...noteSan.replacements,
+    ...tagSans.flatMap((s) => s.replacements),
+  ];
+
+  const safeDraft: WorkflowDraft = {
+    ...draft,
+    title: titleSan.text ?? draft.title,
+    trigger: triggerSan.text ?? draft.trigger,
+    body: bodySan.text ?? draft.body,
+    timelineNote: draft.timelineNote ? noteSan.text : draft.timelineNote,
+    tags: draft.tags ? tagSans.map((s, i) => s.text ?? draft.tags![i]) : draft.tags,
+  };
+
+  const slug = (draft.slug && slugify(draft.slug)) || slugify(safeDraft.title);
+  const targetDir = crossProject
+    ? abrainWorkflowsDir(abrainHome)
+    : abrainProjectWorkflowsDir(abrainHome, projectId!);
+  const target = path.join(targetDir, `${slug}.md`);
+
+  // Storage-level dedupe: same slug already exists.
+  if (fsSync.existsSync(target)) {
+    const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
+      operation: "reject",
+      reason: "duplicate_slug",
+      target: crossProject ? `workflow:${slug}` : `project:${projectId}:workflow:${slug}`,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "rejected",
+      reason: "duplicate_slug",
+      auditPath,
+      crossProject,
+      projectId,
+      ...resultCtx,
+    };
+  }
+
+  const markdown = buildWorkflowMarkdown(safeDraft, slug);
+  const lintIssues = lintMarkdown(markdown, target);
+  const lintErrors = lintIssues.filter((i) => i.severity === "error").length;
+  const lintWarnings = lintIssues.filter((i) => i.severity === "warning").length;
+  if (lintErrors > 0) {
+    const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
+      operation: "reject",
+      reason: "lint_error",
+      target: path.relative(abrainHome, target),
+      lint_errors: lintErrors,
+      lint_warnings: lintWarnings,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "rejected",
+      reason: "lint_error",
+      lintErrors,
+      lintWarnings,
+      auditPath,
+      crossProject,
+      projectId,
+      ...resultCtx,
+    };
+  }
+
+  if (opts.dryRun) {
+    const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
+      operation: "dry_run",
+      target: path.relative(abrainHome, target),
+      lint_warnings: lintWarnings,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "dry_run",
+      lintWarnings,
+      auditPath,
+      sanitizedReplacements,
+      crossProject,
+      projectId,
+      ...resultCtx,
+    };
+  }
+
+  let lock: LockHandle | undefined;
+  try {
+    lock = await acquireAbrainWorkflowLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
+    await atomicWrite(target, markdown);
+    const git = await gitCommitAbrain(abrainHome, target, slug);
+    const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
+      operation: "create",
+      target: path.relative(abrainHome, target),
+      cross_project: crossProject,
+      project_id: projectId,
+      lint_result: "pass",
+      lint_warnings: lintWarnings,
+      git_commit: git,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "created",
+      lintErrors,
+      lintWarnings,
+      gitCommit: git,
+      auditPath,
+      sanitizedReplacements,
+      crossProject,
+      projectId,
+      ...resultCtx,
+    };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
+      operation: "error",
+      target: path.relative(abrainHome, target),
+      reason: message,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "rejected",
+      reason: message,
+      auditPath,
+      crossProject,
+      projectId,
+      ...resultCtx,
+    };
   } finally {
     await lock?.release();
   }

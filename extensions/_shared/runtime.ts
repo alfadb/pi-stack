@@ -208,6 +208,35 @@ export function abrainProjectDir(abrainHome: string, projectId: string): string 
 export function abrainProjectVaultDir(abrainHome: string, projectId: string): string {
   return path.join(abrainProjectDir(abrainHome, projectId), "vault");
 }
+
+// ── abrain workflows zone (B1: pipeline-shaped entries归宿) ──────
+// Top-level workflows/ holds cross-project workflows (e.g. run-when-reviewing-code);
+// projects/<id>/workflows/ holds project-specific ones (e.g. run-when-updating-claude-plugins).
+export function abrainWorkflowsDir(abrainHome: string): string {
+  return path.join(path.resolve(abrainHome), "workflows");
+}
+export function abrainProjectWorkflowsDir(abrainHome: string, projectId: string): string {
+  return path.join(abrainProjectDir(abrainHome, projectId), "workflows");
+}
+
+// ── abrain-side sediment bookkeeping ──────────────────────────────
+// Mirrors project-side `.pi-astack/sediment/{audit.jsonl, locks/}` layout under
+// `<abrainHome>/.state/sediment/` so abrain workflow writer can reuse the same
+// substrate pattern (lock + atomic write + audit) without colliding with the
+// project-side audit stream. `.state/` namespace is already used by vault
+// (vault-events.jsonl); sediment lives alongside as a sibling subdir.
+export function abrainStateDir(abrainHome: string): string {
+  return path.join(path.resolve(abrainHome), ".state");
+}
+export function abrainSedimentDir(abrainHome: string): string {
+  return path.join(abrainStateDir(abrainHome), "sediment");
+}
+export function abrainSedimentAuditPath(abrainHome: string): string {
+  return path.join(abrainSedimentDir(abrainHome), "audit.jsonl");
+}
+export function abrainSedimentLocksDir(abrainHome: string): string {
+  return path.join(abrainSedimentDir(abrainHome), "locks");
+}
 /**
  * List every project id that has a directory under ~/.abrain/projects/.
  * Skips entries that fail validateAbrainProjectId (defense against

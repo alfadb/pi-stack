@@ -155,13 +155,13 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 | **P0c.write** | `vault-writer.ts` set/list/forget + age 公钥加密（不接触 master） + atomic lock + audit | `extensions/abrain/vault-writer.ts:361-450` + `scripts/smoke-abrain-vault-writer.mjs` |
 | **P0c.read** | `vault-reader.ts` unlock master + per-key decrypt + `vault_release(key, scope?, reason?)` LLM tool（pre-flight + deny-first + i18n + description rendering）+ `$VAULT_` / `$PVAULT_` / `$GVAULT_` bash injection （default-withheld stdout）+ literal redaction + read-path audit closure | `extensions/abrain/vault-reader.ts` + `extensions/abrain/vault-bash.ts` + `extensions/abrain/index.ts:607-628` |
 | **P1（vault 侧）** | boot-time active project resolver + `/secret` 默认 active project + `--global` / `--project=<id>` / `--all-projects` | `extensions/_shared/runtime.ts:397-440` + `scripts/smoke-abrain-active-project.mjs` + `scripts/smoke-abrain-secret-scope.mjs` |
+| **B1: workflows lane writer** | `writeAbrainWorkflow` substrate 接受 pipeline-型条目，按 `crossProject` flag 路由到 `~/.abrain/workflows/`（跨项目）或 `~/.abrain/projects/<id>/workflows/`（项目特定）；独立 abrain-side lock（`<abrainHome>/.state/sediment/locks/workflow.lock`）+ audit（`<abrainHome>/.state/sediment/audit.jsonl`，lane="workflow"）+ git commit（abrain repo） | `extensions/sediment/writer.ts:writeAbrainWorkflow` + `scripts/smoke-memory-sediment.mjs:abrain-workflows-lane-writer` 覆盖 10 个场景（cross-project / project-specific / 4 种 validation / sanitize / dedupe / dry_run / audit / git） |
 
 ### 待实施
 
 | 子 phase | 动作 | 验收 | prerequisite |
 |---|---|---|---|
 | **P0d** | TUI onboarding wizard（`/vault init` 全交互菜单）+ `/secret set` mask input + `vault import-env` `.env` ingest | wizard 走完七种 backend dynamic menu + mask + import | — |
-| **workflows lane writer** | sediment writer 识别 `kind: pipeline` 或 `run-when-*.md` 文件名，路由到 `~/.abrain/workflows/`（跨项目）或 `~/.abrain/projects/<id>/workflows/`（项目特定，frontmatter `cross_project: true` 显式标记区分） | smoke：写一条 pipeline-型条目 → 出现在 abrain workflows/ 中 | — |
 | **一次性 per-repo 迁移** | `/memory migrate` 默认 dry-run 显示计划，`/memory migrate --go` 执行：git working tree clean precondition 检查 → mv `.pensieve/` 到 `~/.abrain/projects/<id>/` → frontmatter normalize 补 178 条 legacy 的 `kind` 字段 → pipelines 路由到 workflows 区 → sediment writer 通过 runtime resolver 自动定位新路径（不留 symlink） | grep 整 repo 无残留 hard-coded `.pensieve`；sediment writer 写 `~/.abrain/projects/<id>/`；14 个仓逐个迁完 | workflows lane writer（上行） |
 | **Lane G** | `/about-me` command + `MEMORY-ABOUT-ME` extractor（identity 区 writer） | identity 区有条目产生 | — |
 | **其他 lane writer** | skills / habits 区 writer，及跨项目 knowledge 写路径 | 各区有条目产生 | — |

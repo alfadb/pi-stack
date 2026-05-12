@@ -85,7 +85,7 @@ alfadb/pi-astack/
 │   │   ├── migrate.ts                 # legacy migration dry-run planner
 │   │   ├── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
 │   │   └── index-file.ts              # generated enhanced _index.md rebuild writer
-│   ├── sediment/                      # ✅ 实现：project-only writer + direct LLM auto-write + ADR 0016 curator/update substrate
+│   ├── sediment/                      # ✅ 实现：project-only writer + direct LLM auto-write + ADR 0016 curator/update substrate + B1 abrain workflows lane writer
 │   │   ├── index.ts                   # /sediment 子命令 + agent_end hook + footer status FSM (idle/running/completed/failed) + bg promise tracking
 │   │   ├── settings.ts                # sediment 配置读取
 │   │   ├── checkpoint.ts              # per-session checkpoint + run window builder + RMW lock
@@ -96,7 +96,7 @@ alfadb/pi-astack/
 │   │   ├── validation.ts              # schema-only draft runtime validation
 │   │   ├── dedupe.ts                  # storage-only slug collision detection（semantic dedupe 由 curator 处理）
 │   │   ├── sanitizer.ts               # sensitive-info fail-closed (jwt/pem/aws/url/email/ip/$HOME)
-│   │   └── writer.ts                  # create/update/archive/supersede/delete substrate + on-demand .pensieve create + validate/sensitive-info sanitize/dedupe/lint/lock/atomic write/audit/git + writer audit correlation ids
+│   │   └── writer.ts                  # create/update/archive/supersede/delete substrate + on-demand .pensieve create + validate/sensitive-info sanitize/dedupe/lint/lock/atomic write/audit/git + writer audit correlation ids + writeAbrainWorkflow (B1：pipeline-型条目路由到 ~/.abrain/workflows/ 或 projects/<id>/workflows/，走独立 abrain-side lock + audit + git commit）
 │   ├── compaction-tuner/              # ✅ 实现：计划外落地（2026-05-08）
 │   │   ├── index.ts                   # agent_end hook 读 ctx.getContextUsage() 超阈 → ctx.compact()；/compaction-tuner [status|trigger]
 │   │   └── settings.ts                # thresholdPercent / rearmMarginPercent
