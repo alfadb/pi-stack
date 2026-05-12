@@ -76,7 +76,7 @@
 
 **已剥离**（2026-05-12）：per-file apply substrate（`extensions/sediment/migration.ts`、`/sediment migrate-one --plan/--apply --yes/--restore`、`/sediment migration-backups`、backup 子系统）随 Phase 1 迁移完成后剥离。设计动机：per-file workflow 是 Phase 1 为 173 条 legacy entry 定制的临时机械，迁移完成后它就不再服务于任何路径，反而产生两个负担：（1）作为 slash command 出现在提示里，误导 LLM 去调用不需要的备份逻辑；（2）backup 子系统与 git 重复。后续使用场景（例如 ADR 0014 .pensieve → abrain 迁移）全部走 per-repo、不走 per-file。
 
-**per-repo 迁移（2026-05-12 B4 ✅ shipped）**：`/memory migrate --go`——`extensions/memory/migrate-go.ts`，git working tree clean 作为 precondition，不做 backup，不留 symlink。**Rollback 用 preflight 阶段捕获的 `parentPreSha` / `abrainPreSha`**（summary 末尾直接打印 `git reset --hard <sha>` 命令）——不要用 `HEAD~1`，因为 abrain 一侧有 N workflow commit + 1 migrate-in commit = N+1，且 sediment 可能在迁移期间并发 commit。详 [abrain-pensieve-migration.md §5](./abrain-pensieve-migration.md#5-回滚)。5 项 preflight（父仓 git clean / `.pensieve` tracked / 有用户 entry / abrain 仓 git clean / projectId 可推断）。Pipeline 路由走 `writeAbrainWorkflow`，其余 7 kind atomic write 到 `~/.abrain/projects/<id>/<kind-dir>/`。14 仓手动逐个触发，优先级表见 [abrain-pensieve-migration.md §4](./abrain-pensieve-migration.md#4-14-仓迁移建议顺序)。
+**per-repo 迁移（2026-05-12 B4 ✅ shipped）**：`/memory migrate --go`——`extensions/memory/migrate-go.ts`，git working tree clean 作为 precondition，不做 backup，不留 symlink。**Rollback 用 preflight 阶段捕获的 `parentPreSha` / `abrainPreSha`**（summary 末尾直接打印 `git reset --hard <sha>` 命令）——不要用 `HEAD~1`，因为 abrain 一侧有 N workflow commit + 1 migrate-in commit = N+1，且 sediment 可能在迁移期间并发 commit。详 [abrain-pensieve-migration.md §5](./abrain-pensieve-migration.md#5-回滚)。9 项 preflight（**5 项用户可见**：父仓 git clean / `.pensieve` tracked / 有用户 entry / abrain 仓 git clean / projectId 可推断；**+ 4 项隐藏 sanity guard**：pensieveTarget 路径存在 / abrainHome 路径存在 / 父仓 root 存在 / abrainHome 是 git repo；详 [abrain-pensieve-migration.md §2](./abrain-pensieve-migration.md#2-precondition)）。Pipeline 路由走 `writeAbrainWorkflow`，其余 7 kind atomic write 到 `~/.abrain/projects/<id>/<kind-dir>/`。14 仓手动逐个触发，优先级表见 [abrain-pensieve-migration.md §4](./abrain-pensieve-migration.md#4-14-仓迁移建议顺序)。
 
 ### Phase 1.3 — memory_search（ADR 0015 LLM-driven；无 grep 降级）
 
@@ -219,7 +219,7 @@ memory_search(query: "dispatch agent prompt")
 
 ## Phase 2：World 层接入
 
-> ⚠️ **拓扑被 [ADR 0014](../adr/0014-abrain-as-personal-brain.md)（2026-05-09）重新规划**。`~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑，采用七区结构（identity / skills / habits / workflows / projects / knowledge / vault）且吃掉 `.pensieve/`。下面 Phase 2.1 列出的 v7.0 旧 layout（`maxims/patterns/anti-patterns/...`）仅作历史参考。**新迁移计划走 [migration/abrain-pensieve-migration.md](./abrain-pensieve-migration.md) P1-P7**；七区拓扑详见 [brain-redesign-spec.md §1](../brain-redesign-spec.md)。Lane B/D 失效后 Phase 2.3 promotion gates 也被重新思考（详 [phase-2.3-promotion-gates.md](./phase-2.3-promotion-gates.md)）。读侧（resolve / search / get / list / neighbors）不受影响。
+> ⚠️ **拓扑被 [ADR 0014](../adr/0014-abrain-as-personal-brain.md)（2026-05-09）重新规划**。`~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑，采用七区结构（identity / skills / habits / workflows / projects / knowledge / vault）且吃掉 `.pensieve/`。下面 Phase 2.1 列出的 v7.0 旧 layout（`maxims/patterns/anti-patterns/...`）仅作历史参考。**新迁移计划走 [migration/abrain-pensieve-migration.md](./abrain-pensieve-migration.md) §1-§7**；七区拓扑详见 [brain-redesign-spec.md §1](../brain-redesign-spec.md)。Lane B/D 失效后 Phase 2.3 promotion gates 也被重新思考（详 [phase-2.3-promotion-gates.md](./phase-2.3-promotion-gates.md)）。读侧（resolve / search / get / list / neighbors）不受影响。
 
 **验收标准**：
 - [x] `~/.abrain/` 目录结构落地，独立 git repo【2026-05-08 完成；layout：`maxims/ decisions/ knowledge/ staging/ archive/ pipelines/ .state/ .index/`，独立 `.git/`，README.md + .gitignore，1 init commit；目前空，等 promotion gates 落地后通过 sediment 填充。**ADR 0014 后七区拓扑未启用，走 abrain-pensieve-migration.md 重新规划】
@@ -246,7 +246,7 @@ echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
 ```
 
 ```bash
-# v7.1 七区拓扑 (ADR 0014 §D1)——该走 abrain-pensieve-migration.md P1
+# v7.1 七区拓扑 (ADR 0014 §D1)——该走 abrain-pensieve-migration.md §1 模型 + §3 迁移动作
 mkdir -p ~/.abrain/{identity,skills,habits,workflows,projects,knowledge,vault}
 mkdir -p ~/.abrain/{staging,archive,.state}
 cd ~/.abrain && git init

@@ -54,7 +54,7 @@ alfadb/pi-astack/
 │   └── migration/
 │       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6（Phase 2 起部分被 ADR 0014 重新规划）
 │       ├── apply-checklist.md         # 单文件 migration apply/restore 操作手册
-│       ├── abrain-pensieve-migration.md  # ✅ .pensieve/ → ~/.abrain/projects/<id>/ 迁移计划 P1-P7 (ADR 0014 §D2)
+│       ├── abrain-pensieve-migration.md  # ✅ .pensieve/ → ~/.abrain/projects/<id>/ per-repo 迁移 spec（§1 模型 / §2 precondition / §3 迁移动作 / §4 14 仓 / §5 回滚 / §6 ADR 0014 状态推进路径 / §7 历史注记）
 │       ├── vault-bootstrap.md         # ✅ vault unlock 平台支持矩阵 v1.4 (portable-identity 优先)
 │       ├── phase-2.3-promotion-gates.md  # promotion gates 1-5 详细设计稿（等 Phase 1.4 burn-in 后实施）
 │       ├── memory-search-llm-upgrade.md  # ✅ ADR 0015 Phase 0/1 done；Phase 2 被 ADR 0016 改为 curator lifecycle loop 并已落地

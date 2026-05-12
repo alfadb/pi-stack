@@ -155,7 +155,7 @@ pi install git:github.com/alfadb/pi-astack
 ## 沉淀
 
 记忆基础设施 = **markdown+git**（详见 [memory-architecture.md](./docs/memory-architecture.md)）：
-- 项目记忆 → Phase 1.4 当前：`<project>/.pensieve/{maxims,decisions,knowledge,staging,archive}/`；Phase 2 起迁入 `~/.abrain/projects/<id>/`（md + git）
+- 项目记忆 → 未迁仓：`<project>/.pensieve/{maxims,decisions,knowledge,staging,archive,pipelines}/`（legacy，memory facade dual-read）；已迁仓：`~/.abrain/projects/<id>/`，走 `/memory migrate --go`（ADR 0014 B4、2026-05-12 ship，14 仓逐个手动触发，不是一次性全局切换）
 - 跨项目准则 → `~/.abrain/knowledge/`（v7.1 七区之 knowledge 区；独立 git repo）
 - 条目格式：frontmatter v1 + compiled truth + `## Timeline`
 - 主会话只读（`memory_search/get/list/neighbors`），sediment 单写（内部 writer substrate 已实现：create/update/merge/archive/supersede/delete/skip；不计划暴露 LLM-facing 写工具）

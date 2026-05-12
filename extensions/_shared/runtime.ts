@@ -120,9 +120,11 @@ export function legacySedimentCheckpointPath(projectRoot: string): string {
 export function legacySedimentLocksDir(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), ".pensieve", ".state", "locks");
 }
-export function legacyMemoryMigrationReportPath(projectRoot: string): string {
-  return path.join(path.resolve(projectRoot), ".pensieve", ".state", "migration-report.md");
-}
+// Note: `legacyMemoryMigrationReportPath()` was removed in Round 6 audit
+// (gpt-5.5 P2) — no caller existed. The path it used to compute
+// (`<projectRoot>/.pensieve/.state/migration-report.md`) belonged to an
+// earlier per-file migration substrate that B3+B7 (commit `b33f0e4`)
+// already stripped. Re-add only if a future per-file workflow re-emerges.
 
 /* -------- abrain project identity ------------------------------------- *
  * ADR 0014 active project is a boot-time snapshot: callers should resolve

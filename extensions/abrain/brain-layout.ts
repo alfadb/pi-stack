@@ -40,8 +40,9 @@ const BRAIN_ZONES = [
  *  row carries `lane: "workflow"`). It used to be grouped under Lane G
  *  (about-me) in early ADR 0014 drafts, but B1 (2026-05-12) shipped it as
  *  an independent lane with its own lock + audit + commit path. ZONE_META
- *  is documentation-only (referenced by `/sediment status`); the writer
- *  enum is the source of truth. */
+ *  is documentation-only; it is currently unused by any handler
+ *  (`/sediment status` was envisioned as a consumer but never wired up).
+ *  The writer enum (`lane: "workflow"` etc.) is the source of truth. */
 const ZONE_META: Record<string, { lane: string; description: string }> = {
   identity:  { lane: "G (about-me)",        description: "user identity declarations, /about-me output" },
   skills:    { lane: "G (about-me)",        description: "skill definitions and proficiency" },
@@ -113,6 +114,6 @@ export function ensureBrainLayout(abrainHome: string): { created: string[]; warn
  * Get lane and description metadata for a zone name.
  * Returns undefined for unknown zone names.
  */
-export function zoneMeta(zone: string): { lane: string; description: string } | undefined {
-  return ZONE_META[zone];
-}
+// Note: `zoneMeta()` accessor was removed in Round 6 audit (gpt-5.5 P2)
+// — no caller existed. Re-add it if `/sediment status` or any other
+// surface starts rendering ZONE_META at runtime.

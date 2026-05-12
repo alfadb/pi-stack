@@ -6,7 +6,7 @@
 
 ## ✅ 已拍板（memory-architecture.md）
 
-- **存储架构**: 纯 markdown+git（决策 2）。项目级 = `<project>/.pensieve/`（Phase 1.4 当前），世界级 = `~/.abrain/`（独立 git repo，v7.1 七区结构 + ADR 0014）
+- **存储架构**: 纯 markdown+git（决策 2）。项目级 = `<project>/.pensieve/`（legacy，未迁仓 dual-read）或 `~/.abrain/projects/<id>/`（已迁仓，走 `/memory migrate --go`）；世界级 = `~/.abrain/`（独立 git repo，v7.1 七区结构 + ADR 0014）
 - **条目格式**: frontmatter v1 + compiled truth + `## Timeline`（§4.4）
 - **知识模型**: 7 种 kind + confidence 0-10 + lifetime 正交（§4）
 - **读写分离**: sediment 单写，主会话只读（§8）

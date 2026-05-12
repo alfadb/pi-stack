@@ -58,7 +58,7 @@
 
 ### 实现
 
-- 改 `extensions/memory/index-file.ts` 的 `makeIndexEntryMarkdown()` 函数
+- 改 `extensions/memory/index-file.ts` 的 `pushEntryDetail()` 函数（原提案名 `makeIndexEntryMarkdown()` 最终实现时改为 `pushEntryDetail`）
 - 增加输出字段：kind / status / confidence / updated / trigger_phrases
 - summary 仍取 compiled_truth 第一段（保持向后兼容）
 - 跑 `/memory rebuild --index .pensieve` 重建一次验证 token 量
@@ -167,9 +167,9 @@ export const DEFAULT_SEARCH_SETTINGS: SearchSettings = {
   stage1Model: "deepseek/deepseek-v4-flash",
   stage1Limit: 50,
   stage1Thinking: "off",   // DeepSeek v4 supports off/high/xhigh; minimal would clamp to high
-  stage2Model: "deepseek/deepseek-v4-pro",
+  stage2Model: "deepseek/deepseek-v4-flash",   // Round 5 后默认从 v4-pro 改为 v4-flash（交互式延迟）
   stage2Limit: 10,
-  stage2Thinking: "high",
+  stage2Thinking: "off",                       // Round 5 后默认从 high 改为 off；需高精度手工调 settings
 };
 ```
 

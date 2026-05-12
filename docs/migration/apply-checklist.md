@@ -6,7 +6,7 @@
 > `/sediment migration-backups`）已经从代码中删除。
 >
 > 后续 per-repo 迁移走 ADR 0014 `/memory migrate --go`（✅ 2026-05-12 shipped
-> via commits `cc40792` + `a819302` + `37f03a6`；spec 见
+> via commits `cc40792` + `a819302` + `37f03a6` + `122c0b2`；spec 见
 > [abrain-pensieve-migration.md](./abrain-pensieve-migration.md)）。
 
 ## 完成数据（~/.pi 父仓）
