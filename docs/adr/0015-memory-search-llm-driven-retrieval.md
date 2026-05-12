@@ -159,7 +159,7 @@ ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment curator 在 c
 
 **实现位置**：
 - Stage 1：`extensions/memory/llm-search.ts` `makeStage1Prompt`——instructions 块及 `_index.md` 放在 query 之前。
-- Stage 2：`extensions/memory/llm-search.ts` `makeStage2Prompt:389-417`——instructions 块（约 1K tokens）固定列首，candidates 和 query 可变但 prefix 仍可被缓存。Stage 1 对应 `makeStage1Prompt:322`。
+- Stage 2：`extensions/memory/llm-search.ts` `makeStage2Prompt:389-418`——instructions 块（约 1K tokens）固定列首，candidates 和 query 可变但 prefix 仍可被缓存。Stage 1 对应 `makeStage1Prompt:322`。
 
 **与 D6 的关系**：
 - D6 关的是 **result cache**（“5 分钟内同 query 复用上次返回的 slug 列表”）——锁闭，避免 sediment 刚写入的条目不被召回。

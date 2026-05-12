@@ -157,7 +157,7 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 | **P1（vault 侧）** | boot-time active project resolver + `/secret` 默认 active project + `--global` / `--project=<id>` / `--all-projects` | `extensions/_shared/runtime.ts:409-457` (resolveActiveProject) + `scripts/smoke-abrain-active-project.mjs` + `scripts/smoke-abrain-secret-scope.mjs` |
 | **B1: workflows lane writer** | `writeAbrainWorkflow` substrate 接受 pipeline-型条目，按 `crossProject` flag 路由到 `~/.abrain/workflows/`（跨项目）或 `~/.abrain/projects/<id>/workflows/`（项目特定）；独立 abrain-side lock（`<abrainHome>/.state/sediment/locks/workflow.lock`）+ audit（`<abrainHome>/.state/sediment/audit.jsonl`，lane="workflow"）+ git commit（abrain repo） | commit `b6a4a49`；`extensions/sediment/writer.ts:writeAbrainWorkflow` + `scripts/smoke-memory-sediment.mjs:abrain-workflows-lane-writer` 覆盖 10 个场景（cross-project / project-specific / 4 种 validation / sanitize / dedupe / dry_run / audit / git） |
 | **B3+B7: per-file migration substrate 剥离** | 删除 `extensions/sediment/migration.ts` + `/sediment migrate-one` + `/sediment migration-backups` slash 命令与 backup 子系统；文档重写为 per-repo 一次性迁移模型（abrain-pensieve-migration.md 重写 ±200 行） | commit `b33f0e4` 净 +178/-1609 行；smoke 26 transpiled files 全过 |
-| **B4: per-repo 迁移执行器** | `/memory migrate` 默认 dry-run（表格预览），`/memory migrate --go` 执行：preflight 检查父仓 + abrain 仓 git clean + `.pensieve` tracked + 有用户条目→逐文件 frontmatter 归一化（kind/scope/schema_version/Timeline）→ pipelines 走 `writeAbrainWorkflow` 路由→ knowledge kinds atomic write 到 `~/.abrain/projects/<id>/<kind-dir>/`→ `git rm` 原件→两边仓各一个 commit（`chore: migrate .pensieve → ~/.abrain/projects/<id>` / `migrate(in): <id> (...)`） | commits `cc40792` (初出) + `a819302` (P0：索引重建 + pre-SHA rollback + stale docs) + `37f03a6` (P1/P2：GENERIC_BASENAMES + lane 枚举 + 文档 drift；其中 4 处 name-mismatch 在 `122c0b2` 补完) + `122c0b2` (audit 闭环：gitCommitAll pathspec + audit log 路径 + name-mismatch 补位 + smoke 补示)；`extensions/memory/migrate-go.ts` + `scripts/smoke-memory-sediment.mjs:per-repo migration --go` 覆盖 17 个场景（dirty parent 拒绝 / dirty abrain 拒绝 / happy path 2 knowledge + 2 workflow / legacy frontmatter 归一化 / .index .state 预过滤 / commits / pre-SHA rollback summary / 幂等带保护 / slug collision / SSH git remote 推断 / HTTPS git remote 推断 / parent commit pathspec 窄化 / abrainPreSha=null fallback / 部分失败混合） |
+| **B4: per-repo 迁移执行器** | `/memory migrate` 默认 dry-run（表格预览），`/memory migrate --go` 执行：preflight 检查父仓 + abrain 仓 git clean + `.pensieve` tracked + 有用户条目→逐文件 frontmatter 归一化（kind/scope/schema_version/Timeline）→ pipelines 走 `writeAbrainWorkflow` 路由→ knowledge kinds atomic write 到 `~/.abrain/projects/<id>/<kind-dir>/`→ `git rm` 原件→两边仓各一个 commit（`chore: migrate .pensieve → ~/.abrain/projects/<id>` / `migrate(in): <id> (...)`） | commits `cc40792` (初出) + `a819302` (P0：索引重建 + pre-SHA rollback + stale docs) + `37f03a6` (P1/P2：GENERIC_BASENAMES + lane 枚举 + 文档 drift；其中 4 处 name-mismatch 在 `122c0b2` 补完) + `122c0b2` (audit 闭环：gitCommitAll pathspec + audit log 路径 + name-mismatch 补位 + smoke 补示)；`extensions/memory/migrate-go.ts` + `scripts/smoke-memory-sediment.mjs:per-repo migration --go` 覆盖 18 个场景（dirty parent 拒绝 / dirty abrain 拒绝 / happy path 2 knowledge + 2 workflow / legacy frontmatter 归一化 / .index .state 预过滤 / commits / pre-SHA rollback summary / 幂等带保护 + 6 边界：slug collision / SSH git remote 推断 / HTTPS git remote 推断 / parent commit pathspec 窄化 / abrainPreSha=null fallback / 部分失败混合）。另外 sediment 写入锁 stale-lock reclaim （commit `54835cd`）4 个 smoke g.1-g.4 不计入本表 |
 
 ### 待实施
 
@@ -197,7 +197,10 @@ ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "au
 }
 ```
 
-**三处 audit log**（命名实际差异，源码权威：`extensions/_shared/runtime.ts` `sedimentAuditPath` / `vaultAuditPath` / abrain-side equivalent）：
+**三处 audit log**（命名实际差异，源码权威）：
+- project-side sediment：`extensions/_shared/runtime.ts` `sedimentAuditPath(projectRoot)`
+- abrain-side sediment（workflow + future Lane G）：`extensions/_shared/runtime.ts` `abrainSedimentAuditPath(abrainHome)`
+- vault：路径未抽到 `runtime.ts` 共享 helper；是 `extensions/abrain/vault-writer.ts:61` 的私有常量 `VAULT_EVENTS = path.join(".state", "vault-events.jsonl")`。与 sediment audit 独立 —— op-based schema，不进 sediment-events `lane` 枚举集。
 - `<projectRoot>/.pi-astack/sediment/audit.jsonl`：project 端 Lane A / C 走这里（曾用 `.pensieve/.state/sediment-events.jsonl`，已由 `ensureSedimentLegacyMigrated()` 一次性迁移，仅 read-only 兼容）
 - `~/.abrain/.state/sediment/audit.jsonl`：abrain 端 Lane G / workflow 走这里（B1 引入）
 - `~/.abrain/.state/vault-events.jsonl`：**Lane V 独立 schema**（op-based，不是 lane-based；与上面两个 sediment audit row schema 不共用 `lane` 字段）
@@ -213,7 +216,7 @@ ADR 0013 要求每条 sediment audit row 含 `lane: "explicit" | "promote" | "au
 | `create` | write path | `/secret set` 首次写入某 key |
 | `rotate` | write path | `/secret set` 在已存在 key 上重写 |
 | `forget` | write path | `/secret forget` 删除加密件（保留 _meta） |
-| `recovered_missing_audit` | reconcile | crash 后启动检查 `recoverMissingAuditRows` 补齐 |
+| `recovered_missing_audit` | reconcile | crash 后启动 `reconcile()`（`extensions/abrain/vault-writer.ts:596`）扫描 vault 目录，为缺失 audit 的 _meta 文件补写一行 |
 | `release` | vault_release | TUI 授权通过，明文已交付 LLM |
 | `release_denied` | vault_release | TUI 拒绝（`no` / `deny_remember` / `session-deny` / …） |
 | `release_blocked` | vault_release | pre-flight 拒绝在授权之前（key 不存在 / pre-flight 错 / decrypt 错） |

@@ -279,7 +279,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
 | modelCurator | `providers`, `hints`, `imageGen` |
 | modelFallback | `fallbackModels` |
 | memory | `includeWorld`, `defaultLimit`, `maxLimit`, `maxEntries`, `projectBoost`, `shortTermTtlDays`, `search.{stage1Model,stage1Limit,stage1Thinking,stage2Model,stage2Limit,stage2Thinking}` |
-| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries`, `extractorModel`, `extractorTimeoutMs`, `extractorMaxRetries`, `extractorMaxCandidates`, `extractorAuditRawChars`, `autoLlmWriteEnabled`, `autoWriteRawAuditChars` |
+| sediment | `enabled`, `gitCommit`, `lockTimeoutMs`, `defaultConfidence`, `minWindowChars`, `maxWindowChars`, `maxWindowEntries`, `maxEntryChars`, `extractorModel`, `extractorTimeoutMs`, `extractorMaxRetries`, `extractorMaxCandidates`, `extractorAuditRawChars`, `curatorModel`, `curatorTimeoutMs`, `curatorMaxRetries`, `autoLlmWriteEnabled`, `autoWriteRawAuditChars` |
 | compactionTuner | `enabled`, `thresholdPercent`, `rearmMarginPercent`, `notifyOnTrigger`, `customInstructions` |
 | vision | `modelPreferences` |
 

@@ -777,7 +777,6 @@ export default function activate(pi: ExtensionAPI): void {
 
 interface InitOptions {
   backend?: EncryptableBackend;
-  force?: boolean;
 }
 
 function parseInitArgs(args: string): InitOptions {
@@ -794,7 +793,11 @@ function parseInitArgs(args: string): InitOptions {
       opts.backend = v;
       continue;
     }
-    if (tok === "--force") { opts.force = true; continue; }
+    // No `--force` flag: vault re-init is intentionally hard-blocked. To
+    // switch backends, wait for `/vault migrate-backend` (P0d) or manually
+    // move `~/.abrain/.vault-master.age` aside and rerun /vault init. A
+    // historical `--force` no-op flag was accepted but never read; removed
+    // in Round 5 audit (gpt-5.5 P2) to stop misleading the CLI surface.
     throw new Error(`unknown init flag: ${tok}`);
   }
   return opts;
@@ -803,11 +806,13 @@ function parseInitArgs(args: string): InitOptions {
 async function handleInit(rawArgs: string, ui: { notify(message: string, type?: string): void }): Promise<void> {
   // Idempotent guard: if vault already initialized, refuse re-init.
   //
-  // `--force` is parsed (parseInitArgs) but not honored here: actually
-  // wiping a live vault requires migrating existing secrets and reseating
-  // the master key, which is the `vault migrate-backend` flow (P0d). Until
-  // that lands, --force is a no-op and we keep the warning message neutral
-  // (no "use --force to re-init" promise we can't fulfill).
+  // No `--force` escape hatch: actually wiping a live vault requires
+  // migrating existing secrets and reseating the master key, which is the
+  // `vault migrate-backend` flow (P0d, pending). Until that lands, the
+  // user-facing instruction is to manually move `~/.abrain/.vault-master.age`
+  // aside and rerun /vault init. The historical `--force` no-op flag was
+  // removed in Round 5 audit (gpt-5.5 P2): it accepted but never honored,
+  // so it gave a false promise to anyone who tried it.
   const existing = readBackendFile(ABRAIN_HOME);
   if (existing) {
     ui.notify(

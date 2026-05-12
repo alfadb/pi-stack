@@ -11,7 +11,7 @@
 > **仍然有效的部分**：7 节 LLM-facing facade 契约 / Compiled Truth + Timeline 双段格式 / Lint 规则 / Brain Health 评分 / 8 节 sediment pipeline 的 extractor/triage/writer/reviewer 内核。**修正**：sediment Lane C 的 mechanical semantic gates / dedupe gates 已被 ADR 0016 删除；默认转向 LLM curator + sensitive-info/storage hard gates，git/audit 作为回滚面。
 >
 > **需要随 ADR 0014 同步修订的部分**（v1.1 incorporate Round 3 P0）：
-> - **audit row schema (§8.4)**：`lane` 字段 enum 扩展为 `"explicit" | "auto_write" | "about_me" | "vault_write"`（原ADR 0013 的 `promote` / `auto_promote` 不再使用）。Lane V 另写入独立 log `~/.abrain/.state/vault-events.jsonl`。详 [ADR 0014 §审计扩展](adr/0014-abrain-as-personal-brain.md#审计扩展)。
+> - **audit row schema (§8.4)**：`lane` 字段 enum 扩展为 `"explicit" | "auto_write" | "workflow" | "about_me"`（原 ADR 0013 的 `promote` / `auto_promote` 不再使用）。**「vault_write」不是 lane 枚举值**：Lane V 走独立 op-based schema log `~/.abrain/.state/vault-events.jsonl`，不进这个 sediment-events `lane` 枚举集合；「workflow」是 B1（commit `b6a4a49`，2026-05-12 ship）引入的新枚举值，对应 `writeAbrainWorkflow` 写入 abrain 端 `~/.abrain/.state/sediment/audit.jsonl`；「about_me」占位等 Lane G writer ship 后启用，当前 grep 0 命中。详 [ADR 0014 §审计扩展](adr/0014-abrain-as-personal-brain.md#审计扩展)。
 > - **T7 lint 规则 (§10.1)**：`scope` frontmatter 字段从 **ERROR**-required 降为 **WARNING**-recommended——新 brain 拓扑下 scope 由目录位置隐式决定（§3.5 deterministic router），不再是显式选择。
 >
 > 阅读本文档时，遇到 `<project>/.pensieve/` 与 `~/.abrain/` 字样请同时参照 [brain-redesign-spec.md](brain-redesign-spec.md) 进行物理路径转换。
@@ -163,7 +163,7 @@ sediment 写入时根据 kind + scope 决定目标目录。这是确定性映射
 - 跨项目可复用的流程（如 `run-when-reviewing-code`）→ `~/.abrain/workflows/`
 - 项目特定流程（如 `run-when-updating-claude-plugins`）→ `~/.abrain/projects/<id>/workflows/`
 
-**迁移前提条件**：abrain `workflows/` lane writer（sediment 侧）必须先落地。当前（2026-05-12）该 lane writer 未实现，pipeline 条目仍以 read-only legacy 形式存在于 `<project>/.pensieve/pipelines/`。实施线路见 ADR 0014 「待实施」表。
+**前提条件已满足（2026-05-12）**：abrain `workflows/` lane writer（B1）已 ship，commit `b6a4a49`，详 ADR 0014 实施现状表。`/memory migrate --go` 内部调用 `extensions/sediment/writer.ts:writeAbrainWorkflow` 路由 pipeline-型条目：`cross_project: true` 走 `~/.abrain/workflows/`，缺省走 `~/.abrain/projects/<id>/workflows/`。legacy `<project>/.pensieve/pipelines/` 仓仍可被 memory facade dual-read，逐仓 `/memory migrate --go` 后该仓 forward-only。
 
 **废除路径**：`workflows/` lane writer + `/memory migrate --go` 完成 14 个仓一次性迁移后，`pipelines/` 目录在新仓里不再产生。parser 的 `pipeline` alias 在所有 legacy 数据迁完后可删除（需 alfadb 拍板，预计 ≥1 轮迁移完成后）。
 

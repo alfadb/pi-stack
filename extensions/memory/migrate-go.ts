@@ -572,7 +572,16 @@ async function analyzeEntry(
     0,
     10,
   );
-  const created = scalarString(frontmatter.created) || migrationTimestamp.slice(0, 10);
+  // Both `created` and `updated` default to the full ISO migrationTimestamp
+  // when the source frontmatter is missing them. Earlier we used
+  // `migrationTimestamp.slice(0, 10)` for `created` (YYYY-MM-DD only) but
+  // sediment's own `buildMarkdown` (writer.ts) writes both as full ISO via
+  // `nowIso()`, so the date-only form was a per-migration inconsistency
+  // (Round 5 audit, deepseek-v4-pro P1). Caveat: this still overwrites
+  // the *original* creation date when the source had none recorded —
+  // there is no reliable byte-accurate "created" signal in legacy
+  // .pensieve/ entries that didn't carry one in frontmatter.
+  const created = scalarString(frontmatter.created) || migrationTimestamp;
   const updated = scalarString(frontmatter.updated) || migrationTimestamp;
 
   const notes: string[] = [];

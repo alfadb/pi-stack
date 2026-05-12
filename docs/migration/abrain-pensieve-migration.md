@@ -1,6 +1,6 @@
 # Migration — `.pensieve/` → `~/.abrain/projects/<id>/`
 
-> **状态**：✅ B4 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，12 个 smoke 场景覆盖。接下来是手动逐仓迁移（§4 优先级表）。
+> **状态**：✅ B4 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，**18 个 smoke 场景**覆盖（12 个 B4 主路径 + 6 个边界场景：slug collision / SSH git remote 推断 / HTTPS git remote 推断 / parent commit pathspec 窄化 / abrainPreSha=null fallback / 部分失败混合）。另外 sediment 写入锁 stale-lock reclaim 另有 4 个 smoke 场景（g.1-g.4）不计入本表。接下来是手动逐仓迁移（§4 优先级表）。
 > **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [brain-redesign-spec.md](../brain-redesign-spec.md)
 > **前置**：[vault-bootstrap.md](vault-bootstrap.md)（vault 基础设施已 ship，P0a-P0c.read）
 
@@ -151,7 +151,7 @@ B3+B7: per-file migration substrate 剥离 (✅ shipped 2026-05-12)
 
 B4: /memory migrate --go (✅ shipped 2026-05-12)
   → extensions/memory/migrate-go.ts；preflight + frontmatter 归一化 + pipeline 路由
-  → 12 个 smoke 场景覆盖（happy path / dirty preflight / 幂等 / commits）
+  → 18 个 smoke 场景覆盖（12 主路径：happy / dirty preflight ×2 / legacy frontmatter / .index .state 预过滤 / commits / pre-SHA rollback / 幂等 / + 6 边界：slug collision / SSH remote / HTTPS remote / pathspec 窄化 / abrainPreSha=null / 部分失败混合）
 
 B5: writer cutover (pending)
   → sediment writeProjectEntry 走 abrain projects 路径而非 <cwd>/.pensieve。
