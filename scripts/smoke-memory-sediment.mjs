@@ -58,7 +58,21 @@ function transpileExtensions(outRoot) {
       const srcPath = path.join(srcDir, file);
       const outPath = path.join(outRoot, dir, file.replace(/\.ts$/, ".js"));
       const src = fs.readFileSync(srcPath, "utf-8");
-      const out = ts.transpileModule(src, {
+      // ts.transpileModule() is the *fast* path: it strips TypeScript
+      // syntax but does NOT run the full parser's diagnostics. In
+      // particular, malformed JavaScript template literals (e.g. an
+      // unescaped inner backtick inside a `${...}` string) will be
+      // emitted as-is and only blow up when pi tries to actually load
+      // the extension via its production parser (swc/babel/v8). That's
+      // exactly how the 2026-05-12 regression in extensions/memory/
+      // index.ts:170 (`Run \`/memory migrate --go\` ...`) slipped past
+      // 5 rounds of multi-model audits + every smoke run before it.
+      //
+      // Workaround: after transpiling, parse the emitted JS through
+      // Node's vm.Script with the strict parser to catch syntax errors
+      // that transpileModule lets through. This costs ~5ms per file but
+      // makes smoke a true gatekeeper for `pi load extension`.
+      const transpiled = ts.transpileModule(src, {
         compilerOptions: {
           target: ts.ScriptTarget.ES2022,
           module: ts.ModuleKind.CommonJS,
@@ -67,7 +81,22 @@ function transpileExtensions(outRoot) {
           skipLibCheck: true,
         },
       });
-      writeFile(outPath, out.outputText);
+      try {
+        // vm.Script(...) only parses, doesn't execute. Throws SyntaxError
+        // on malformed JS, which is the failure mode we want to surface.
+        // eslint-disable-next-line no-new
+        new (require("node:vm").Script)(transpiled.outputText, { filename: srcPath });
+      } catch (err) {
+        throw new Error(
+          `Strict parse of ${path.relative(repoRoot, srcPath)} failed — ` +
+            `pi will refuse to load this extension at runtime even though ` +
+            `ts.transpileModule accepted it. Root cause is almost always ` +
+            `unescaped backtick inside a template literal, or an unbalanced ` +
+            `\${...} interpolation.\n` +
+            `Original error: ${err && err.stack ? err.stack : err}`,
+        );
+      }
+      writeFile(outPath, transpiled.outputText);
       count++;
     }
   }

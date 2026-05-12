@@ -167,7 +167,11 @@ function registerMemoryCommand(pi: ExtensionAPI) {
         // Dry-run path: --project is meaningless (no abrain write happens).
         // Warn so users who typed `--project=foo --dry-run` know it's a no-op.
         if (projectIdFlag) {
-          ctx.ui.notify(`/memory migrate --dry-run: --project=${projectIdFlag} is ignored in dry-run mode (only affects --go). Run `/memory migrate --go --project=${projectIdFlag}` to execute.`, "warning");
+          ctx.ui.notify(
+            `/memory migrate --dry-run: --project=${projectIdFlag} is ignored in dry-run mode ` +
+              `(only affects --go). Run '/memory migrate --go --project=${projectIdFlag}' to execute.`,
+            "warning",
+          );
         }
         const report = await planMigrationDryRun(target, settings, undefined, cwd);
         const messages = [formatMigrationPlan(report)];
