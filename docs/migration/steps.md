@@ -314,15 +314,9 @@ echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
 - 混合排序后截断 top-20
 - WorldStore 不存在 → 空结果并继续；ADR 0015 `memory_search` result card 不暴露 degraded 字段，LLM/model/auth/network/JSON 失败 hard error
 
-### Phase 2.3 — Promotion gates 基础版
+### ~~Phase 2.3 — Promotion gates 基础版~~ （已取消）
 
-- Gate 1: 去上下文化检查（关键词替换）
-- Gate 2: 跨实例验证（≥2 project 中出现）
-- Gate 3: 反例检查（仅检查已有 contested 关系）
-- Gate 4: 冷却期（≥3 天）
-- Gate 5: 冲突检查（trigram Jaccard ≥0.7）
-
-**状态（2026-05-11）**：详细设计稿落在 [`phase-2.3-promotion-gates.md`](./phase-2.3-promotion-gates.md)。待 Phase 1.4+ 路线规划后实施（ADR 0016 已删除 burn-in 门控，不再阻塞此 phase）。
+> ⚠️ **已被 [ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D3（2026-05-09）取消**。abrain 七区拓扑下不再有 "project → world promotion" 概念——sediment writer 直接将条目路由到七区（identity / skills / habits / workflows / projects / knowledge / vault）中一个，kind 决定子目录。Promotion gates 1-5 不在路线图上；原设计动机记录仅作历史保留于 [`phase-2.3-promotion-gates.md`](./phase-2.3-promotion-gates.md)（顶部已标 SUPERSEDED）。Lane B/D 同期在 [ADR 0013](../adr/0013-asymmetric-trust-three-lanes.md) 中失效。
 
 ---
 

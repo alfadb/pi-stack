@@ -1,6 +1,7 @@
 # ADR 0014 — Abrain Personal Brain Redesign（重定位 ~/.abrain 为 alfadb 数字孪生）
 
-- **状态**：Accepted（2026-05-09）
+- **状态**：Accepted（2026-05-09）。**P0a / P0b / P0c.write / P0c.read 已 ship**（2026-05-09 → 2026-05-11，详见下文「实施现状」表）。P0d （全 TUI onboarding wizard / mask input / `.env` import）+ P1 主表及后续迁移 cutover（abrain-pensieve-migration.md P2-P8）未实施。
+- **部分取代**：[ADR 0013](0013-asymmetric-trust-three-lanes.md) Lane B（manual promote project→world）/ Lane D（auto-promote）——abrain 七区拓扑下不再有 promote 概念，sediment writer 直接将条目路由到七区内一个，详 §D3。
 - **修订**：v1.4（2026-05-09，desktop-bias correction——vault unlock 从 OS keychain 依赖转为 portable identity （ssh-key/gpg-file/passphrase Tier 1），容器场景从 "不支持" 升 first-class）、v1.3（2026-05-09，incorporate Round 5 复核 P0 修订，含首次真代码修订）、v1.2（2026-05-09，incorporate Round 4 复核 P0 修订）、v1.1（2026-05-09，incorporate Round 3 复核 P0 修订）
 - **日期**：2026-05-09
 - **决策者**：alfadb
@@ -143,19 +144,27 @@ cwd → project-id 映射通过 `~/.abrain/projects/_bindings.md` 维护（git r
 
 ## 实施现状
 
-**未实施**——本 ADR 是设计决策记录。完整实施 plan 在 [migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)（§1 8-phase plan）与 [migration/vault-bootstrap.md](../migration/vault-bootstrap.md)。下面是 phase 摆跱，详情看两个 sub-spec：
+**P0a-P0c shipped（2026-05-09 → 2026-05-11）**，**P0d / P1+ 待实施**。完整 plan 在 [migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)（§1 8-phase plan）与 [migration/vault-bootstrap.md](../migration/vault-bootstrap.md)。
 
-| Phase | 动作 | 验收 |
+### 当前已 ship（vault 子系统 P0）
+
+| 子 phase | 动作 | 验收证据 |
 |---|---|---|
-| **P0** | vault-bootstrap（age + OS keychain 平台矩阵 + master key 生成） | `pi vault status` 返回 unlocked |
-| **P1** | 新增 `resolveActiveProject(cwd)` / `resolveBrainPaths()` 单一入口，所有读旧 `.pensieve` 代码改走它 | resolver 单测通 + 现有功能零回归 |
-| **P2** | Facade dual-read：同时读旧 `.pensieve` + 新 `~/.abrain/projects/<id>/` | smoke：旧内容可被找到 + 新空目录不报错 |
-| **P3** | dedupe / projectSlug / lint / index / git-root 全部走 resolver | grep 整 repo 无残留 hard-coded `.pensieve` |
-| **P4** | Freeze write + smoke 1-2 天观察 | 连续 24h 无 split-brain |
-| **P5** | 持锁迁移：sediment lock + manifest 下 mv | manifest 完整 + epoch 写入 |
-| **P6** | Writer cutover：sediment writer 改写新路径 | 一次新写入落地 + audit lane 含新值 |
-| **P7** | Symlink 兼容期 1-2 周 | 无报错 |
-| **P8** | 删 fallback（dual-read / symlink / 旧 config） | 全链路只走新路径 |
+| **P0a** | `backend-detect.ts` 七种 backend 探测 + `$SECRETS_BACKEND` env override | `extensions/abrain/backend-detect.ts:130-227` + `scripts/smoke-abrain-backend-detect.mjs` |
+| **P0b** | `bootstrap.ts` master key 生成 / age envelope / tmp 安装 / cleanup（inv1-inv6 事务安全） | `extensions/abrain/bootstrap.ts` + `scripts/smoke-abrain-bootstrap.mjs` |
+| **P0c.write** | `vault-writer.ts` set/list/forget + age 公钥加密（不接触 master） + atomic lock + audit | `extensions/abrain/vault-writer.ts:361-450` + `scripts/smoke-abrain-vault-writer.mjs` |
+| **P0c.read** | `vault-reader.ts` unlock master + per-key decrypt + `vault_release(key, scope?, reason?)` LLM tool（pre-flight + deny-first + i18n + description rendering）+ `$VAULT_` / `$PVAULT_` / `$GVAULT_` bash injection （default-withheld stdout）+ literal redaction + read-path audit closure | `extensions/abrain/vault-reader.ts` + `extensions/abrain/vault-bash.ts` + `extensions/abrain/index.ts:607-628` |
+| **P1（vault 侧）** | boot-time active project resolver + `/secret` 默认 active project + `--global` / `--project=<id>` / `--all-projects` | `extensions/_shared/runtime.ts:397-440` + `scripts/smoke-abrain-active-project.mjs` + `scripts/smoke-abrain-secret-scope.mjs` |
+
+### 待实施
+
+| 子 phase | 动作 | 验收 |
+|---|---|---|
+| **P0d** | TUI onboarding wizard（`/vault init` 全交互菜单）+ `/secret set` mask input + `vault import-env` `.env` ingest | wizard 走完七种 backend dynamic menu + mask + import |
+| **P1+（主表）** | abrain-pensieve-migration.md P2-P8：Facade dual-read · hard-coded `.pensieve` 清除 · freeze · 持锁迁移 · writer cutover · symlink · 删 fallback | grep 整 repo 无残留 hard-coded `.pensieve`，sediment writer 写 `~/.abrain/projects/<id>/` |
+| **Lane G** | `/about-me` command + `MEMORY-ABOUT-ME` extractor（identity 区 writer） | identity 区有条目产生 |
+
+> 七区拓扑说明：extension activate 时 `ensureBrainLayout()`（`brain-layout.ts`）会创建全部七个顶层目录，但目前只有 `vault/`（P0c）和 `projects/`（memory Facade dual-read）被实际使用；identity / skills / habits / workflows / knowledge 是空壳，等待各自的 lane writer 落地。
 
 关键约束：P4 之前可 **完全 revert**（git revert 即可）；P5 之后是 forward-only；P6 之后的 delta 只能走 [migration playbook §3-4](../migration/abrain-pensieve-migration.md#3-rollback-playbookp5-半成品状态) 处理。
 

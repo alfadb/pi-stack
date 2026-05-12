@@ -14,9 +14,21 @@ alfadb/pi-astack/
 ├── UPSTREAM.md                        # 上游跟踪（B 类 vendor）+ 三分类说明
 ├── LICENSE                            # MIT
 ├── .gitignore
-├── scripts/
-│   └── smoke-memory-sediment.mjs      # memory + sediment smoke 回归
-│                                      # （无 .gitmodules — vendor/gstack 尚未挂载）
+├── scripts/                            # ✅ 13 个 smoke 脚本（全部在 package.json scripts 中声明）
+│   ├── smoke-memory-sediment.mjs       # memory + sediment smoke 回归（`npm run smoke:memory`）
+│   ├── smoke-dispatch-input-compat.mjs # dispatch input 兼容层
+│   ├── smoke-model-fallback-mutation-timing.mjs  # fallback mutation 时序
+│   ├── smoke-pi-astack-paths.mjs       # `.pi-astack/<module>/` 路径约定
+│   ├── smoke-vault-subpi-isolation.mjs # sub-pi `PI_ABRAIN_DISABLED=1` 零注册
+│   ├── smoke-abrain-backend-detect.mjs # backend 探测 + status 文案 + tool/command 注册静态检查
+│   ├── smoke-abrain-bootstrap.mjs      # master key 生成 + age envelope + inv1-inv6 事务
+│   ├── smoke-abrain-vault-writer.mjs   # writeSecret/listSecrets/forgetSecret + atomic lock
+│   ├── smoke-abrain-vault-reader.mjs   # unlock master + per-key decrypt + redaction
+│   ├── smoke-abrain-vault-bash.mjs     # `$VAULT_` / `$PVAULT_` / `$GVAULT_` 注入 helper
+│   ├── smoke-abrain-active-project.mjs # boot-time active project resolver
+│   ├── smoke-abrain-secret-scope.mjs   # `--global` / `--project=<id>` / `--all-projects` flag parser
+│   └── smoke-abrain-i18n.mjs           # 授权 prompt 本地化与 fallback
+│                                       # （无 .gitmodules — vendor/gstack 尚未挂载）
 │
 ├── docs/                              # ✅ 已实现
 │   ├── memory-architecture.md         # 权威设计规范（v7 记忆架构）
@@ -88,13 +100,16 @@ alfadb/pi-astack/
 │   ├── compaction-tuner/              # ✅ 实现：计划外落地（2026-05-08）
 │   │   ├── index.ts                   # agent_end hook 读 ctx.getContextUsage() 超阈 → ctx.compact()；/compaction-tuner [status|trigger]
 │   │   └── settings.ts                # thresholdPercent / rearmMarginPercent
-│   ├── abrain/                        # ✅ vault P0a-c 子集落地（2026-05-09, ADR 0014 §D4）
-│   │   ├── index.ts                   # /vault status|init + /secret set|list|forget；PI_ABRAIN_DISABLED=1 时 register nothing
-│   │   ├── backend-detect.ts          # ssh-key/gpg-file/macos/secret-service/pass/passphrase-only/disabled 优先级探测（vault-bootstrap §1.4）
+│   ├── abrain/                        # ✅ vault P0a/P0b/P0c.write/P0c.read + P1 全部 ship（2026-05-09 → 2026-05-11, ADR 0014 §D4）
+│   │   ├── index.ts                   # /vault status|init + /secret set|list|forget + vault_release LLM tool + bash hook；PI_ABRAIN_DISABLED=1 时 register nothing
+│   │   ├── backend-detect.ts          # ssh-key/gpg-file/macos/secret-service/pass/passphrase-only/disabled 优先级探测 + $SECRETS_BACKEND env override（vault-bootstrap §1.4）
 │   │   ├── bootstrap.ts               # master key 生成 + install tmp + cleanup（inv1-inv6 事务安全）
+│   │   ├── brain-layout.ts            # 七区顶层目录 ensure（identity / skills / habits / workflows / projects / knowledge / vault），0o700 perms
 │   │   ├── keychain.ts                # macOS Keychain / secret-service / pass dispatch（Tier 2 optimization）
-│   │   ├── vault-writer.ts            # writeSecret/listSecrets/forgetSecret/reconcile；transactional + age 公钥加密（不接触 master key 明文）
-│   │   └── vault-reader.ts            # P0c.read core substrate：unlock master identity + decrypt per-key secret + literal redaction helper（vault_release 的底层）
+│   │   ├── i18n.ts                    # 授权 prompt 本地化（最近 3 条 user msg 推语言 + 200 条 cache + 12s timeout + 英文 fallback）
+│   │   ├── vault-writer.ts            # writeSecret/listSecrets/forgetSecret/reconcile；transactional + age 公钥加密（不接触 master key 明文）+ atomic lock（`open(... 'wx')` + stale reclaim）+ value buffer zero-out + audit ops closure
+│   │   ├── vault-reader.ts            # P0c.read core substrate：unlock master identity + decrypt per-key secret + literal redaction helper（vault_release 的底层）
+│   │   └── vault-bash.ts              # boot-aware `$VAULT_` / `$PVAULT_` / `$GVAULT_` 注入（0600 env file + `trap rm -f` 自清理，stdout 默认不回流 LLM）
 │   ├── _shared/                       # ✅ 跨扩展 helpers
 │   │   ├── footer-status.ts           # 统一 footer status keys（ordered, dispatch state machine, model-curator total count）
 │   │   └── runtime.ts                 # local-tz timestamp / .pi-astack/<module>/ path / appendAudit
@@ -298,7 +313,7 @@ pi-astack 使用独立配置文件 `~/.pi/agent/pi-astack-settings.json`，schem
         │            │            │
         ▼            ▼            ▼
   extensions/    skills/    prompts/
-  (6 已实现)    (待迁入)   (待迁入)
+  (9 已实现)    (待迁入)   (待迁入)
 
   dispatch/ ─── 子进程 spawn ─── pi（独立实例，OS 级隔离）
   vision/   ─── 进程内 streamSimple

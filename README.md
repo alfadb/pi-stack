@@ -32,7 +32,7 @@
 | 项目级存储 | Phase 1.4 当前：`<project>/.pensieve/{maxims,decisions,knowledge,staging,archive}/`；Phase 2 起迁入 `~/.abrain/projects/<id>/`（详见 [abrain-pensieve-migration.md](./docs/migration/abrain-pensieve-migration.md)） |
 | 世界级存储 | `~/.abrain/`（独立 git repo；v7.1 七区结构：identity/skills/habits/workflows/projects/knowledge/vault；`ABRAIN_ROOT` 环境变量） |
 | Sediment 写入 | 单 sidecar 写入；LLM curator → sensitive sanitize → memory_search lookup → op∈{create,update,merge,archive,supersede,delete,skip} → lint → atomic write → audit → git（ADR 0016 curator 模型） |
-| 主会话角色 | 只读（`memory_search` / `memory_get` / `memory_list` / `memory_neighbors`） |
+| 主会话角色 | 记忆只读（`memory_search` / `memory_get` / `memory_list` / `memory_neighbors`）；vault 走用户授权 `vault_release(key, scope?, reason?)`（sub-pi 不注册；bash 侧走 `$VAULT_*` / `$PVAULT_*` / `$GVAULT_*` 注入，默认 stdout 不回流 LLM） |
 | 条目格式 | frontmatter v1 + compiled truth + `## Timeline`（借鉴 gbrain 方法论） |
 | Multi-agent 能力 | `dispatch_agent`/`dispatch_agents` 基础能力；主会话自由组合；sediment 单 agent 不借用 |
 | 知识模型 | 7 种 kind（maxim/decision/anti-pattern/pattern/fact/preference/smell）+ confidence 0-10 + lifetime 正交 |
@@ -40,7 +40,7 @@
 
 详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 16 条 ADR。
 
-> ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 supersede（详见各 ADR 顶部状态字段）。
+> ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 §D3 supersede；ADR 0013 Lane C 的 G2-G13 / readiness / rolling / rate / sampling 机械 gate 被 ADR 0016 删除（详见各 ADR 顶部状态字段）。
 >
 > 文件布局参考：[docs/directory-layout.md](./docs/directory-layout.md) — 反映当前实际实现状态。
 
