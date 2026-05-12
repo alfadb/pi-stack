@@ -520,6 +520,10 @@ Body.
     const mergeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-merge-"));
     fs.mkdirSync(path.join(mergeRoot, ".pensieve", ".state"), { recursive: true });
     fs.mkdirSync(path.join(mergeRoot, ".pi-astack", "sediment"), { recursive: true });
+    // R9: mergeRoot needs .git/ so the R9 gitignore-ensure assertion below
+    // can verify .gitignore auto-append on git repos. ensureProjectGitignoredOnce
+    // checks `<root>/.git` existence (no need for full repo).
+    fs.mkdirSync(path.join(mergeRoot, ".git"), { recursive: true });
     // Canonical already has a row (terminated by \n).
     fs.writeFileSync(
       path.join(mergeRoot, ".pi-astack", "sediment", "audit.jsonl"),
@@ -546,6 +550,31 @@ Body.
     assert(JSON.parse(mergedLines[1]).operation === "legacy", "merged: legacy row appended after canonical");
     assert(JSON.parse(mergedLines[2]).operation === "new", "merged: new appendAudit landed after migration");
     assert(!fs.existsSync(path.join(mergeRoot, ".pensieve", ".state", "sediment-events.jsonl")), "legacy audit file removed after merge");
+
+    // Round 9 P0 (sonnet R9-5 fix): appendAudit must auto-append
+    // `.pi-astack/` to project .gitignore on first touch (only when
+    // projectRoot is a git repo). mergeRoot is git init'd above for
+    // this test fixture, so a .gitignore must now exist with the entry.
+    const mergeGitignore = path.join(mergeRoot, ".gitignore");
+    assert(
+      fs.existsSync(mergeGitignore),
+      `R9 P0: appendAudit on git repo must auto-create .gitignore with .pi-astack/ entry`,
+    );
+    const giContent = fs.readFileSync(mergeGitignore, "utf-8");
+    assert(
+      /\n?\.pi-astack\/?\n/.test(giContent) || /^\.pi-astack\/?$/m.test(giContent),
+      `R9 P0: .gitignore must contain .pi-astack/ entry, got:\n${giContent}`,
+    );
+
+    // R9 P0 negative: non-git repo must NOT have .gitignore created.
+    const nonGitRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-nongit-audit-"));
+    fs.mkdirSync(path.join(nonGitRoot, ".pensieve", ".state"), { recursive: true });
+    await req("./sediment/writer.js").appendAudit(nonGitRoot, { operation: "probe" });
+    assert(
+      !fs.existsSync(path.join(nonGitRoot, ".gitignore")),
+      `R9 P0: appendAudit on non-git project must NOT create .gitignore`,
+    );
+    fs.rmSync(nonGitRoot, { recursive: true, force: true });
 
     // Regression: v1 schema (raw {lastProcessedEntryId}) auto-upgrades on
     // first read. v1 with no sessionId lands in the LEGACY slot and is

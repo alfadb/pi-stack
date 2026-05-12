@@ -49,6 +49,7 @@ import {
 	formatLocalIsoTimestamp,
 	legacyModelFallbackCanaryPath,
 	legacyRetryStreamEofPath,
+	ensureProjectGitignoredOnce,
 	modelFallbackCanaryPath,
 	modelFallbackDir,
 } from "../_shared/runtime";
@@ -156,6 +157,13 @@ function canaryLog(projectRoot: string, line: string): void {
 		const dir = modelFallbackDir(projectRoot);
 		const file = modelFallbackCanaryPath(projectRoot);
 		fs.mkdirSync(dir, { recursive: true });
+		// Round 9 P0 (sonnet R9-5 fix): ensure .pi-astack/ gitignored.
+		// Canary log holds errorMessage snippets that may echo provider
+		// request body — same exfil risk if accidentally committed.
+		// Fire-and-forget (async): the canary writer is sync but the
+		// gitignore check is async; not awaiting is OK because it's
+		// idempotent + cached + best-effort.
+		void ensureProjectGitignoredOnce(projectRoot).catch(() => { /* best-effort */ });
 		try {
 			const stat = fs.statSync(file);
 			if (stat.size > CANARY_LOG_MAX_BYTES) fs.unlinkSync(file);

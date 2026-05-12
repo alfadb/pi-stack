@@ -29,6 +29,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   compactionTunerAuditPath,
   compactionTunerDir,
+  ensureProjectGitignoredOnce,
   formatLocalIsoTimestamp,
 } from "../_shared/runtime";
 import {
@@ -95,6 +96,11 @@ function readSessionId(sm: CompactionTunerCtx["sessionManager"]): string | undef
 
 async function appendAudit(projectRoot: string, row: Record<string, unknown>): Promise<void> {
   await fs.mkdir(compactionTunerDir(projectRoot), { recursive: true });
+  // Round 9 P0 (sonnet R9-5 fix): ensure .pi-astack/ gitignored on
+  // first audit touch. compaction-tuner audit may contain truncated
+  // error_message from compact() failures — same exfil risk as sediment
+  // audit.jsonl if accidentally git-committed.
+  await ensureProjectGitignoredOnce(projectRoot);
   const enriched = {
     timestamp: formatLocalIsoTimestamp(new Date()),
     audit_version: AUDIT_VERSION,

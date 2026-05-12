@@ -26,6 +26,7 @@ import {
   abrainSedimentAuditPath,
   abrainSedimentLocksDir,
   abrainWorkflowsDir,
+  ensureProjectGitignoredOnce,
   ensureSedimentLegacyMigrated,
   formatLocalIsoTimestamp,
   sedimentAuditPath,
@@ -553,6 +554,14 @@ async function gitCommit(projectRoot: string, filePath: string, slug: string): P
 
 export async function appendAudit(projectRoot: string, event: Record<string, unknown>): Promise<string> {
   await ensureSedimentLegacyMigrated(projectRoot);
+  // Round 9 P0 (sonnet R9-5 fix): ensure `.pi-astack/` is in the
+  // project's .gitignore on first audit touch. audit.jsonl contains
+  // LLM raw response, error messages, query text — anything that
+  // could embed secrets echoed back from windowText. If the project
+  // forgets to gitignore .pi-astack/, `git add .` stages this stream
+  // and `git push` exfiltrates. Best-effort: failures (non-git repo,
+  // permission, subdir vs toplevel) do not block audit.
+  await ensureProjectGitignoredOnce(projectRoot);
   const auditPath = sedimentAuditPath(projectRoot);
   await fs.mkdir(path.dirname(auditPath), { recursive: true });
   // Schema v2 enrichment: every audit row carries the local-tz timestamp

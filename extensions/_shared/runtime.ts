@@ -566,3 +566,71 @@ export async function ensureSedimentLegacyMigrated(projectRoot: string): Promise
   await migrateCheckpointFile(legacySedimentCheckpointPath(root), sedimentCheckpointPath(root));
   // Locks are ephemeral; do not migrate.
 }
+
+/* -------- ensure .pi-astack/ is in project .gitignore ----------------- *
+ * Round 9 P0 (sonnet R9-5 fix): `.pi-astack/` holds local runtime state —
+ * sediment/audit.jsonl, sediment/checkpoint*.json, memory/search-metrics.
+ * jsonl, model-fallback/canary.log, compaction-tuner/audit.jsonl. These
+ * files contain LLM raw responses, query text, error messages — anything
+ * that downstream LLM input could echo. If the user's project repo
+ * doesn't have `.pi-astack/` in `.gitignore`, `git add .` accidentally
+ * stages them, then `git commit && git push` exfiltrates to a public
+ * remote.
+ *
+ * Auto-append on first touch (sediment first audit, first search
+ * metrics, first migration audit). Idempotent + per-process cached.
+ *
+ * Only writes the entry when the projectRoot is the root of a git repo
+ * (toplevel == projectRoot). For subdirectories of a parent repo or
+ * non-repos, skip silently — the user can manually add the entry to
+ * the parent .gitignore if they need it.                                 */
+
+const gitignoreEnsured = new Set<string>();
+const PI_ASTACK_GITIGNORE_ENTRY = ".pi-astack/";
+const PI_ASTACK_GITIGNORE_HEADER = "# pi-astack runtime state (audit logs, checkpoints, search metrics)";
+
+export async function ensureProjectGitignoredOnce(projectRoot: string): Promise<
+  { added: true; gitignorePath: string } | { added: false; reason: string }
+> {
+  const root = path.resolve(projectRoot);
+  if (gitignoreEnsured.has(root)) return { added: false, reason: "cached" };
+  gitignoreEnsured.add(root);
+
+  const fs = await import("node:fs/promises");
+  const fsSync = await import("node:fs");
+
+  // Skip if not a git repo OR projectRoot is a subdirectory (not the toplevel).
+  // We only auto-add on the actual repo root — subdirs would write to
+  // the wrong .gitignore (or worse, create one that overrides parent).
+  const gitDir = path.join(root, ".git");
+  if (!fsSync.existsSync(gitDir)) return { added: false, reason: "not_a_git_repo" };
+
+  const gitignorePath = path.join(root, ".gitignore");
+  let existing = "";
+  try {
+    existing = await fs.readFile(gitignorePath, "utf-8");
+  } catch (e: any) {
+    if (e?.code !== "ENOENT") return { added: false, reason: `read_failed: ${e?.code ?? "?"}` };
+  }
+  // Strict membership check: scan trimmed lines. Match BOTH `.pi-astack/`
+  // AND `.pi-astack` (without trailing slash) since both syntactically
+  // ignore the directory and tree.
+  const lines = existing.split(/\r?\n/).map((l) => l.trim());
+  if (lines.some((l) => l === PI_ASTACK_GITIGNORE_ENTRY || l === ".pi-astack")) {
+    return { added: false, reason: "already_present" };
+  }
+
+  // Append; preserve trailing newline if existing has one (don't fuse).
+  const needsLeadingNL = existing.length > 0 && !existing.endsWith("\n");
+  const block = `${needsLeadingNL ? "\n" : ""}${existing ? "\n" : ""}${PI_ASTACK_GITIGNORE_HEADER}\n${PI_ASTACK_GITIGNORE_ENTRY}\n`;
+  try {
+    await fs.appendFile(gitignorePath, block, "utf-8");
+    return { added: true, gitignorePath };
+  } catch (e: any) {
+    // best-effort: do not block audit appends if .gitignore can't be
+    // written (read-only fs, EACCES, etc). Reset cache so next call
+    // can retry.
+    gitignoreEnsured.delete(root);
+    return { added: false, reason: `append_failed: ${e?.code ?? "?"}` };
+  }
+}

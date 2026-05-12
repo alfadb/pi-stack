@@ -4,16 +4,30 @@ import type { MemoryEntry, SearchFilters, SearchParams } from "./types";
 import { relationValues } from "./parser";
 import { entryMatchesFilters } from "./search";
 import { clamp, compareTimestamps, normalizeBareSlug, stableUnique } from "./utils";
-import { memorySearchMetricsPath } from "../_shared/runtime";
+import { ensureProjectGitignoredOnce, memorySearchMetricsPath } from "../_shared/runtime";
+import { sanitizeForMemory } from "../sediment/sanitizer";
 
 function logSearchMetrics(entry: Record<string, unknown>, projectRoot?: string): void {
   if (!projectRoot) return;
   try {
+    // Round 9 P2 (sonnet R9-6 fix): the query string is stored verbatim
+    // (truncated to 80 chars) in search-metrics.jsonl. A user pasting
+    // a token shape into `/memory search` (e.g. "/memory search
+    // ghp_abc123Token...") would land the token first 80 chars on
+    // disk. Sanitize first: pattern-match → replace with placeholder.
+    if (typeof entry.query === "string" && entry.query.length > 0) {
+      const s = sanitizeForMemory(entry.query);
+      if (!s.ok) entry = { ...entry, query: `[redacted: ${s.error}]` };
+    }
     const file = memorySearchMetricsPath(projectRoot);
     const dir = path.dirname(file);
     const fsSync = require("node:fs") as typeof import("node:fs");
     if (!fsSync.existsSync(dir)) fsSync.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fsSync.appendFileSync(file, JSON.stringify(entry) + "\n", "utf-8");
+    // Round 9 P0 (sonnet R9-5 fix): ensure .pi-astack/ is in project
+    // .gitignore. logSearchMetrics is a path independent of appendAudit,
+    // so the gate must also fire here. Best-effort.
+    void ensureProjectGitignoredOnce(projectRoot).catch(() => { /* best-effort */ });
   } catch { /* best-effort */ }
 }
 

@@ -28,9 +28,9 @@ const require = createRequire(import.meta.url);
 const ts = require("typescript");
 
 const failures = [];
-function check(name, fn) {
+async function check(name, fn) {
   try {
-    fn();
+    await fn();
     console.log(`  ok    ${name}`);
   } catch (err) {
     failures.push({ name, err });
@@ -152,6 +152,107 @@ check("all per-module dir helpers stay inside .pi-astack/", () => {
     if (!got.startsWith(want + path.sep)) {
       throw new Error(`${fn.name || "helper"} returned ${got} which escapes ${want}`);
     }
+  }
+});
+
+// ── ensureProjectGitignoredOnce (R9 P0 sonnet R9-5) ─────────────
+// audit/log writers MUST auto-append `.pi-astack/` to project
+// .gitignore so accidental `git add .` doesn't stage audit.jsonl
+// (which contains LLM raw response that may echo secrets).
+check("ensureProjectGitignoredOnce: skip when not a git repo", async () => {
+  const noGitRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-paths-nogit-"));
+  try {
+    const result = await r.ensureProjectGitignoredOnce(noGitRoot);
+    if (result.added !== false || result.reason !== "not_a_git_repo") {
+      throw new Error(`should skip non-git repo, got: ${JSON.stringify(result)}`);
+    }
+    if (fs.existsSync(path.join(noGitRoot, ".gitignore"))) {
+      throw new Error(`should NOT create .gitignore in non-git repo`);
+    }
+  } finally {
+    fs.rmSync(noGitRoot, { recursive: true, force: true });
+  }
+});
+
+check("ensureProjectGitignoredOnce: append when git repo without .gitignore", async () => {
+  const gitRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-paths-git-"));
+  try {
+    fs.mkdirSync(path.join(gitRoot, ".git"), { recursive: true });
+    const result = await r.ensureProjectGitignoredOnce(gitRoot);
+    if (result.added !== true) throw new Error(`should add, got: ${JSON.stringify(result)}`);
+    const content = fs.readFileSync(path.join(gitRoot, ".gitignore"), "utf-8");
+    if (!content.includes(".pi-astack/")) throw new Error(`gitignore should include .pi-astack/, got:\n${content}`);
+    if (!content.includes("# pi-astack runtime state")) throw new Error(`gitignore should include header comment, got:\n${content}`);
+  } finally {
+    fs.rmSync(gitRoot, { recursive: true, force: true });
+  }
+});
+
+check("ensureProjectGitignoredOnce: append when .gitignore exists without entry", async () => {
+  const gitRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-paths-existing-"));
+  try {
+    fs.mkdirSync(path.join(gitRoot, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(gitRoot, ".gitignore"), "node_modules/\nbuild/\n");
+    const result = await r.ensureProjectGitignoredOnce(gitRoot);
+    if (result.added !== true) throw new Error(`should add, got: ${JSON.stringify(result)}`);
+    const content = fs.readFileSync(path.join(gitRoot, ".gitignore"), "utf-8");
+    if (!content.includes("node_modules/")) throw new Error(`pre-existing entries lost: ${content}`);
+    if (!content.includes(".pi-astack/")) throw new Error(`new entry missing: ${content}`);
+  } finally {
+    fs.rmSync(gitRoot, { recursive: true, force: true });
+  }
+});
+
+check("ensureProjectGitignoredOnce: skip when entry already present (`.pi-astack/`)", async () => {
+  const gitRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-paths-already-"));
+  try {
+    fs.mkdirSync(path.join(gitRoot, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(gitRoot, ".gitignore"), "node_modules/\n.pi-astack/\n");
+    const result = await r.ensureProjectGitignoredOnce(gitRoot);
+    if (result.added !== false || result.reason !== "already_present") {
+      throw new Error(`should not re-add, got: ${JSON.stringify(result)}`);
+    }
+    const content = fs.readFileSync(path.join(gitRoot, ".gitignore"), "utf-8");
+    if (content.split(/\r?\n/).filter((l) => l.trim() === ".pi-astack/").length !== 1) {
+      throw new Error(`should not duplicate entry, got:\n${content}`);
+    }
+  } finally {
+    fs.rmSync(gitRoot, { recursive: true, force: true });
+  }
+});
+
+check("ensureProjectGitignoredOnce: skip when entry already present (`.pi-astack` no slash)", async () => {
+  // Test the equivalence: `.pi-astack` and `.pi-astack/` both ignore
+  // the directory in git semantics. Helper must recognize both.
+  const gitRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-paths-noslash-"));
+  try {
+    fs.mkdirSync(path.join(gitRoot, ".git"), { recursive: true });
+    fs.writeFileSync(path.join(gitRoot, ".gitignore"), ".pi-astack\n");
+    const result = await r.ensureProjectGitignoredOnce(gitRoot);
+    if (result.added !== false || result.reason !== "already_present") {
+      throw new Error(`should treat .pi-astack (no slash) as equivalent, got: ${JSON.stringify(result)}`);
+    }
+  } finally {
+    fs.rmSync(gitRoot, { recursive: true, force: true });
+  }
+});
+
+check("ensureProjectGitignoredOnce: idempotent on repeat calls (per-process cache)", async () => {
+  const gitRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-paths-idem-"));
+  try {
+    fs.mkdirSync(path.join(gitRoot, ".git"), { recursive: true });
+    const r1 = await r.ensureProjectGitignoredOnce(gitRoot);
+    const r2 = await r.ensureProjectGitignoredOnce(gitRoot);
+    if (r1.added !== true) throw new Error(`first call should add: ${JSON.stringify(r1)}`);
+    if (r2.added !== false || r2.reason !== "cached") {
+      throw new Error(`second call should be cached, got: ${JSON.stringify(r2)}`);
+    }
+    // Verify no double-append: only one .pi-astack/ entry
+    const content = fs.readFileSync(path.join(gitRoot, ".gitignore"), "utf-8");
+    const count = content.split(/\r?\n/).filter((l) => l.trim() === ".pi-astack/").length;
+    if (count !== 1) throw new Error(`expected 1 entry, got ${count}:\n${content}`);
+  } finally {
+    fs.rmSync(gitRoot, { recursive: true, force: true });
   }
 });
 
