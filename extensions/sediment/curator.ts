@@ -194,6 +194,17 @@ function makeSearchPrompt(draft: ProjectEntryDraft): string {
   ].join("\n");
 }
 
+/**
+ * Build the prompt sent to the curator model. Exported so smoke can
+ * assert directive markers (e.g. cross-scope wikilink hygiene) survive
+ * future refactors. The curator decides create/update/merge/archive/
+ * supersede/delete/skip; weakening these directives could regress
+ * graph quality silently across thousands of auto-write decisions.
+ */
+export function buildCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): string {
+  return makeCuratorPrompt(draft, neighbors);
+}
+
 function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): string {
   return [
     "You are pi-astack sediment curator.",
@@ -221,6 +232,9 @@ function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): 
     "- For update, compiled_truth should be the new current best truth, not an append-only delta. Preserve useful stable context from the old entry when needed.",
     "- timeline_note should be short and evidence-based.",
     "- Do not invent slugs. update/merge/archive/delete/supersede slugs must be one of the neighbor slugs.",
+    "- Cross-scope wikilink hygiene (soft, prefer but not strict): if compiled_truth references entries outside this project, prefer the explicit scope prefix `[[world:slug]]` (for ~/.abrain/knowledge/ maxims and durable knowledge), `[[workflow:slug]]` (for ~/.abrain/workflows/ pipelines), or `[[project:<projectId>:slug]]` (for other projects). Bare `[[slug]]` resolves to the current project by default and to global as fallback during read, but explicit prefixes reduce future graph-rewrite work. Do not invent slugs you have not seen.",
+    "- Preserve existing wikilinks verbatim when merging. Only change a `[[...]]` form if you are deliberately re-pointing it; never silently drop or rewrite an existing link's slug.",
+    "- Example update line: `This refines [[world:reduce-complexity-before-adding-branches]] in the writer-substrate context.`",
     "",
     "Candidate:",
     "<<<SEDIMENT_CANDIDATE",

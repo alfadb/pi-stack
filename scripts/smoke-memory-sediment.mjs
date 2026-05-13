@@ -329,6 +329,84 @@ async function main() {
         assert(unboundRow.binding_status === "manifest_missing", `unbound binding_status mismatch: ${unboundRow.binding_status}`);
         assert(unboundRow.checkpoint_advanced === false, `unbound project_not_bound must not advance checkpoint`);
         assert(!fs.existsSync(path.join(unboundRoot, "subdir", ".pi-astack", "sediment", "checkpoint.json")), `unbound project_not_bound must not create checkpoint`);
+
+        // === path_unconfirmed: manifest + registry exist, but local-map
+        //     has not confirmed this physical path. ADR 0017: malicious
+        //     repo cannot acquire project identity just by checking in a
+        //     forged `.abrain-project.json`; the user must `/abrain bind`
+        //     locally so the absolute path lands in local-map.
+        const unconfRoot = path.join(hookRoot, "unconfirmed-project");
+        fs.mkdirSync(path.join(unconfRoot, "subdir"), { recursive: true });
+        execFileSync("git", ["-C", unconfRoot, "init", "-q"]);
+        // Stage a forged manifest claiming "hook-bound" (already in registry).
+        writeFile(
+          path.join(unconfRoot, ".abrain-project.json"),
+          JSON.stringify({ schema_version: 1, project_id: "hook-bound" }, null, 2),
+        );
+        // Do NOT call hookBindAbrainProject — local-map stays untouched
+        // (no entry maps to unconfRoot). resolveActiveProject should return
+        // path_unconfirmed.
+        const unconfSessionFile = path.join(hookRoot, "sessions", "unconfirmed.jsonl");
+        writeFile(unconfSessionFile, "{}\n");
+        await agentEnd(
+          { messages: [{ role: "assistant", stopReason: "stop" }] },
+          {
+            cwd: path.join(unconfRoot, "subdir"),
+            sessionManager: {
+              getBranch: () => [{ role: "user", content: "MEMORY: should not write" }],
+              getSessionId: () => "hook-unconf-session",
+              getSessionFile: () => unconfSessionFile,
+            },
+            ui: { notify() {}, setStatus() {} },
+          },
+        );
+        const unconfAudit = path.join(unconfRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
+        assert(fs.existsSync(unconfAudit), `path_unconfirmed audit must be visible at launch cwd: ${unconfAudit}`);
+        const unconfRows = fs.readFileSync(unconfAudit, "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
+        const unconfRow = unconfRows.find((r) => r.reason === "project_not_bound");
+        assert(unconfRow, `path_unconfirmed must emit project_not_bound row, got: ${JSON.stringify(unconfRows)}`);
+        assert(
+          unconfRow.binding_status === "path_unconfirmed",
+          `path_unconfirmed audit row binding_status must be 'path_unconfirmed', got: ${unconfRow.binding_status}`,
+        );
+        assert(unconfRow.checkpoint_advanced === false, `path_unconfirmed must not advance checkpoint`);
+        assert(!fs.existsSync(path.join(unconfRoot, "subdir", ".pi-astack", "sediment", "checkpoint.json")), `path_unconfirmed must not create checkpoint`);
+
+        // === registry_missing: manifest claims a projectId not present in
+        //     abrain's projects/<id>/_project.json. Probably a stale
+        //     manifest after the operator deleted the abrain project.
+        const noregRoot = path.join(hookRoot, "noreg-project");
+        fs.mkdirSync(path.join(noregRoot, "subdir"), { recursive: true });
+        execFileSync("git", ["-C", noregRoot, "init", "-q"]);
+        writeFile(
+          path.join(noregRoot, ".abrain-project.json"),
+          JSON.stringify({ schema_version: 1, project_id: "never-registered" }, null, 2),
+        );
+        const noregSessionFile = path.join(hookRoot, "sessions", "noreg.jsonl");
+        writeFile(noregSessionFile, "{}\n");
+        await agentEnd(
+          { messages: [{ role: "assistant", stopReason: "stop" }] },
+          {
+            cwd: path.join(noregRoot, "subdir"),
+            sessionManager: {
+              getBranch: () => [{ role: "user", content: "MEMORY: should not write" }],
+              getSessionId: () => "hook-noreg-session",
+              getSessionFile: () => noregSessionFile,
+            },
+            ui: { notify() {}, setStatus() {} },
+          },
+        );
+        const noregAudit = path.join(noregRoot, "subdir", ".pi-astack", "sediment", "audit.jsonl");
+        assert(fs.existsSync(noregAudit), `registry_missing audit must be visible at launch cwd: ${noregAudit}`);
+        const noregRows = fs.readFileSync(noregAudit, "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
+        const noregRow = noregRows.find((r) => r.reason === "project_not_bound");
+        assert(noregRow, `registry_missing must emit project_not_bound row, got: ${JSON.stringify(noregRows)}`);
+        assert(
+          noregRow.binding_status === "registry_missing",
+          `registry_missing audit row binding_status must be 'registry_missing', got: ${noregRow.binding_status}`,
+        );
+        assert(noregRow.checkpoint_advanced === false, `registry_missing must not advance checkpoint`);
+        assert(!fs.existsSync(path.join(noregRoot, "subdir", ".pi-astack", "sediment", "checkpoint.json")), `registry_missing must not create checkpoint`);
       } finally {
         if (oldHome === undefined) delete process.env.HOME;
         else process.env.HOME = oldHome;
@@ -1004,9 +1082,44 @@ END_MEMORY`;
         "Per-window cap",
         "TWO MEMORY blocks",
         "Title hygiene",
+        // Cross-scope wikilink hygiene (added 2026-05-13 after B5
+        // sediment writer cutover so newly auto-written entries that
+        // reference global maxims / workflows ship with explicit
+        // [[world:...]] / [[workflow:...]] prefix instead of bare
+        // wikilinks the rewriter must mop up later).
+        "Cross-scope wikilink hygiene",
+        "[[world:slug]]",
+        "[[workflow:slug]]",
+        "[[project:<projectId>:slug]]",
+        "Do NOT invent slugs",
       ];
       for (const needle of required) {
         assert(p.includes(needle), `prompt missing required marker: ${JSON.stringify(needle)}`);
+      }
+    }
+
+    // === curator prompt: cross-scope wikilink hygiene (B5 follow-up) =====
+    // Added 2026-05-13 alongside extractor prompt's same directive: the
+    // curator decides update/merge compiled_truth, so it can also
+    // introduce new wikilinks. Lock the directive in source so future
+    // prompt weakening (or a refactor that drops the soft constraint)
+    // is caught at smoke time.
+    {
+      const { buildCuratorPrompt } = req("./sediment/curator.js");
+      const cp = buildCuratorPrompt(
+        { title: "Curator Smoke", kind: "fact", confidence: 5, compiledTruth: "fixture body for curator prompt assertion" },
+        [],
+      );
+      const curatorRequired = [
+        "Cross-scope wikilink hygiene",
+        "[[world:slug]]",
+        "[[workflow:slug]]",
+        "[[project:<projectId>:slug]]",
+        "Preserve existing wikilinks verbatim",
+        "Do not invent slugs",
+      ];
+      for (const needle of curatorRequired) {
+        assert(cp.includes(needle), `curator prompt missing required marker: ${JSON.stringify(needle)}`);
       }
     }
 
@@ -2268,6 +2381,119 @@ Body.
       // Pre-existing entry is untouched (no overwrite of existing data).
       const existingText = fs.readFileSync(path.join(cAbrain, "projects", "collide-test", "maxims", "shared-rule.md"), "utf-8");
       assert(/Shared Rule \(existing\)/.test(existingText), `pre-existing entry must not be overwritten by collision case`);
+
+      // --- partial migration retry: after the operator resolves the
+      //     collision (typically: archive / move the abrain-side entry),
+      //     re-running `/memory migrate --go` must succeed with the
+      //     remaining .pensieve entry now landing in abrain. This is the
+      //     workflow the partial-summary line points users at.
+      //
+      // The retry path is the user-visible recovery mechanism. Without
+      // it tested, a regression that leaves migrate-go thinking it has
+      // already migrated a partial repo (e.g. by writing a stray state
+      // flag) would strand .pensieve entries permanently.
+      {
+        // Operator resolves the collision by unlinking the abrain-side
+        // pre-existing entry. (In production: archive or supersede;
+        // unlink is the simplest reproducible flavor for smoke.)
+        const abrainSide = path.join(cAbrain, "projects", "collide-test", "maxims", "shared-rule.md");
+        execFileSync("git", ["-C", cAbrain, "rm", "-q", path.relative(cAbrain, abrainSide)]);
+        execFileSync("git", ["-C", cAbrain, "commit", "-q", "-m", "smoke: resolve collision by removing pre-existing entry"]);
+
+        const retryResult = await runMigrationGo({
+          pensieveTarget: path.join(cParent, ".pensieve"),
+          abrainHome: cAbrain,
+          projectId: "collide-test",
+          cwd: cParent,
+          settings: DEFAULT_SETTINGS,
+          migrationTimestamp: "2026-05-13T12:30:00.000+08:00",
+        });
+        assert(retryResult.ok === true, `partial-migration retry must succeed after collision resolved, got: ${JSON.stringify(retryResult.preconditionFailures || retryResult)}`);
+        assert(retryResult.movedCount >= 1, `retry should move the previously-failed entry, movedCount=${retryResult.movedCount}`);
+        assert(retryResult.failedCount === 0, `retry should have zero failures, got: ${JSON.stringify(retryResult.entries.filter((e) => e.action === "failed"))}`);
+        // The entry that previously failed must now exist in abrain.
+        assert(fs.existsSync(abrainSide), `partial retry must land the previously-failed entry at ${abrainSide}`);
+        // After full success, B5 cutover removes guard: NO MIGRATED_TO_ABRAIN flag.
+        assert(!fs.existsSync(path.join(cParent, ".pensieve", "MIGRATED_TO_ABRAIN")), `partial retry success must not resurrect MIGRATED_TO_ABRAIN guard (removed in B5 cutover)`);
+        // Summary on retry should be non-partial (no "partial migration" warning).
+        const retrySummary = formatMigrationGoSummary(retryResult, cParent);
+        assert(!/partial migration/.test(retrySummary), `retry summary must not mention partial: ${retrySummary}`);
+      }
+    }
+
+    // (a.2) large-batch migration: audit row entries truncated at 200,
+    //       entries_total + entries_truncated reflect full size.
+    //
+    // The audit row inlines per-entry mapping for forensic traceability
+    // ("which .pensieve file became which abrain target"), but a single
+    // jsonl line containing 5000 entries breaks `jq` / `cat` workflows
+    // and bloats disk. migrate-go.ts:1160 caps inline at 200 and
+    // surfaces the actual size via entries_total + entries_truncated.
+    // Without a smoke locking the contract, a future refactor could
+    // silently switch to inlining everything (regression: audit lines
+    // grow unbounded) or to truncating without the boolean flag
+    // (regression: operators can't tell whether they're looking at a
+    // complete or partial mapping).
+    {
+      const bigParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-bigaudit-parent-"));
+      execFileSync("git", ["-C", bigParent, "init", "-q"]);
+      execFileSync("git", ["-C", bigParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", bigParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", bigParent, "config", "commit.gpgsign", "false"]);
+      // Seed 201 entries (cap + 1) under .pensieve/. Legacy supported
+      // directories per inferLegacyArea (migrate.ts:88) are { maxims,
+      // decisions, knowledge, staging, archive }; `facts` is NOT one of
+      // them (fact-kind entries live under `knowledge/`). Spread across
+      // two legacy dirs so audit also reflects routing diversity.
+      const knowledgeDir = path.join(bigParent, ".pensieve", "knowledge");
+      const maximsDir = path.join(bigParent, ".pensieve", "maxims");
+      fs.mkdirSync(knowledgeDir, { recursive: true });
+      fs.mkdirSync(maximsDir, { recursive: true });
+      const TOTAL = 201;
+      const MAXIMS_COUNT = 30;
+      for (let i = 0; i < TOTAL; i++) {
+        const isMaxim = i < MAXIMS_COUNT;
+        const dir = isMaxim ? maximsDir : knowledgeDir;
+        const slug = isMaxim ? `bigaudit-maxim-${String(i).padStart(3, "0")}` : `bigaudit-fact-${String(i).padStart(3, "0")}`;
+        const title = isMaxim ? `Bigaudit Maxim ${i}` : `Bigaudit Fact ${i}`;
+        fs.writeFileSync(path.join(dir, `${slug}.md`), makeEntry({ title, kind: isMaxim ? "maxim" : "fact" }));
+      }
+      execFileSync("git", ["-C", bigParent, "add", "-A"]);
+      execFileSync("git", ["-C", bigParent, "commit", "-q", "-m", "seed 201 entries"]);
+
+      const bigAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-bigaudit-abrain-"));
+      execFileSync("git", ["-C", bigAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", bigAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", bigAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", bigAbrain, "config", "commit.gpgsign", "false"]);
+      execFileSync("git", ["-C", bigAbrain, "commit", "-q", "--allow-empty", "-m", "init"]);
+      await bindMigrationProject(bigParent, bigAbrain, "bigaudit-proj");
+
+      const bigResult = await runMigrationGo({
+        pensieveTarget: path.join(bigParent, ".pensieve"),
+        abrainHome: bigAbrain,
+        projectId: "bigaudit-proj",
+        cwd: bigParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-13T12:35:00.000+08:00",
+      });
+      assert(bigResult.ok === true, `large-batch migration must succeed, got: ${JSON.stringify(bigResult.preconditionFailures)}`);
+      assert(bigResult.movedCount === TOTAL, `large-batch should move all ${TOTAL} entries, got: ${bigResult.movedCount}`);
+
+      // Verify the migrate_go audit row in abrain side audit.jsonl.
+      const bigAuditPath = path.join(bigAbrain, ".state", "sediment", "audit.jsonl");
+      assert(fs.existsSync(bigAuditPath), `abrain-side audit jsonl must exist at ${bigAuditPath}`);
+      const bigAuditRows = fs.readFileSync(bigAuditPath, "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
+      const migrateRow = bigAuditRows.find((r) => r.operation === "migrate_go" && r.projectId === "bigaudit-proj");
+      assert(migrateRow, `expected migrate_go audit row for bigaudit-proj`);
+      assert(migrateRow.entries_total === TOTAL, `entries_total should reflect full size ${TOTAL}, got ${migrateRow.entries_total}`);
+      assert(migrateRow.entries_truncated === true, `entries_truncated must be true when total > 200, got ${migrateRow.entries_truncated}`);
+      assert(Array.isArray(migrateRow.entries) && migrateRow.entries.length === 200, `inline entries array must be capped at 200, got length=${migrateRow.entries?.length}`);
+      // movedCount on row equals movedCount on result equals TOTAL
+      assert(migrateRow.movedCount === TOTAL, `audit movedCount must match result, got ${migrateRow.movedCount}`);
+      // Inline mapping retains structured per-entry fields (action/route/slug)
+      const sample = migrateRow.entries[0];
+      assert(typeof sample.action === "string" && typeof sample.slug === "string" && typeof sample.route === "string", `inline entry should retain action/slug/route fields, got: ${JSON.stringify(sample)}`);
     }
 
     // (b) ADR 0017: unbound repo refuses even with SSH remote
