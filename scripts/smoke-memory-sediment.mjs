@@ -178,7 +178,7 @@ async function main() {
     const { planMigrationDryRun, writeMigrationReport } = req("./memory/migrate.js");
     const { runMigrationGo, formatMigrationGoSummary } = req("./memory/migrate-go.js");
     const { bindAbrainProject } = req("./_shared/runtime.js");
-    const { runDoctorLite } = req("./memory/doctor.js");
+    const { runDoctorLite, formatDoctorLiteReport } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow } = req("./sediment/writer.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
@@ -1651,6 +1651,21 @@ This is a cross-project review pipeline body with enough content.
       assert(fs.existsSync(path.join(goAbrain, "projects", "test-project", "_index.md")), `abrain _index.md must exist after migration`);
       assert(/graph index rebuilt/.test(summary), `summary should mention graph rebuild`);
       assert(/markdown index rebuilt/.test(summary), `summary should mention markdown index rebuild`);
+
+      // 11a.1) doctor-lite must recognize abrain project targets as the
+      // post-migration store, not feed them back through the legacy .pensieve
+      // migration planner. Otherwise it reports freshly migrated entries as
+      // "pending migrations" and downgrades a healthy abrain target.
+      const abrainDoctor = await runDoctorLite(path.join(goAbrain, "projects", "test-project"), DEFAULT_SETTINGS, undefined, goParent);
+      assert(abrainDoctor.targetKind === "abrain_project", `doctor-lite should classify abrain project target, got ${abrainDoctor.targetKind}`);
+      assert(abrainDoctor.projectId === "test-project", `doctor-lite projectId mismatch: ${abrainDoctor.projectId}`);
+      assert(abrainDoctor.migration.applicable === false, `abrain doctor migration should be not-applicable: ${JSON.stringify(abrainDoctor.migration)}`);
+      assert(abrainDoctor.migration.pendingCount === 0, `abrain doctor must not report pending migrations: ${JSON.stringify(abrainDoctor.migration)}`);
+      assert(abrainDoctor.status === "pass", `healthy abrain project doctor should pass, got ${JSON.stringify(abrainDoctor)}`);
+      assert(abrainDoctor.sediment.operationCounts.migrate_go === 1, `abrain doctor should read filtered abrain-side migrate_go audit stats: ${JSON.stringify(abrainDoctor.sediment.operationCounts)}`);
+      const abrainDoctorText = formatDoctorLiteReport(abrainDoctor);
+      assert(/Target kind: abrain_project \(test-project\)/.test(abrainDoctorText), `formatted doctor report should include target kind: ${abrainDoctorText}`);
+      assert(/Not applicable: target is abrain project test-project/.test(abrainDoctorText), `formatted doctor report should mark migration not applicable: ${abrainDoctorText}`);
 
       // 11b) Rollback hint uses pre-migration SHAs (not HEAD~1) so it works
       // even with N+1 abrain commits (N workflow + 1 migrate-in).

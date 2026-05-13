@@ -7,10 +7,19 @@ import { lintTarget } from "./lint";
 import { planMigrationDryRun } from "./migrate";
 import { prettyPath } from "./utils";
 
-import { sedimentAuditPath } from "../_shared/runtime";
+import {
+  ABRAIN_PROJECT_REGISTRY,
+  abrainSedimentAuditPath,
+  sedimentAuditPath,
+  validateAbrainProjectId,
+} from "../_shared/runtime";
+
+export type DoctorLiteTargetKind = "legacy_pensieve" | "abrain_project" | "markdown_tree";
 
 export interface DoctorLiteReport {
   target: string;
+  targetKind: DoctorLiteTargetKind;
+  projectId?: string;
   status: "pass" | "warning" | "error";
   lint: {
     filesChecked: number;
@@ -35,9 +44,11 @@ export interface DoctorLiteReport {
     error?: string;
   };
   migration: {
+    applicable: boolean;
     filesScanned: number;
     pendingCount: number;
     skippedCount: number;
+    reason?: string;
   };
   sediment: {
     autoWriteCount: number;
@@ -54,27 +65,118 @@ async function targetRoot(target: string): Promise<string> {
   const abs = path.resolve(target);
   try {
     const stat = await fs.stat(abs);
-    if (stat.isFile()) {
-      const parts = abs.split(path.sep);
-      const idx = parts.lastIndexOf(".pensieve");
-      if (idx >= 0) return parts.slice(0, idx + 1).join(path.sep) || path.sep;
-      return path.dirname(abs);
-    }
+    const anchor = stat.isFile() ? path.dirname(abs) : abs;
+    const parts = anchor.split(path.sep);
+    const idx = parts.lastIndexOf(".pensieve");
+    if (idx >= 0) return parts.slice(0, idx + 1).join(path.sep) || path.sep;
+    return anchor;
   } catch {
     return abs;
   }
-  return abs;
 }
 
-function projectRootForPensieveRoot(root: string): string | undefined {
-  return path.basename(root) === ".pensieve" ? path.dirname(root) : undefined;
+interface AbrainProjectTargetInfo {
+  kind: "abrain_project";
+  projectId: string;
+  projectRoot: string;
+  abrainHome: string;
 }
 
-async function readSedimentAuditStats(root: string) {
-  // root may be either a `.pensieve` directory or a project root; resolve
-  // to the project root before computing the .pi-astack/sediment audit path.
-  const projectRoot = path.basename(root) === ".pensieve" ? path.dirname(root) : root;
-  const file = sedimentAuditPath(projectRoot);
+interface DoctorTargetInfo {
+  kind: DoctorLiteTargetKind;
+  root: string;
+  projectId?: string;
+  abrainProjectRoot?: string;
+  abrainHome?: string;
+}
+
+function jsonObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+async function findAbrainProjectTarget(absTarget: string): Promise<AbrainProjectTargetInfo | null> {
+  let cursor = absTarget;
+  try {
+    const stat = await fs.stat(absTarget);
+    if (stat.isFile()) cursor = path.dirname(absTarget);
+  } catch {
+    cursor = path.dirname(absTarget);
+  }
+
+  while (true) {
+    const registryPath = path.join(cursor, ABRAIN_PROJECT_REGISTRY);
+    try {
+      const raw = await fs.readFile(registryPath, "utf-8");
+      const registry = jsonObject(JSON.parse(raw));
+      const projectId = typeof registry?.project_id === "string" ? registry.project_id : "";
+      validateAbrainProjectId(projectId);
+      if (
+        registry?.schema_version === 1 &&
+        projectId === path.basename(cursor) &&
+        path.basename(path.dirname(cursor)) === "projects"
+      ) {
+        return {
+          kind: "abrain_project",
+          projectId,
+          projectRoot: cursor,
+          abrainHome: path.dirname(path.dirname(cursor)),
+        };
+      }
+    } catch {
+      // Keep walking; most ancestor directories are not abrain project roots.
+    }
+
+    const parent = path.dirname(cursor);
+    if (parent === cursor) return null;
+    cursor = parent;
+  }
+}
+
+async function classifyDoctorTarget(absTarget: string): Promise<DoctorTargetInfo> {
+  const abrain = await findAbrainProjectTarget(absTarget);
+  if (abrain) {
+    return {
+      kind: "abrain_project",
+      root: abrain.projectRoot,
+      projectId: abrain.projectId,
+      abrainProjectRoot: abrain.projectRoot,
+      abrainHome: abrain.abrainHome,
+    };
+  }
+
+  const root = await targetRoot(absTarget);
+  return {
+    kind: path.basename(root) === ".pensieve" ? "legacy_pensieve" : "markdown_tree",
+    root,
+  };
+}
+
+function abrainAuditEventMatchesProject(event: Record<string, unknown>, projectId: string, projectRoot: string): boolean {
+  if (event.projectId === projectId || event.project_id === projectId) return true;
+  if (typeof event.abrainProjectDir === "string" && path.resolve(event.abrainProjectDir) === path.resolve(projectRoot)) return true;
+  if (typeof event.target === "string") {
+    if (event.target.startsWith(`projects/${projectId}/`) || event.target.includes(`project:${projectId}:`)) return true;
+    if (path.isAbsolute(event.target)) {
+      const absTarget = path.resolve(event.target);
+      const absProjectRoot = path.resolve(projectRoot);
+      return absTarget === absProjectRoot || absTarget.startsWith(`${absProjectRoot}${path.sep}`);
+    }
+  }
+  return false;
+}
+
+async function readSedimentAuditStats(target: DoctorTargetInfo) {
+  let file: string;
+  if (target.kind === "abrain_project" && target.abrainHome) {
+    file = abrainSedimentAuditPath(target.abrainHome);
+  } else {
+    // root may be either a `.pensieve` directory or a project root; resolve
+    // to the project root before computing the .pi-astack/sediment audit path.
+    const projectRoot = path.basename(target.root) === ".pensieve" ? path.dirname(target.root) : target.root;
+    file = sedimentAuditPath(projectRoot);
+  }
   const stats: DoctorLiteReport["sediment"] = {
     autoWriteCount: 0,
     autoWriteApplied: 0,
@@ -96,6 +198,14 @@ async function readSedimentAuditStats(root: string) {
     if (!line.trim()) continue;
     let event: any;
     try { event = JSON.parse(line); } catch { continue; }
+    if (
+      target.kind === "abrain_project" &&
+      target.projectId &&
+      target.abrainProjectRoot &&
+      !abrainAuditEventMatchesProject(event, target.projectId, target.abrainProjectRoot)
+    ) {
+      continue;
+    }
     const operation = String(event.operation || "unknown");
     stats.operationCounts[operation] = (stats.operationCounts[operation] ?? 0) + 1;
 
@@ -132,11 +242,22 @@ export async function runDoctorLite(
   cwd = process.cwd(),
 ): Promise<DoctorLiteReport> {
   const absTarget = path.resolve(target);
-  const root = await targetRoot(absTarget);
+  const targetInfo = await classifyDoctorTarget(absTarget);
 
   const lint = await lintTarget(absTarget, settings, signal);
-  const migration = await planMigrationDryRun(absTarget, settings, signal, cwd);
-  const sediment = await readSedimentAuditStats(root);
+  const migration = targetInfo.kind === "abrain_project"
+    ? {
+        dryRun: true as const,
+        writeAvailable: false as const,
+        target: prettyPath(absTarget, cwd),
+        filesScanned: 0,
+        migrateCount: 0,
+        skippedCount: 0,
+        items: [],
+        skipped: [],
+      }
+    : await planMigrationDryRun(absTarget, settings, signal, cwd);
+  const sediment = await readSedimentAuditStats(targetInfo);
 
   let graph: DoctorLiteReport["graph"];
   try {
@@ -188,7 +309,7 @@ export async function runDoctorLite(
   } else if (
     lint.warningCount > 0 ||
     graph.missingSymmetricCount > 0 ||
-    migration.migrateCount > 0 ||
+    (targetInfo.kind !== "abrain_project" && migration.migrateCount > 0) ||
     index.stagingOrphanCount > 0
   ) {
     status = "warning";
@@ -196,6 +317,8 @@ export async function runDoctorLite(
 
   return {
     target: prettyPath(absTarget, cwd),
+    targetKind: targetInfo.kind,
+    ...(targetInfo.projectId ? { projectId: targetInfo.projectId } : {}),
     status,
     lint: {
       filesChecked: lint.filesChecked,
@@ -206,18 +329,34 @@ export async function runDoctorLite(
     graph,
     index,
     migration: {
+      applicable: targetInfo.kind !== "abrain_project",
       filesScanned: migration.filesScanned,
       pendingCount: migration.migrateCount,
       skippedCount: migration.skippedCount,
+      ...(targetInfo.kind === "abrain_project"
+        ? { reason: `target is abrain project ${targetInfo.projectId}; legacy .pensieve migration is not applicable` }
+        : {}),
     },
     sediment,
   };
 }
 
 export function formatDoctorLiteReport(report: DoctorLiteReport): string {
+  const targetKind = report.projectId
+    ? `${report.targetKind} (${report.projectId})`
+    : report.targetKind;
+  const migrationLines = report.migration.applicable
+    ? [
+        `- Files scanned: ${report.migration.filesScanned}`,
+        `- Pending migrations: ${report.migration.pendingCount}`,
+        `- Skipped: ${report.migration.skippedCount}`,
+      ]
+    : [`- Not applicable: ${report.migration.reason || "target is not a legacy .pensieve tree"}`];
+
   const lines: string[] = [
     `Memory doctor-lite: ${report.status.toUpperCase()}`,
     `Target: ${report.target}`,
+    `Target kind: ${targetKind}`,
     "",
     "## Lint",
     `- Files checked: ${report.lint.filesChecked}`,
@@ -239,9 +378,7 @@ export function formatDoctorLiteReport(report: DoctorLiteReport): string {
     `- Staging orphans: ${report.index.stagingOrphanCount}`,
     "",
     "## Migration",
-    `- Files scanned: ${report.migration.filesScanned}`,
-    `- Pending migrations: ${report.migration.pendingCount}`,
-    `- Skipped: ${report.migration.skippedCount}`,
+    ...migrationLines,
     "",
     "## Sediment Auto-Write Audit",
     `- Auto-write events: ${report.sediment.autoWriteCount}`,
