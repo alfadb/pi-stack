@@ -1092,6 +1092,14 @@ END_MEMORY`;
         "[[workflow:slug]]",
         "[[project:<projectId>:slug]]",
         "Do NOT invent slugs",
+        // ADR / file path discipline (added 2026-05-13 after sediment
+        // auto-write created entry 8f527c3 that wikilink'd ADR file
+        // names [[project:pi-global:0018-sediment-curator-defense-layers]]
+        // and similar — those targets are pi-astack docs, not abrain
+        // memory entries, so doctor-lite reported them as dead links).
+        "Wikilinks target abrain memory entry slugs only",
+        "MUST be referenced in PROSE",
+        "ADR 0017 (`docs/adr/0017-project-binding-strict-mode.md`)",
       ];
       for (const needle of required) {
         assert(p.includes(needle), `prompt missing required marker: ${JSON.stringify(needle)}`);
@@ -1127,6 +1135,9 @@ END_MEMORY`;
         "Update body-preservation contract",
         "PRESERVE the neighbor's Evidence, Fix, Principle",
         "trigger_phrases on update: UNION",
+        // ADR / file path discipline added 2026-05-13.
+        "Wikilink target discipline",
+        "MUST be referenced in PROSE",
       ];
       for (const needle of curatorRequired) {
         assert(cp.includes(needle), `curator prompt missing required marker: ${JSON.stringify(needle)}`);
