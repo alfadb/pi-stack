@@ -1117,10 +1117,219 @@ END_MEMORY`;
         "[[project:<projectId>:slug]]",
         "Preserve existing wikilinks verbatim",
         "Do not invent slugs",
+        // Update vs create discipline (added 2026-05-13 after curator
+        // P0 in abrain commit 2e8924d: candidate was a downstream
+        // observation, curator did update instead of create+derives_from,
+        // dropping evidence/fix/principle sections).
+        "Update vs create discipline",
+        "`derives_from: [<neighbor-slug>]`",
+        "prefer CREATE with derives_from over UPDATE",
+        "Update body-preservation contract",
+        "PRESERVE the neighbor's Evidence, Fix, Principle",
+        "trigger_phrases on update: UNION",
       ];
       for (const needle of curatorRequired) {
         assert(cp.includes(needle), `curator prompt missing required marker: ${JSON.stringify(needle)}`);
       }
+    }
+
+    // === writer defense in depth: body_shrink + trigger_phrases UNION =====
+    // Mechanical guarantees that complement curator prompt discipline:
+    // (a) update halving the body → reject with reason "body_shrink"
+    //     (catches curator overwrite that no prompt revision could prevent)
+    // (b) update with new trigger_phrases → UNION with existing, never
+    //     replace (preserves retrieval anchors)
+    // Lock both 2026-05-13 after the 2e8924d / 521405b curator P0 sequence.
+    {
+      const dwTarget = setupAbrainTarget("defense-writer");
+      const dwRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-defense-writer-"));
+
+      // Seed an entry with a substantial body + trigger_phrases.
+      const longBody = "# Defense Smoke\n\n" + Array.from({ length: 30 }, (_, i) => `Evidence row ${i}: a sentence of moderate length that contributes to overall body weight.`).join("\n\n");
+      const seed = await writeProjectEntry(
+        { title: "Defense Smoke", kind: "fact", status: "active", confidence: 5, compiledTruth: longBody, triggerPhrases: ["alpha phrase", "beta phrase", "gamma phrase"], timelineNote: "seed", sessionId: "smoke-defense" },
+        { projectRoot: dwRoot, abrainHome: dwTarget.abrainHome, projectId: dwTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+      );
+      assert(seed.status === "created", `seed write should succeed: ${JSON.stringify(seed)}`);
+      const seedBody = fs.readFileSync(seed.path, "utf-8");
+      assert(/alpha phrase/.test(seedBody) && /gamma phrase/.test(seedBody), `seed should embed trigger_phrases:\n${seedBody.slice(0, 400)}`);
+
+      // (a) body_shrink reject: update with a tiny body, expect rejected.
+      const shrinkRes = await updateProjectEntry(
+        "defense-smoke",
+        { compiledTruth: "# Defense Smoke\n\nthis is a much shorter body that drops by far more than half.", sessionId: "smoke-defense", timelineNote: "shrink attempt" },
+        { projectRoot: dwRoot, abrainHome: dwTarget.abrainHome, projectId: dwTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+      );
+      assert(shrinkRes.status === "rejected", `body_shrink update must be rejected, got status=${shrinkRes.status} reason=${shrinkRes.reason}`);
+      // reason field is the categorical key (split-on-colon prefix);
+      // full message is in audit row's `detail` field.
+      assert(shrinkRes.reason === "body_shrink", `rejection reason must be 'body_shrink', got: ${shrinkRes.reason}`);
+      // Verify the audit row carries the full diagnostic detail.
+      const shrinkAuditRows = fs.readFileSync(path.join(dwRoot, ".pi-astack", "sediment", "audit.jsonl"), "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
+      const shrinkAudit = shrinkAuditRows.find((r) => r.operation === "reject" && r.reason === "body_shrink");
+      assert(shrinkAudit, `audit must record body_shrink reject row`);
+      assert(/would shrink compiled_truth from \d+ to \d+/.test(shrinkAudit.detail || ""), `audit detail must explain shrink magnitudes, got: ${shrinkAudit.detail}`);
+      // On-disk content unchanged after reject (atomicWrite never ran).
+      const afterShrink = fs.readFileSync(seed.path, "utf-8");
+      assert(/Evidence row 29/.test(afterShrink), `on-disk body must still contain row 29 after rejected shrink (no atomicWrite): ${afterShrink.slice(0, 400)}`);
+
+      // Negative: update that preserves ≥50% of body must succeed. The
+      // sentence shape here is intentionally close to seed's so the
+      // resulting body length stays comfortably above the 0.5 threshold
+      // even after trimming rows.
+      const preserveBody = "# Defense Smoke\n\n" + Array.from({ length: 24 }, (_, i) => `Evidence row ${i}: a sentence of moderate length that contributes to overall body weight.`).join("\n\n");
+      const preserveRes = await updateProjectEntry(
+        "defense-smoke",
+        { compiledTruth: preserveBody, sessionId: "smoke-defense", timelineNote: "preserve update" },
+        { projectRoot: dwRoot, abrainHome: dwTarget.abrainHome, projectId: dwTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+      );
+      assert(preserveRes.status === "updated", `update preserving ≥50% body must succeed, got: ${JSON.stringify(preserveRes)}`);
+
+      // (b) trigger_phrases UNION: update with only "delta phrase" + an
+      //     existing one in differing casing → final must include all
+      //     existing + delta, no replace.
+      const unionRes = await updateProjectEntry(
+        "defense-smoke",
+        { triggerPhrases: ["ALPHA Phrase", "delta phrase"], compiledTruth: preserveBody, sessionId: "smoke-defense", timelineNote: "union test" },
+        { projectRoot: dwRoot, abrainHome: dwTarget.abrainHome, projectId: dwTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+      );
+      assert(unionRes.status === "updated", `union update must succeed, got: ${JSON.stringify(unionRes)}`);
+      const unionWritten = fs.readFileSync(unionRes.path, "utf-8");
+      // alpha phrase preserved (original casing wins), beta + gamma preserved,
+      // delta phrase added, no duplicate of ALPHA Phrase. yaml renderer
+      // emits strings as `- "..."` (quoted-string list items) so the regex
+      // accepts both quoted and unquoted forms.
+      const tpLine = (p) => new RegExp(`^\\s+- (?:"|')?${p}(?:"|')?\\s*$`, "m");
+      assert(tpLine("alpha phrase").test(unionWritten), `UNION must preserve original 'alpha phrase' casing:\n${unionWritten.slice(0, 600)}`);
+      assert(tpLine("beta phrase").test(unionWritten), `UNION must preserve 'beta phrase':\n${unionWritten.slice(0, 600)}`);
+      assert(tpLine("gamma phrase").test(unionWritten), `UNION must preserve 'gamma phrase':\n${unionWritten.slice(0, 600)}`);
+      assert(tpLine("delta phrase").test(unionWritten), `UNION must add 'delta phrase':\n${unionWritten.slice(0, 600)}`);
+      assert(!/ALPHA Phrase/m.test(unionWritten), `UNION must NOT duplicate 'alpha' in different casing:\n${unionWritten.slice(0, 600)}`);
+      // Count: should be exactly 4 entries (alpha, beta, gamma, delta).
+      const phraseLines = unionWritten.match(/^\s+- (?:"|')?(alpha|beta|gamma|delta) phrase(?:"|')?\s*$/gm) || [];
+      assert(phraseLines.length === 4, `UNION should produce exactly 4 trigger_phrases, got ${phraseLines.length}: ${JSON.stringify(phraseLines)}`);
+
+      // (c) Invariant guards must NOT mis-fire on archive / supersede /
+      // soft-delete (they don't pass compiledTruth so the guards skip
+      // by design — lock this so a future refactor that 'helpfully'
+      // sets compiledTruth=existing on these ops gets caught).
+      const archiveRes = await archiveProjectEntry("defense-smoke", {
+        projectRoot: dwRoot, abrainHome: dwTarget.abrainHome, projectId: dwTarget.projectId,
+        settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
+        reason: "smoke archive", sessionId: "smoke-defense",
+      });
+      assert(archiveRes.status === "archived", `archive must succeed without body_shrink false-positive, got: ${JSON.stringify(archiveRes)}`);
+
+      // (d) merge must NOT be rejected by body_shrink: merge synthesis
+      // legitimately produces a body shorter than each source. Seed two
+      // entries, merge into one, verify result is `merged` not `rejected`.
+      const mTarget = setupAbrainTarget("defense-merge");
+      const mRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-defense-merge-"));
+      const heavyBody = "# Heavy\n\n" + Array.from({ length: 30 }, (_, i) => `Heavy row ${i}: a sentence that contributes substantial body weight to the merge source.`).join("\n\n");
+      const m1 = await writeProjectEntry(
+        { title: "Merge Heavy A", kind: "fact", status: "active", confidence: 5, compiledTruth: heavyBody, timelineNote: "seed-a", sessionId: "smoke-merge" },
+        { projectRoot: mRoot, abrainHome: mTarget.abrainHome, projectId: mTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+      );
+      const m2 = await writeProjectEntry(
+        { title: "Merge Heavy B", kind: "fact", status: "active", confidence: 5, compiledTruth: heavyBody, timelineNote: "seed-b", sessionId: "smoke-merge" },
+        { projectRoot: mRoot, abrainHome: mTarget.abrainHome, projectId: mTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+      );
+      assert(m1.status === "created" && m2.status === "created", `merge seeds must create: ${JSON.stringify({m1, m2})}`);
+      const compactBody = "# Merged\n\nA concise consolidation of A and B.";  // deliberately tiny
+      const mergedRes = await mergeProjectEntries(m1.slug, [m1.slug, m2.slug], {
+        compiledTruth: compactBody, reason: "merge shrink smoke", sessionId: "smoke-merge",
+      }, {
+        projectRoot: mRoot, abrainHome: mTarget.abrainHome, projectId: mTarget.projectId,
+        settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false,
+      });
+      assert(mergedRes.length >= 1 && mergedRes[0].status === "merged", `merge with shrunk body must NOT be rejected by body_shrink, got: ${JSON.stringify(mergedRes)}`);
+
+      // (e) body_section_loss reject: update that drops H2 sections
+      // (the 2e8924d failure fingerprint that byte-length 0.5 alone
+      // cannot catch). Seed entry with 4 H2 sections; update with only 1.
+      const sTarget = setupAbrainTarget("defense-section");
+      const sRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-defense-section-"));
+      const padded = (n) => Array.from({ length: n }, (_, i) => `Padding line ${i} that brings up byte length to bypass the 0.5 shrink floor.`).join("\n");
+      const richBody = [
+        "# Section Smoke",
+        "",
+        "## Evidence",
+        padded(4),
+        "",
+        "## Fix",
+        padded(4),
+        "",
+        "## Principle",
+        padded(4),
+        "",
+        "## Notes",
+        padded(4),
+      ].join("\n");
+      const sSeed = await writeProjectEntry(
+        { title: "Section Smoke", kind: "fact", status: "active", confidence: 5, compiledTruth: richBody, timelineNote: "seed", sessionId: "smoke-section" },
+        { projectRoot: sRoot, abrainHome: sTarget.abrainHome, projectId: sTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+      );
+      assert(sSeed.status === "created", `section seed must create: ${JSON.stringify(sSeed)}`);
+      // Build a body that's ~same byte length but only retains 1 of 4 sections.
+      const sectionLossBody = [
+        "# Section Smoke",
+        "",
+        "## Evidence",
+        padded(16),  // padded heavy so byte length doesn't trigger shrink floor first
+      ].join("\n");
+      const sectionRes = await updateProjectEntry("section-smoke",
+        { compiledTruth: sectionLossBody, sessionId: "smoke-section", timelineNote: "drop sections" },
+        { projectRoot: sRoot, abrainHome: sTarget.abrainHome, projectId: sTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+      );
+      assert(sectionRes.status === "rejected", `section-loss update must be rejected, got status=${sectionRes.status} reason=${sectionRes.reason}`);
+      assert(sectionRes.reason === "body_section_loss", `rejection reason must be 'body_section_loss', got: ${sectionRes.reason}`);
+      const sectionAuditRows = fs.readFileSync(path.join(sRoot, ".pi-astack", "sediment", "audit.jsonl"), "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
+      const sectionAudit = sectionAuditRows.find((r) => r.operation === "reject" && r.reason === "body_section_loss");
+      assert(sectionAudit && /drop \d+ of \d+ H2 sections/.test(sectionAudit.detail || ""), `audit must explain section loss, got: ${sectionAudit?.detail}`);
+
+      // (f) scalar trigger_phrases form: handwritten legacy entries may
+      // have `trigger_phrases: "only one"` (scalar string) not multi-line
+      // array. UNION must preserve the scalar value, not silently drop.
+      const scalarTarget = setupAbrainTarget("defense-scalar");
+      const scalarRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-defense-scalar-"));
+      // Seed a 'legacy' entry directly on disk (writer would normalize
+      // to array form, so we hand-craft the file shape).
+      const scalarSlug = "legacy-scalar-tp";
+      const scalarDir = path.join(scalarTarget.abrainHome, "projects", scalarTarget.projectId, "knowledge");
+      fs.mkdirSync(scalarDir, { recursive: true });
+      const scalarSeed = [
+        "---",
+        `id: project:${scalarTarget.projectId}:${scalarSlug}`,
+        "scope: project",
+        "kind: fact",
+        "status: active",
+        "confidence: 5",
+        "schema_version: 1",
+        'title: "Legacy Scalar TP"',
+        "created: 2026-05-12T10:00:00.000+08:00",
+        "updated: 2026-05-12T10:00:00.000+08:00",
+        "trigger_phrases: legacy-only-anchor",  // SCALAR form
+        "---",
+        "",
+        "# Legacy Scalar TP",
+        "",
+        "Body content to keep under any reasonable shrink threshold.",
+        "",
+        "## Timeline",
+        "",
+        "- 2026-05-12T10:00:00.000+08:00 | seed | captured | hand-crafted legacy scalar form",
+      ].join("\n");
+      fs.writeFileSync(path.join(scalarDir, `${scalarSlug}.md`), scalarSeed);
+      // Update with a new trigger phrase → should UNION with the
+      // existing scalar 'legacy-only-anchor', not replace it.
+      const scalarUpdate = await updateProjectEntry(scalarSlug,
+        { triggerPhrases: ["new-anchor"], compiledTruth: "# Legacy Scalar TP\n\nBody content to keep under any reasonable shrink threshold.\n\nMinor refinement.", sessionId: "smoke-scalar", timelineNote: "scalar union" },
+        { projectRoot: scalarRoot, abrainHome: scalarTarget.abrainHome, projectId: scalarTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false } },
+      );
+      assert(scalarUpdate.status === "updated", `scalar UNION update must succeed, got: ${JSON.stringify(scalarUpdate)}`);
+      const scalarAfter = fs.readFileSync(scalarUpdate.path, "utf-8");
+      assert(/legacy-only-anchor/.test(scalarAfter), `scalar UNION must preserve original 'legacy-only-anchor' (not silently dropped):\n${scalarAfter.slice(0, 600)}`);
+      assert(/new-anchor/.test(scalarAfter), `scalar UNION must add new-anchor:\n${scalarAfter.slice(0, 600)}`);
     }
 
     // === slug-from-title bug fix ===========================================
