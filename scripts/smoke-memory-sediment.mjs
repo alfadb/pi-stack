@@ -547,7 +547,10 @@ Original Pensieve seed content.
     const stillUnsupported = migration.skipped.find((s) => /pipeline.*not migrated/i.test(s.reason));
     assert(!stillUnsupported, `pipelines must no longer be flagged 'unsupported' in dry-run, found: ${stillUnsupported?.reason}`);
     const seedSkip = migration.skipped.find((s) => s.source_path === ".pensieve/maxims/eliminate-special-cases-by-redesigning-data-flow.md");
-    assert(seedSkip && /legacy Pensieve seed/.test(seedSkip.reason), `legacy seed should be skipped in dry-run: ${JSON.stringify(migration.skipped)}`);
+    assert(
+      seedSkip && /legacy Pensieve seed; canonical copy at global abrain/.test(seedSkip.reason),
+      `extract-disposition seed should be skipped with global pointer in dry-run: ${JSON.stringify(migration.skipped)}`,
+    );
     assert(
       !migration.items.some((item) => item.source_path === ".pensieve/maxims/eliminate-special-cases-by-redesigning-data-flow.md"),
       `legacy seed must not appear as a project migration item`,
@@ -1442,8 +1445,9 @@ created: 2026-05-08
 Body.
 `,
       );
-      // legacy Pensieve bootstrap seed: belongs in global abrain, not in
-      // ~/.abrain/projects/<id>/; migrate-go prunes it from the project repo.
+      // legacy Pensieve bootstrap seed (extract disposition): canonical copy
+      // lives in global abrain knowledge; migrate-go prunes it from the
+      // project repo and never duplicates it into projects/<id>/.
       writeFile(
         path.join(goParent, ".pensieve", "knowledge", "taste-review", "content.md"),
         `---
@@ -1457,6 +1461,25 @@ updated: 2026-02-28
 # 代码品味审查知识库
 
 Original Pensieve seed content.
+`,
+      );
+      // legacy Pensieve bootstrap seed (obsolete disposition): design no
+      // longer matches current pi-astack auto-sediment design; migrate-go
+      // prunes without a global replacement.
+      writeFile(
+        path.join(goParent, ".pensieve", "pipelines", "run-when-committing.md"),
+        `---
+id: run-when-committing
+type: pipeline
+title: 提交 Pipeline
+name: run-when-committing
+status: active
+created: 2026-02-28
+updated: 2026-02-28
+---
+# 提交 Pipeline
+
+Original Pensieve seed pipeline body.
 `,
       );
       // pipeline: project-specific (no cross_project flag)
@@ -1559,17 +1582,23 @@ This is a cross-project review pipeline body with enough content.
       // state.md is visible but unsupported, matching dry-run's skipped row.
       // Legacy Pensieve bootstrap seeds are counted as skipped too, but are
       // pruned from the project repo instead of copied into projects/<id>/.
-      assert(result.skippedCount === 2, `support state.md + legacy seed should be skipped, got ${result.skippedCount} skips: ${JSON.stringify(result.entries)}`);
-      assert(result.seedPrunedCount === 1, `expected 1 legacy seed pruned, got ${result.seedPrunedCount}: ${JSON.stringify(result.entries)}`);
+      // 3 skips = state.md + 1 extract seed (taste-review) + 1 obsolete seed (run-when-committing).
+      assert(result.skippedCount === 3, `support state.md + legacy seeds should be skipped, got ${result.skippedCount} skips: ${JSON.stringify(result.entries)}`);
+      assert(result.seedPrunedCount === 2, `expected 2 legacy seeds pruned (1 extract + 1 obsolete), got ${result.seedPrunedCount}: ${JSON.stringify(result.entries)}`);
       assert(
         !result.entries.some((e) => /\.state|\.index/.test(e.source)),
         `no entry should reference .state/.index source: ${JSON.stringify(result.entries)}`,
       );
       const stateSkip = result.entries.find((e) => e.source === "state.md" && e.action === "skipped");
       assert(stateSkip && /support file outside memory entry directories/.test(stateSkip.reason || ""), `state.md should be skipped as support file: ${JSON.stringify(result.entries)}`);
-      const seedPruned = result.entries.find((e) => e.source === path.join("knowledge", "taste-review", "content.md") && e.action === "pruned");
-      assert(seedPruned && /legacy Pensieve seed pruned/.test(seedPruned.reason || ""), `legacy seed should be pruned: ${JSON.stringify(result.entries)}`);
-      assert(seedPruned.target === path.join("knowledge", "taste-review-content.md"), `seed target hint should point at global knowledge: ${JSON.stringify(seedPruned)}`);
+      // Extract disposition: seed pruned + target points at global abrain canonical copy.
+      const seedPrunedExtract = result.entries.find((e) => e.source === path.join("knowledge", "taste-review", "content.md") && e.action === "pruned");
+      assert(seedPrunedExtract && /canonical copy lives at global abrain/.test(seedPrunedExtract.reason || ""), `extract-disposition seed should be pruned with global pointer: ${JSON.stringify(result.entries)}`);
+      assert(seedPrunedExtract.target === path.join("knowledge", "taste-review-content.md"), `extract seed target should point at global knowledge: ${JSON.stringify(seedPrunedExtract)}`);
+      // Obsolete disposition: seed pruned + no global target; reason explains why.
+      const seedPrunedObsolete = result.entries.find((e) => e.source === path.join("pipelines", "run-when-committing.md") && e.action === "pruned");
+      assert(seedPrunedObsolete && /\(obsolete:/.test(seedPrunedObsolete.reason || ""), `obsolete-disposition seed should be pruned with obsolete reason: ${JSON.stringify(result.entries)}`);
+      assert(seedPrunedObsolete.target === "", `obsolete seed must not advertise a global target, got: ${JSON.stringify(seedPrunedObsolete)}`);
       // Derived/support files remain in .pensieve/ (untouched by migration).
       assert(
         fs.existsSync(path.join(goParent, ".pensieve", ".index", "graph.json")),
@@ -1589,11 +1618,23 @@ This is a cross-project review pipeline body with enough content.
       );
       assert(
         !fs.existsSync(path.join(goParent, ".pensieve", "knowledge", "taste-review", "content.md")),
-        `legacy Pensieve seed should be pruned from project .pensieve`,
+        `extract-disposition seed should be pruned from project .pensieve`,
       );
       assert(
         !fs.existsSync(path.join(goAbrain, "projects", "test-project", "knowledge", "taste-review-content.md")),
-        `legacy Pensieve seed must not be migrated into project knowledge/`,
+        `extract-disposition seed must not be migrated into project knowledge/`,
+      );
+      assert(
+        !fs.existsSync(path.join(goParent, ".pensieve", "pipelines", "run-when-committing.md")),
+        `obsolete-disposition seed should be pruned from project .pensieve`,
+      );
+      assert(
+        !fs.existsSync(path.join(goAbrain, "projects", "test-project", "workflows", "run-when-committing.md")),
+        `obsolete-disposition seed must not be migrated into project workflows/`,
+      );
+      assert(
+        !fs.existsSync(path.join(goAbrain, "workflows", "run-when-committing.md")),
+        `obsolete-disposition seed must not be migrated into global workflows/ either`,
       );
 
       // 4) Knowledge entries moved to abrain projects dir

@@ -8,7 +8,16 @@
 
 **单用户 14 仓场景**——比起多人多机渐进迁移，per-repo 一次性更适合。每个 `.pensieve/` 仓在用户主动触发时整体搬迁到 abrain，git 是回滚网，不做 backup，不留 symlink。
 
-**重要边界：legacy Pensieve seed 不是项目知识。** 原版 Pensieve（归档于 `~/.pi/archived/pensieve-pre-rewrite/.src/templates/`）会在每个项目初始化时复制默认 maxims / `taste-review` / `run-when-*` pipelines。它们属于全局 bootstrap 知识/工作流，应一次性提炼进 `~/.abrain/knowledge/` 与 `~/.abrain/workflows/`，不应在每个项目迁移时重复写入 `~/.abrain/projects/<id>/`。`/memory migrate --dry-run` 会把这些 seed 标记 skipped；`--go` 会从项目 `.pensieve/` prune 掉它们，并在父仓迁移 commit 中记录。
+**重要边界：legacy Pensieve seed 不是项目知识。** 原版 Pensieve（归档于 `~/.pi/archived/pensieve-pre-rewrite/.src/templates/`）会在每个项目初始化时复制 9 个默认 seed：5 个 knowledge/maxim + 4 个 `run-when-*` pipeline。`/memory migrate --go` 都会从项目 `.pensieve/` prune 这些 seed，**但根据 disposition 区分哪些进全局 abrain**：
+
+- `disposition: "extract"` — 5 个 knowledge/maxim（`taste-review-content` 与四个 Linus 品味 maxim）：canonical copy 手工提炼后进 `~/.abrain/knowledge/<slug>.md`；prune 后全局可检索。
+- `disposition: "obsolete"` — 4 个 `run-when-*` pipeline：设计与当前 pi-astack 不匹配，**不提炼进全局**。原因：
+  - `run-when-committing`：原设计要求主会话手动调 `self-improve.md` 写记忆；现 pi-astack 是 sediment 在 `agent_end` 自动沉淀，AGENTS.md 还明文禁止主会话直接写记忆。
+  - `run-when-planning`：“动手前先查”已由 AGENTS.md + `memory_search` 覆盖；seed 里 `grep .pensieve/decisions/` 路径完全过时。
+  - `run-when-reviewing-code`：Task Blueprint 合理但 Task 6 “手动沉淀”冲突 auto-sediment；用户需要可触发的 review pipeline 应走 pi prompt template（`~/.pi/agent/prompts/review.md`）而不是 abrain `workflows/`（后者没有主会话 trigger executor）。
+  - `run-when-syncing-to-main`：Pensieve 项目本身的 zh→main 翻译流程，跨项目无意义。
+
+`/memory migrate --dry-run` 会为两类 seed 生成不同的 skipped reason；`--go` 仅 prune，不复制任何文件到 `projects/<id>/`。audit row 中 `action: pruned` 的 entry 可用于后期拼接迁移 forensics。
 
 **核心原则**：
 

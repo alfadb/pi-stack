@@ -757,7 +757,9 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
         seedPrunedCount += 1;
         entries.push({
           source: relSource,
-          target: seed.globalTarget,
+          // For "extract" seeds target points at the canonical global copy;
+          // for "obsolete" seeds there is no global copy and target is "".
+          target: seed.globalTarget ?? "",
           slug: seed.slug,
           title: seed.title,
           kind: seed.kind,

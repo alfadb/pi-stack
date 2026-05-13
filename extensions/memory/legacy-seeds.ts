@@ -1,16 +1,39 @@
 /**
  * Legacy Pensieve bootstrap seeds.
  *
- * The archived pre-rewrite Pensieve skill seeded these files into every
- * project's `.pensieve/` during `init-project-data.sh` by copying from
- * `archived/pensieve-pre-rewrite/.src/templates/`. They are not project-local
- * knowledge: the canonical copy belongs in abrain's global `knowledge/` or
- * `workflows/` zones. Per-repo migration must therefore prune them from the
- * project-side `.pensieve/` without writing duplicates into
+ * The archived pre-rewrite Pensieve skill (see
+ * `~/.pi/archived/pensieve-pre-rewrite/.src/templates/` and
+ * `init-project-data.sh`) copied these files into every project's `.pensieve/`
+ * on first init. They are not project-local knowledge: per-repo migration
+ * must prune them from `.pensieve/` so they don't pollute
  * `~/.abrain/projects/<id>/`.
+ *
+ * Two prune categories:
+ *
+ *   - `extract`: legacy seed whose canonical copy is the alfadb-curated entry
+ *     in `~/.abrain/knowledge/<file>.md` (manually refined from the template).
+ *     The 5 knowledge/maxim seeds fall here: Linus/Ousterhout/Google taste
+ *     review and 4 derived maxims.
+ *
+ *   - `obsolete`: legacy seed whose design no longer matches pi-astack. The
+ *     4 `pipelines/run-when-*.md` workflow seeds fall here:
+ *     - `run-when-committing` told the main session to manually decide
+ *       whether to sediment and then call `self-improve.md`; modern
+ *       pi-astack runs sediment automatically on `agent_end`, and AGENTS.md
+ *       forbids the main session from writing memory directly.
+ *     - `run-when-planning` is already covered by AGENTS.md "动手前先查
+ *       pensieve" + `memory_search`; the seed's `grep .pensieve/...` flow
+ *       is dead.
+ *     - `run-when-reviewing-code` task blueprint is reasonable but its
+ *       sediment step conflicts with auto-write; a user-level
+ *       `prompts/review.md` template is the right surface today.
+ *     - `run-when-syncing-to-main` is Pensieve's own zh→main translation
+ *       process; project-specific, not cross-project useful.
+ *     These seeds are pruned without a global replacement.
  */
 
 export type LegacyPensieveSeedKind = "maxim" | "fact" | "workflow";
+export type LegacyPensieveSeedDisposition = "extract" | "obsolete";
 
 export interface LegacyPensieveSeed {
   relPath: string;
@@ -18,7 +41,13 @@ export interface LegacyPensieveSeed {
   slug: string;
   title: string;
   kind: LegacyPensieveSeedKind;
-  globalTarget: string;
+  disposition: LegacyPensieveSeedDisposition;
+  /** Canonical global copy under `~/.abrain/...`. Only set when
+   *  `disposition === "extract"`. */
+  globalTarget?: string;
+  /** Free-form note explaining why the seed is `obsolete`. Only set when
+   *  `disposition === "obsolete"`. */
+  obsoleteReason?: string;
 }
 
 const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
@@ -28,6 +57,7 @@ const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
     slug: "taste-review-content",
     title: "代码品味审查知识库",
     kind: "fact",
+    disposition: "extract",
     globalTarget: "knowledge/taste-review-content.md",
   },
   {
@@ -36,6 +66,7 @@ const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
     slug: "eliminate-special-cases-by-redesigning-data-flow",
     title: "Eliminate special cases by redesigning data flow",
     kind: "maxim",
+    disposition: "extract",
     globalTarget: "knowledge/eliminate-special-cases-by-redesigning-data-flow.md",
   },
   {
@@ -44,6 +75,7 @@ const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
     slug: "prefer-pragmatic-solutions-over-theoretical-completeness",
     title: "Prefer pragmatic solutions over theoretical completeness",
     kind: "maxim",
+    disposition: "extract",
     globalTarget: "knowledge/prefer-pragmatic-solutions-over-theoretical-completeness.md",
   },
   {
@@ -52,6 +84,7 @@ const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
     slug: "preserve-user-visible-behavior-as-a-hard-rule",
     title: "Preserve user-visible behavior as a hard rule",
     kind: "maxim",
+    disposition: "extract",
     globalTarget: "knowledge/preserve-user-visible-behavior-as-a-hard-rule.md",
   },
   {
@@ -60,6 +93,7 @@ const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
     slug: "reduce-complexity-before-adding-branches",
     title: "Reduce complexity before adding branches",
     kind: "maxim",
+    disposition: "extract",
     globalTarget: "knowledge/reduce-complexity-before-adding-branches.md",
   },
   {
@@ -68,7 +102,8 @@ const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
     slug: "run-when-committing",
     title: "提交 Pipeline",
     kind: "workflow",
-    globalTarget: "workflows/run-when-committing.md",
+    disposition: "obsolete",
+    obsoleteReason: "sediment auto-writes on agent_end; main session must not call legacy self-improve",
   },
   {
     relPath: "pipelines/run-when-planning.md",
@@ -76,7 +111,8 @@ const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
     slug: "run-when-planning",
     title: "规划前知识检索 Pipeline",
     kind: "workflow",
-    globalTarget: "workflows/run-when-planning.md",
+    disposition: "obsolete",
+    obsoleteReason: "covered by AGENTS.md '动手前先查 pensieve' + memory_search; legacy grep paths dead",
   },
   {
     relPath: "pipelines/run-when-reviewing-code.md",
@@ -84,7 +120,8 @@ const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
     slug: "run-when-reviewing-code",
     title: "代码审查 Pipeline",
     kind: "workflow",
-    globalTarget: "workflows/run-when-reviewing-code.md",
+    disposition: "obsolete",
+    obsoleteReason: "sediment auto-writes on agent_end; user-level review prompts/template is the right surface",
   },
   {
     relPath: "pipelines/run-when-syncing-to-main.md",
@@ -92,7 +129,8 @@ const LEGACY_PENSIEVE_SEEDS: LegacyPensieveSeed[] = [
     slug: "run-when-syncing-to-main",
     title: "Sync to Main Pipeline",
     kind: "workflow",
-    globalTarget: "workflows/run-when-syncing-to-main.md",
+    disposition: "obsolete",
+    obsoleteReason: "Pensieve project-specific zh→main translation; not cross-project useful",
   },
 ];
 
@@ -133,9 +171,15 @@ export function legacyPensieveSeedFor(
 }
 
 export function legacyPensieveSeedDryRunReason(seed: LegacyPensieveSeed): string {
-  return `legacy Pensieve seed; extract to global abrain separately (${seed.globalTarget})`;
+  if (seed.disposition === "extract" && seed.globalTarget) {
+    return `legacy Pensieve seed; canonical copy at global abrain ${seed.globalTarget}`;
+  }
+  return `legacy Pensieve seed (obsolete: ${seed.obsoleteReason ?? "design no longer matches pi-astack"})`;
 }
 
 export function legacyPensieveSeedPrunedReason(seed: LegacyPensieveSeed): string {
-  return `legacy Pensieve seed pruned; canonical copy belongs in global abrain (${seed.globalTarget})`;
+  if (seed.disposition === "extract" && seed.globalTarget) {
+    return `legacy Pensieve seed pruned; canonical copy lives at global abrain ${seed.globalTarget}`;
+  }
+  return `legacy Pensieve seed pruned (obsolete: ${seed.obsoleteReason ?? "design no longer matches pi-astack"})`;
 }
