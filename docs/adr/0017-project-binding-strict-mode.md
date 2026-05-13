@@ -164,12 +164,14 @@ pi 启动时根据启动 cwd 的 git root / cwd root 读取绑定状态。active
 ~/.abrain/.state/projects/local-map.json
 ```
 
-不自动 commit。输出提示用户按需 commit：
+自动在两端提交 bind artifacts（只提交精确 pathspec，不扫入其他 staged/working-tree 改动）：
 
 ```text
-cd <project> && git add .abrain-project.json && git commit -m "chore: bind abrain project opencode-global"
-cd ~/.abrain && git add projects/opencode-global/_project.json && git commit -m "project: add opencode-global"
+project repo: .abrain-project.json
+~/.abrain repo: .gitignore (if changed) + projects/opencode-global/_project.json
 ```
+
+若任一仓不是 git worktree 或 git commit 失败，`/abrain bind` 仍会写入三层 binding 并在输出里标 warning；但 `/memory migrate --go` 的 git-clean preflight 会继续拒绝，直到用户修复提交状态。
 
 ### 已有 manifest，确认当前路径
 

@@ -201,6 +201,63 @@ interface VaultReleaseUi {
 
 export const VAULT_RELEASE_AUTH_CHOICES = ["No", "Deny + remember", "Yes once", "Session"] as const;
 
+export type AutoCommitStatus = "committed" | "clean" | "not_git" | "failed";
+
+export interface AutoCommitResult {
+  repoRoot: string;
+  paths: string[];
+  status: AutoCommitStatus;
+  commitSha?: string;
+  detail?: string;
+}
+
+function gitErrorSummary(err: any): string {
+  const stderr = typeof err?.stderr === "string" ? err.stderr : err?.stderr?.toString?.();
+  const stdout = typeof err?.stdout === "string" ? err.stdout : err?.stdout?.toString?.();
+  return (stderr || stdout || err?.message || String(err)).trim().slice(0, 500);
+}
+
+export function autoCommitPaths(repoRoot: string, relPaths: string[], message: string): AutoCommitResult {
+  const root = path.resolve(repoRoot);
+  const paths = relPaths.map((p) => p.replace(/\\/g, "/")).filter(Boolean);
+  if (paths.length === 0) return { repoRoot: root, paths, status: "clean", detail: "no paths" };
+  try {
+    execFileSync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 3000 });
+  } catch {
+    return { repoRoot: root, paths, status: "not_git", detail: "not a git worktree" };
+  }
+
+  try {
+    execFileSync("git", ["-C", root, "add", "--", ...paths], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
+    let hasStagedChanges = true;
+    try {
+      execFileSync("git", ["-C", root, "diff", "--cached", "--quiet", "--", ...paths], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 5000 });
+      hasStagedChanges = false;
+    } catch {
+      hasStagedChanges = true;
+    }
+    if (!hasStagedChanges) return { repoRoot: root, paths, status: "clean", detail: "no changes" };
+
+    execFileSync("git", ["-C", root, "commit", "-m", message, "--", ...paths], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 20_000 });
+    const sha = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 3000 }).trim();
+    return { repoRoot: root, paths, status: "committed", commitSha: sha || undefined };
+  } catch (err: any) {
+    return { repoRoot: root, paths, status: "failed", detail: gitErrorSummary(err) };
+  }
+}
+
+function formatAutoCommitResult(label: string, result: AutoCommitResult): string {
+  const paths = result.paths.join(", ");
+  if (result.status === "committed") return `- ${label}: committed ${result.commitSha?.slice(0, 12) ?? "(unknown sha)"} (${paths})`;
+  if (result.status === "clean") return `- ${label}: clean (${paths})`;
+  if (result.status === "not_git") return `- ${label}: skipped; not a git worktree (${result.repoRoot})`;
+  return `- ${label}: failed (${paths}) — ${result.detail ?? "unknown error"}`;
+}
+
+function autoCommitNeedsWarning(result: AutoCommitResult): boolean {
+  return result.status === "failed" || result.status === "not_git";
+}
+
 // ── /secret scope parsing (ADR 0014 P1 step 2) ──────────────────────────
 
 export type SecretScopeArg = "default" | "global" | { project: string };
@@ -1214,8 +1271,19 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
         cwd: commandCwd,
         projectId: parsed.projectId,
       });
+      const projectCommit = autoCommitPaths(
+        result.projectRoot,
+        [".abrain-project.json"],
+        `chore: 绑定 abrain 项目 ${result.projectId}`,
+      );
+      const abrainCommit = autoCommitPaths(
+        ABRAIN_HOME,
+        [".gitignore", `projects/${result.projectId}/_project.json`],
+        `project: 添加 ${result.projectId}`,
+      );
       bootActiveProject = snapshotBootActiveProject(commandCwd);
       bootActiveProjectAt = Date.now();
+      const commitWarning = autoCommitNeedsWarning(projectCommit) || autoCommitNeedsWarning(abrainCommit);
       ui.notify([
         `Bound current project to abrain project: ${result.projectId}`,
         "",
@@ -1225,10 +1293,11 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
         `- ${result.localMapPath}${result.localPathAdded ? " (path added)" : " (path refreshed)"}`,
         `- ${result.abrainGitignorePath}${result.abrainGitignoreUpdated ? " (added .state/ ignore)" : " (verified .state/ ignore)"}`,
         "",
-        "Commit if desired:",
-        `  cd ${result.projectRoot} && git add .abrain-project.json && git commit -m "chore: bind abrain project ${result.projectId}"`,
-        `  cd ${ABRAIN_HOME} && git add .gitignore projects/${result.projectId}/_project.json && git commit -m "project: add ${result.projectId}"`,
-      ].join("\n"), "info");
+        "Auto-commits:",
+        formatAutoCommitResult("project repo", projectCommit),
+        formatAutoCommitResult("abrain repo", abrainCommit),
+        ...(commitWarning ? ["", "Warning: auto-commit failed/skipped for at least one repo; fix it before `/memory migrate --go`."] : []),
+      ].join("\n"), commitWarning ? "warning" : "info");
     } catch (err: any) {
       ui.notify(`/abrain bind failed: ${err.message}`, "warning");
     }

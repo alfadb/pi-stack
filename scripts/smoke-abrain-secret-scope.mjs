@@ -5,6 +5,7 @@
  * write/list/forget paths are still covered by smoke-abrain-vault-writer.
  */
 
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -159,6 +160,30 @@ check("boot-time snapshot helpers expose getter+reset", () => {
   if (typeof indexModule.getBootActiveProject !== "function") throw new Error("getBootActiveProject missing");
   if (typeof indexModule.getBootActiveProjectSnapshotAt !== "function") throw new Error("snapshot timestamp missing");
   if (typeof indexModule.__resetBootActiveProjectForTests !== "function") throw new Error("reset helper missing");
+});
+
+check("autoCommitPaths commits only the requested binding artifacts", () => {
+  if (typeof indexModule.autoCommitPaths !== "function") throw new Error("autoCommitPaths missing");
+  const repo = fs.mkdtempSync(path.join(tmpDir, "autocommit-repo-"));
+  execFileSync("git", ["-C", repo, "init", "-q"]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "smoke@pi-astack.local"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "pi-astack smoke"]);
+  execFileSync("git", ["-C", repo, "config", "commit.gpgsign", "false"]);
+  fs.writeFileSync(path.join(repo, "README.md"), "# smoke\n");
+  execFileSync("git", ["-C", repo, "add", "README.md"]);
+  execFileSync("git", ["-C", repo, "commit", "-q", "-m", "init"]);
+
+  fs.writeFileSync(path.join(repo, ".abrain-project.json"), JSON.stringify({ schema_version: 1, project_id: "smoke" }, null, 2) + "\n");
+  fs.writeFileSync(path.join(repo, "unrelated.txt"), "must stay uncommitted\n");
+  execFileSync("git", ["-C", repo, "add", "unrelated.txt"]);
+  const result = indexModule.autoCommitPaths(repo, [".abrain-project.json"], "chore: bind abrain project smoke");
+  if (result.status !== "committed") throw new Error(`expected committed, got ${JSON.stringify(result)}`);
+  const committedFiles = execFileSync("git", ["-C", repo, "show", "--name-only", "--pretty=format:", "HEAD"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
+  if (JSON.stringify(committedFiles) !== JSON.stringify([".abrain-project.json"])) throw new Error(`commit should include only binding artifact, got ${JSON.stringify(committedFiles)}`);
+  const staged = execFileSync("git", ["-C", repo, "diff", "--cached", "--name-only"], { encoding: "utf-8" }).trim().split("\n").filter(Boolean);
+  if (JSON.stringify(staged) !== JSON.stringify(["unrelated.txt"])) throw new Error(`unrelated staged changes should remain staged, got ${JSON.stringify(staged)}`);
+  const clean = indexModule.autoCommitPaths(repo, [".abrain-project.json"], "noop");
+  if (clean.status !== "clean") throw new Error(`second autocommit should be clean, got ${JSON.stringify(clean)}`);
 });
 
 check("/abrain status is read-only and does not mutate boot active project", () => {

@@ -24,9 +24,10 @@ B4.5 后，迁移前必须先完成 strict binding：
 
 ```text
 /abrain bind --project=<id>
-# commit bind artifacts before --go, otherwise git-clean preflight will refuse:
+# /abrain bind auto-commits bind artifacts on both sides using exact pathspecs:
 #   project repo: .abrain-project.json
 #   ~/.abrain repo: .gitignore (if changed) + projects/<id>/_project.json
+# If auto-commit warns/skips/fails, fix those commits before --go.
 /memory migrate --dry-run
 /memory migrate --go
 ```
