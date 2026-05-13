@@ -2792,6 +2792,93 @@ Body.
         fs.rmSync(tgt, { recursive: true, force: true });
       }
 
+      // --- Case h.2b: cross-scope wikilink resolution (abrain project) ---
+      //
+      // When target lives at <abrainHome>/projects/<id>/, wikilinks
+      // pointing at slugs absent in the project but PRESENT in global
+      // abrain knowledge/ or workflows/ must NOT count as dead links.
+      // Without this, every project entry that references one of the 4
+      // global Linus maxims (e.g. `[[reduce-complexity-...]]`) fires a
+      // false-positive deadLink error in doctor-lite after migration.
+      {
+        const { buildGraphSnapshot, checkBacklinks } = req("./memory/graph.js");
+        const csAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-crossscope-abrain-"));
+        process.env.ABRAIN_ROOT = csAbrain;
+        try {
+          const projectId = "cs-test";
+          const projDir = path.join(csAbrain, "projects", projectId);
+          const kDir = path.join(csAbrain, "knowledge");
+          const wDir = path.join(csAbrain, "workflows");
+          for (const d of [projDir, kDir, wDir]) fs.mkdirSync(d, { recursive: true });
+
+          // global knowledge entry — the wikilink target.
+          writeFile(
+            path.join(kDir, "global-maxim.md"),
+            `---\nid: world:global-maxim\nscope: world\nkind: maxim\nschema_version: 1\ntitle: Global maxim\nstatus: active\nconfidence: 7\n---\n# Global maxim\n\nBody.\n\n## Timeline\n\n- 2026-05-13 | seed | bootstrapped\n`,
+          );
+          // global workflow entry.
+          writeFile(
+            path.join(wDir, "global-workflow.md"),
+            `---\nid: workflow:global-workflow\nscope: workflow\nkind: workflow\nschema_version: 1\ntitle: Global workflow\nstatus: active\nconfidence: 5\ncross_project: true\n---\n# Global workflow\n\nBody.\n\n## Timeline\n\n- 2026-05-13 | seed | bootstrapped\n`,
+          );
+          // project entry: 3 wikilinks — 1 cross-scope hit (knowledge),
+          // 1 cross-scope hit (workflow), 1 truly dead. The 3rd one is
+          // the dead-link control: it must STILL fire after cross-scope
+          // fallback so we don't blanket-suppress legitimate dead links.
+          writeFile(
+            path.join(projDir, "decisions", "linker.md"),
+            `---\nid: project:${projectId}:linker\nscope: project\nkind: decision\nschema_version: 1\ntitle: Linker\nstatus: active\nconfidence: 5\n---\n# Linker\n\nSee [[global-maxim]] and [[global-workflow]] and [[ghost-truly-missing]].\n\n## Timeline\n\n- 2026-05-13 | author | drafted\n`,
+          );
+
+          const snap = await buildGraphSnapshot(projDir, memSettings, undefined, projDir);
+          assert(
+            snap.stats.cross_scope_links.length === 2,
+            `cross_scope_links should be 2 (global-maxim + global-workflow), got ${snap.stats.cross_scope_links.length}: ${JSON.stringify(snap.stats.cross_scope_links)}`,
+          );
+          assert(
+            snap.stats.dead_links.length === 1 && snap.stats.dead_links[0].to === "ghost-truly-missing",
+            `dead_links should still report ghost-truly-missing only, got ${JSON.stringify(snap.stats.dead_links)}`,
+          );
+          const crossSlugs = snap.stats.cross_scope_links.map((l) => l.to).sort();
+          assert(
+            JSON.stringify(crossSlugs) === JSON.stringify(["global-maxim", "global-workflow"]),
+            `cross_scope_links targets should be the two globals, got ${JSON.stringify(crossSlugs)}`,
+          );
+
+          // checkBacklinks (which doctor-lite uses) must mirror the
+          // snapshot: only ghost-truly-missing is reported as dead_link.
+          const bl = await checkBacklinks(projDir, memSettings, undefined, projDir);
+          assert(
+            bl.deadLinkCount === 1,
+            `checkBacklinks deadLinkCount should be 1 (cross-scope absorbed 2), got ${bl.deadLinkCount}`,
+          );
+
+          // --- legacy .pensieve path: cross-scope must NOT engage there.
+          //     Wikilinks in a legacy target should still go to dead_links
+          //     because abrainProjectContext returns null outside abrain.
+          const legacyParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-crossscope-legacy-"));
+          const legacyTgt = path.join(legacyParent, ".pensieve");
+          fs.mkdirSync(path.join(legacyTgt, "decisions"), { recursive: true });
+          writeFile(
+            path.join(legacyTgt, "decisions", "legacy-link.md"),
+            `---\ntitle: Legacy link\nkind: decision\nschema_version: 1\nstatus: active\nconfidence: 5\ncreated: 2026-05-12\n---\n# Legacy link\n\nSee [[global-maxim]].\n\n## Timeline\n\n- 2026-05-12 | author | drafted\n`,
+          );
+          const legacySnap = await buildGraphSnapshot(legacyTgt, memSettings, undefined, legacyParent);
+          assert(
+            legacySnap.stats.cross_scope_links.length === 0,
+            `legacy .pensieve target must NOT engage cross-scope fallback, got ${JSON.stringify(legacySnap.stats.cross_scope_links)}`,
+          );
+          assert(
+            legacySnap.stats.dead_links.length === 1 && legacySnap.stats.dead_links[0].to === "global-maxim",
+            `legacy .pensieve wikilink should fire as dead link, got ${JSON.stringify(legacySnap.stats.dead_links)}`,
+          );
+          fs.rmSync(legacyParent, { recursive: true, force: true });
+        } finally {
+          delete process.env.ABRAIN_ROOT;
+          fs.rmSync(csAbrain, { recursive: true, force: true });
+        }
+      }
+
       // --- Case h.3: migrate-go frontmatter-unparseable note path ---
       // Fixture: a .pensieve entry with frontmatter that's structurally
       // present (delimited by ---) but where parseFrontmatter returns an

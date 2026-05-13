@@ -32,6 +32,9 @@ export interface DoctorLiteReport {
     edgeCount: number;
     orphanCount: number;
     deadLinkCount: number;
+    /** Wikilinks resolved against global abrain (knowledge/ + workflows/)
+     *  when target is an abrain project. NOT counted as dead links. */
+    crossScopeLinkCount: number;
     missingSymmetricCount: number;
     buildOk: boolean;
     error?: string;
@@ -268,6 +271,7 @@ export async function runDoctorLite(
       edgeCount: snapshot.stats.edge_count,
       orphanCount: snapshot.stats.orphans.length,
       deadLinkCount: backlinks.deadLinkCount,
+      crossScopeLinkCount: snapshot.stats.cross_scope_links.length,
       missingSymmetricCount: backlinks.missingSymmetricCount,
       buildOk: true,
     };
@@ -277,6 +281,7 @@ export async function runDoctorLite(
       edgeCount: 0,
       orphanCount: 0,
       deadLinkCount: 0,
+      crossScopeLinkCount: 0,
       missingSymmetricCount: 0,
       buildOk: false,
       error: e instanceof Error ? e.message : String(e),
@@ -369,6 +374,7 @@ export function formatDoctorLiteReport(report: DoctorLiteReport): string {
     `- Edges: ${report.graph.edgeCount}`,
     `- Orphans: ${report.graph.orphanCount}`,
     `- Dead links: ${report.graph.deadLinkCount}`,
+    `- Cross-scope links (resolved against global abrain): ${report.graph.crossScopeLinkCount}`,
     `- Missing symmetric backlinks: ${report.graph.missingSymmetricCount}`,
     "",
     "## Generated Index",

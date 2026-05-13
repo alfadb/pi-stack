@@ -37,6 +37,16 @@ export interface GraphSnapshot {
     edge_count: number;
     orphans: string[];
     dead_links: Array<{ from: string; to: string; type: string }>;
+    /**
+     * Cross-scope wikilinks: from a project entry to a slug that is NOT
+     * present in the project but IS present in global abrain
+     * (`<abrainHome>/knowledge/` or `<abrainHome>/workflows/`). Tracked
+     * separately from `dead_links` because they're navigable via
+     * memory_search / memory_get, just not in-scope for project graph.
+     * Empty array when target is not an abrain project (legacy
+     * .pensieve / global abrain target / arbitrary markdown tree).
+     */
+    cross_scope_links: Array<{ from: string; to: string; type: string }>;
   };
 }
 
@@ -85,6 +95,65 @@ function isInside(root: string, abs: string): boolean {
 
 function inferScopeFromTarget(target: string): Scope {
   return isInside(abrainRoot(), path.resolve(target)) ? "world" : "project";
+}
+
+/**
+ * Detect whether `target` lives under `<abrainHome>/projects/<id>/`. When
+ * yes, the project graph should treat wikilinks pointing at slugs found
+ * in global abrain (`knowledge/` + `workflows/`) as CROSS-SCOPE links,
+ * not dead links — the canonical copy lives one zone up. Returns null
+ * for legacy .pensieve, the global abrain root itself, or arbitrary
+ * markdown trees outside abrain.
+ *
+ * Used by buildGraphSnapshot so that doctor-lite no longer fires
+ * deadLink errors on every project entry that references the 4 global
+ * Linus maxims (`reduce-complexity-...`, `eliminate-special-cases-...`,
+ * etc.) prune-extracted by the per-repo migration.
+ */
+function abrainProjectContext(target: string): { abrainHome: string; projectId: string } | null {
+  const abs = path.resolve(target);
+  const abrain = abrainRoot();
+  if (!isInside(abrain, abs)) return null;
+  const projectsDir = path.join(abrain, "projects");
+  if (!isInside(projectsDir, abs)) return null;
+  if (path.resolve(projectsDir) === abs) return null;  // target is `projects/` itself
+  const rel = path.relative(projectsDir, abs);
+  if (!rel || rel.startsWith("..")) return null;
+  const projectId = rel.split(path.sep)[0]!;
+  if (!projectId) return null;
+  return { abrainHome: abrain, projectId };
+}
+
+/**
+ * Collect the slug set for global abrain knowledge + workflows zones,
+ * used as cross-scope fallback when resolving project-internal
+ * wikilinks. Cached per buildGraphSnapshot call (one scan per zone)
+ * since scanStore is O(file count) and rg-backed.
+ */
+async function collectAbrainGlobalSlugs(
+  abrainHome: string,
+  settings: MemorySettings,
+  signal?: AbortSignal,
+  cwd = process.cwd(),
+): Promise<Set<string>> {
+  const slugs = new Set<string>();
+  for (const subdir of ["knowledge", "workflows"]) {
+    const root = path.join(abrainHome, subdir);
+    try {
+      const stat = await fs.stat(root);
+      if (!stat.isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    const entries = await scanStore(
+      { scope: "world", root, label: subdir },
+      cwd,
+      settings,
+      signal,
+    );
+    for (const entry of entries) slugs.add(entry.slug);
+  }
+  return slugs;
 }
 
 function storeRootForFile(abs: string): string {
@@ -190,11 +259,27 @@ export async function buildGraphSnapshot(
     }
   }
 
+  // Pre-load global abrain slugs only when target is an abrain project;
+  // legacy .pensieve / arbitrary trees / the global abrain root itself
+  // don't have a meaningful "cross-scope fallback" zone above them.
+  const projectCtx = abrainProjectContext(root);
+  const globalSlugs = projectCtx
+    ? await collectAbrainGlobalSlugs(projectCtx.abrainHome, settings, signal, cwd)
+    : null;
+
   const dead_links: Array<{ from: string; to: string; type: string }> = [];
+  const cross_scope_links: Array<{ from: string; to: string; type: string }> = [];
   for (const edge of edges) {
     if (nodes[edge.from]) nodes[edge.from].out_degree += 1;
-    if (nodes[edge.to]) nodes[edge.to].in_degree += 1;
-    else dead_links.push({ from: edge.from, to: edge.to, type: edge.type });
+    if (nodes[edge.to]) {
+      nodes[edge.to].in_degree += 1;
+    } else if (globalSlugs && globalSlugs.has(edge.to)) {
+      // Slug exists in global abrain; navigable via memory_search across
+      // scopes. Don't fire as dead-link.
+      cross_scope_links.push({ from: edge.from, to: edge.to, type: edge.type });
+    } else {
+      dead_links.push({ from: edge.from, to: edge.to, type: edge.type });
+    }
   }
 
   const orphans = Object.entries(nodes)
@@ -213,6 +298,7 @@ export async function buildGraphSnapshot(
       edge_count: edges.length,
       orphans,
       dead_links,
+      cross_scope_links,
     },
   };
 }
