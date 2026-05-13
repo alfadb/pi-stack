@@ -1458,10 +1458,12 @@ This is a cross-project review pipeline body with enough content.
       );
       // derived index/state files: markdownFilesForTarget already filters
       // them via IGNORE_DIRS + rg --glob exclusions, so they don't show up
-      // as either migrated or skipped. We seed both anyway to lock in that
-      // they never appear in the migration entry list.
+      // as either migrated or skipped. Root-level state.md is a legacy
+      // support page that rg does see; dry-run marks it skipped, and --go
+      // must preserve that behavior instead of migrating it as knowledge.
       writeFile(path.join(goParent, ".pensieve", ".index", "graph.json"), "{}");
       writeFile(path.join(goParent, ".pensieve", ".state", "checkpoint.md"), "derived state file (not user content)");
+      writeFile(path.join(goParent, ".pensieve", "state.md"), "# Pensieve Project State\n\nSupport file, not a user memory entry.\n");
 
       execFileSync("git", ["-C", goParent, "add", "-A"]);
       execFileSync("git", ["-C", goParent, "commit", "-q", "-m", "init pensieve"]);
@@ -1514,15 +1516,18 @@ This is a cross-project review pipeline body with enough content.
       assert(result.movedCount === 2, `expected 2 knowledge entries moved, got ${result.movedCount} (entries=${JSON.stringify(result.entries)})`);
       assert(result.workflowCount === 2, `expected 2 workflows routed, got ${result.workflowCount}`);
       assert(result.failedCount === 0, `expected 0 failures, got ${result.failedCount}`);
-      // Derived index/state files are pre-filtered by markdownFilesForTarget
+      // Derived .index/.state files are pre-filtered by markdownFilesForTarget
       // (parser.ts IGNORE_DIRS + listFilesWithRg --glob), so they're invisible
-      // to migrate-go and never show up as migrated OR skipped.
-      assert(result.skippedCount === 0, `derived files must be pre-filtered, got ${result.skippedCount} skips`);
+      // to migrate-go and never show up as migrated OR skipped. Root-level
+      // state.md is visible but unsupported, matching dry-run's skipped row.
+      assert(result.skippedCount === 1, `support state.md should be skipped, got ${result.skippedCount} skips: ${JSON.stringify(result.entries)}`);
       assert(
         !result.entries.some((e) => /\.state|\.index/.test(e.source)),
         `no entry should reference .state/.index source: ${JSON.stringify(result.entries)}`,
       );
-      // Both derived files remain in .pensieve/ (untouched by migration).
+      const stateSkip = result.entries.find((e) => e.source === "state.md" && e.action === "skipped");
+      assert(stateSkip && /support file outside memory entry directories/.test(stateSkip.reason || ""), `state.md should be skipped as support file: ${JSON.stringify(result.entries)}`);
+      // Derived/support files remain in .pensieve/ (untouched by migration).
       assert(
         fs.existsSync(path.join(goParent, ".pensieve", ".index", "graph.json")),
         `.index/graph.json should remain in .pensieve (not touched by migration)`,
@@ -1530,6 +1535,14 @@ This is a cross-project review pipeline body with enough content.
       assert(
         fs.existsSync(path.join(goParent, ".pensieve", ".state", "checkpoint.md")),
         `.state/checkpoint.md should remain in .pensieve (not touched by migration)`,
+      );
+      assert(
+        fs.existsSync(path.join(goParent, ".pensieve", "state.md")),
+        `root state.md support file should remain in .pensieve (not migrated)`,
+      );
+      assert(
+        !fs.existsSync(path.join(goAbrain, "projects", "test-project", "knowledge", "state.md")),
+        `root state.md support file must not be migrated into abrain knowledge/`,
       );
 
       // 4) Knowledge entries moved to abrain projects dir
@@ -1605,6 +1618,7 @@ This is a cross-project review pipeline body with enough content.
       assert(migRow, `migrate_go audit row missing; rows=${migAuditRows.map((r) => r.operation).join(",")}`);
       assert(migRow.movedCount === result.movedCount, `audit movedCount mismatch: ${migRow.movedCount} vs result ${result.movedCount}`);
       assert(migRow.workflowCount === result.workflowCount, `audit workflowCount mismatch: ${migRow.workflowCount} vs result ${result.workflowCount}`);
+      assert(migRow.skippedCount === result.skippedCount, `audit skippedCount mismatch: ${migRow.skippedCount} vs result ${result.skippedCount}`);
       assert(Array.isArray(migRow.entries) && migRow.entries.length > 0, `audit entries array missing`);
       assert(migRow.entries.every((e) => e.source && e.action), `audit entries must each carry source+action; got=${JSON.stringify(migRow.entries[0])}`);
       assert(migRow.parentPreSha === result.parentPreSha, `audit parentPreSha mismatch`);

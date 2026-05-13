@@ -309,9 +309,10 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
       // .pensieve must contain at least one user-facing .md entry (derived
       // .state/.index files don't count). Without this, --go would commit
       // an empty migration and confuse the operator into thinking it ran.
-      const userEntries = await markdownFilesForTarget(pensieveAbs, opts.settings, opts.signal);
+      const userEntries = (await markdownFilesForTarget(pensieveAbs, opts.settings, opts.signal))
+        .filter((file) => isMigratableSource(file, pensieveAbs));
       if (userEntries.length === 0) {
-        failures.push(`pensieve has no user entries to migrate at ${pensieveAbs} (only derived .state/.index files remain; migration is likely already complete)`);
+        failures.push(`pensieve has no user entries to migrate at ${pensieveAbs} (only derived/support .state/.index/state.md files remain; migration is likely already complete)`);
       }
     }
   } else {
@@ -381,6 +382,20 @@ const KNOWLEDGE_KIND_DIR: Record<string, string> = {
 function kindDirectory(kind: string, status: string): string {
   if (status === "archived") return "archive";
   return KNOWLEDGE_KIND_DIR[kind] ?? "knowledge";
+}
+
+function unsupportedMigrationSource(relSource: string): string | null {
+  const parts = relSource.split(/[\\/]+/).filter(Boolean);
+  const shortTerm = parts[0] === "short-term";
+  const head = shortTerm ? parts[1] : parts[0];
+  if (!head || head === "state.md") return "support file outside memory entry directories";
+  if (head === "pipelines") return null;
+  if (["maxims", "decisions", "knowledge", "staging", "archive"].includes(head)) return null;
+  return `unsupported memory directory: ${head}`;
+}
+
+function isMigratableSource(file: string, pensieveAbs: string): boolean {
+  return unsupportedMigrationSource(path.relative(pensieveAbs, file)) === null;
 }
 
 function nowIsoLocal(): string {
@@ -712,6 +727,22 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   for (const file of files) {
     throwIfAborted(opts.signal);
     const relSource = path.relative(pensieveAbs, file);
+    const unsupported = unsupportedMigrationSource(relSource);
+    if (unsupported) {
+      skippedCount += 1;
+      const slug = normalizeBareSlug(path.basename(file, path.extname(file)) || "support-file");
+      entries.push({
+        source: relSource,
+        target: "",
+        slug,
+        title: titleFromSlug(slug),
+        kind: "support",
+        route: "knowledge",
+        action: "skipped",
+        reason: unsupported,
+      });
+      continue;
+    }
     try {
       const analyzed = await analyzeEntry(file, pensieveAbs, projectId, abrainHome, migrationTimestamp, opts.settings);
 
