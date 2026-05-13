@@ -2879,6 +2879,243 @@ Body.
         }
       }
 
+      // --- Case h.2c: parseWikilinkTarget prefix recognition ---
+      //
+      // wikilink scope hint parsing: bare slug, known scope prefix
+      // (world:/workflow:/project:<id>:), abrain:// URL forms, and
+      // user-defined typed-link prefixes (person:/company:) that should
+      // be treated as 'unknown' scope. All bare-slug extraction must
+      // remain stable across forms.
+      {
+        const { parseWikilinkTarget } = req("./memory/parser.js");
+        const cases = [
+          ["foo", { slug: "foo" }],
+          ["world:foo", { slug: "foo", scope: "world" }],
+          ["workflow:foo", { slug: "foo", scope: "workflow" }],
+          ["project:pi-global:foo", { slug: "foo", scope: "project", qualifier: "pi-global" }],
+          ["person:alfadb", { slug: "alfadb", scope: "unknown", qualifier: "person" }],
+          ["company:openai", { slug: "openai", scope: "unknown", qualifier: "company" }],
+          ["abrain://world/patterns/use-at-file-for-long-prompts", { slug: "use-at-file-for-long-prompts", scope: "world" }],
+          ["abrain://workflow/run-when-x", { slug: "run-when-x", scope: "workflow" }],
+          ["abrain://projects/other-id/decisions/foo", { slug: "foo", scope: "project", qualifier: "other-id" }],
+          ["foo|alias", { slug: "foo" }],            // alias stripped
+          ["foo#anchor", { slug: "foo" }],           // anchor stripped
+          ["world:foo|alias", { slug: "foo", scope: "world" }],
+          ["[[world:foo]]", { slug: "foo", scope: "world" }],  // brackets stripped
+          ["", { slug: "" }],
+          ["   ", { slug: "" }],
+          // bare slug containing colon-like char but no recognised prefix:
+          // legacy `normalizeBareSlug` semantics — strip everything up to
+          // last colon and slugify the remainder.
+          ["weird:colon:thing", { slug: "thing", scope: "unknown", qualifier: "weird" }],
+        ];
+        for (const [input, expected] of cases) {
+          const got = parseWikilinkTarget(input);
+          for (const key of Object.keys(expected)) {
+            assert(
+              got[key] === expected[key],
+              `parseWikilinkTarget(${JSON.stringify(input)}).${key}: expected ${JSON.stringify(expected[key])}, got ${JSON.stringify(got[key])} (full: ${JSON.stringify(got)})`,
+            );
+          }
+        }
+      }
+
+      // --- Case h.2d: graph routes explicit prefix to the right zone ---
+      //
+      // Explicit `[[world:foo]]` resolves against ~/.abrain/knowledge/;
+      // a typo'd `[[world:missing]]` is a genuine dead-link. Explicit
+      // `[[workflow:bar]]` resolves against ~/.abrain/workflows/.
+      // Unknown-prefix `[[person:x]]` does NOT cross-scope fall back
+      // (the prefix itself declares it's not a regular slug).
+      {
+        const { buildGraphSnapshot } = req("./memory/graph.js");
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-explicit-prefix-"));
+        process.env.ABRAIN_ROOT = home;
+        try {
+          const projectId = "explicit-test";
+          const projDir = path.join(home, "projects", projectId);
+          const kDir = path.join(home, "knowledge");
+          const wDir = path.join(home, "workflows");
+          for (const d of [projDir, kDir, wDir]) fs.mkdirSync(d, { recursive: true });
+          writeFile(
+            path.join(kDir, "global-fact.md"),
+            `---\nid: world:global-fact\nscope: world\nkind: fact\nschema_version: 1\ntitle: Global fact\nstatus: active\nconfidence: 7\n---\n# Global fact\n\nBody.\n\n## Timeline\n\n- 2026-05-13 | seed | bootstrapped\n`,
+          );
+          writeFile(
+            path.join(wDir, "global-flow.md"),
+            `---\nid: workflow:global-flow\nscope: workflow\nkind: workflow\nschema_version: 1\ntitle: Global flow\nstatus: active\nconfidence: 5\ncross_project: true\n---\n# Global flow\n\nBody.\n\n## Timeline\n\n- 2026-05-13 | seed | bootstrapped\n`,
+          );
+          writeFile(
+            path.join(projDir, "decisions", "linker.md"),
+            `---\nid: project:${projectId}:linker\nscope: project\nkind: decision\nschema_version: 1\ntitle: Linker\nstatus: active\nconfidence: 5\n---\n# Linker\n\nExplicit:\n- [[world:global-fact]]      (hits world zone)\n- [[world:does-not-exist]]    (genuine dead even with explicit prefix)\n- [[workflow:global-flow]]    (hits workflow zone)\n- [[person:alfadb]]            (unknown prefix; not fallback)\n\n## Timeline\n\n- 2026-05-13 | author | drafted\n`,
+          );
+          const snap = await buildGraphSnapshot(projDir, memSettings, undefined, projDir);
+          const cs = snap.stats.cross_scope_links.map((l) => l.to).sort();
+          const dl = snap.stats.dead_links.map((l) => l.to).sort();
+          assert(
+            JSON.stringify(cs) === JSON.stringify(["global-fact", "global-flow"]),
+            `explicit prefix routing: cross_scope should be [global-fact, global-flow], got ${JSON.stringify(cs)}`,
+          );
+          assert(
+            JSON.stringify(dl) === JSON.stringify(["alfadb", "does-not-exist"]),
+            `explicit prefix routing: dead_links should be [alfadb, does-not-exist] (unknown prefix + explicit-typo), got ${JSON.stringify(dl)}`,
+          );
+        } finally {
+          delete process.env.ABRAIN_ROOT;
+          fs.rmSync(home, { recursive: true, force: true });
+        }
+      }
+
+      // --- Case h.2e: rewrite-cross-scope (D-decision rewriter) ---
+      //
+      // End-to-end rewriter: body wikilinks + frontmatter relations
+      // (list-of-scalar, list-of-object {to: ...}, abrain:// URL form),
+      // code-block / inline-code skip, idempotence on second pass.
+      {
+        const { scanRewritePlan, applyRewritePlan } = req("./memory/rewrite-cross-scope.js");
+        const home = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-rewrite-"));
+        process.env.ABRAIN_ROOT = home;
+        try {
+          const projectId = "rw-test";
+          const projDir = path.join(home, "projects", projectId);
+          const kDir = path.join(home, "knowledge");
+          const wDir = path.join(home, "workflows");
+          for (const d of [projDir, kDir, wDir]) fs.mkdirSync(d, { recursive: true });
+          writeFile(
+            path.join(kDir, "gmax.md"),
+            `---\nid: world:gmax\nscope: world\nkind: maxim\nschema_version: 1\ntitle: G-Max\nstatus: active\nconfidence: 7\n---\n# G-Max\n\nBody.\n\n## Timeline\n\n- 2026-05-13 | seed | bootstrapped\n`,
+          );
+          writeFile(
+            path.join(wDir, "gflow.md"),
+            `---\nid: workflow:gflow\nscope: workflow\nkind: workflow\nschema_version: 1\ntitle: G-Flow\nstatus: active\nconfidence: 5\ncross_project: true\n---\n# G-Flow\n\nBody.\n\n## Timeline\n\n- 2026-05-13 | seed | bootstrapped\n`,
+          );
+          // Project-internal entry, used to verify bare-slug-but-also-
+          // project-local is NOT rewritten.
+          writeFile(
+            path.join(projDir, "knowledge", "local-foo.md"),
+            `---\nid: project:${projectId}:local-foo\nscope: project\nkind: fact\nschema_version: 1\ntitle: Local foo\nstatus: active\nconfidence: 5\n---\n# Local foo\n\nBody.\n\n## Timeline\n\n- 2026-05-13 | author | drafted\n`,
+          );
+          // Entry with every rewritable shape that pi-global empirically
+          // uses. The `relations:` wrapper key with list-of-object
+          // `{to: slug, type: ...}` form is NOT covered — pi-global has
+          // zero of those, and parser.ts doesn't read it as a relation
+          // source either; rewriter only touches keys in RELATION_KEYS.
+          //
+          // (a) body bare wikilink hitting world
+          // (b) body bare wikilink hitting workflow
+          // (c) body bare wikilink hitting project-local (NOT rewritten)
+          // (d) body explicit prefix (already done; NOT rewritten)
+          // (e) body wikilink inside fenced code (NOT rewritten)
+          // (f) body wikilink inside inline code (NOT rewritten)
+          // (g) body bare wikilink hitting NOTHING (genuine dead; left as-is)
+          // (h) fm derives_from list-of-scalars hitting world
+          // (i) fm relates_to abrain:// URL form
+          // (j) fm applied_in list-of-scalars hitting workflow (D-keys list)
+          writeFile(
+            path.join(projDir, "decisions", "mixed.md"),
+            [
+              `---`,
+              `id: project:${projectId}:mixed`,
+              `scope: project`,
+              `kind: decision`,
+              `schema_version: 1`,
+              `title: Mixed`,
+              `status: active`,
+              `confidence: 5`,
+              `derives_from:`,
+              `  - gmax`,                      // (h) → world:gmax
+              `  - local-foo`,                  // project-local; not rewritten
+              `  - world:gmax`,                 // already explicit; not rewritten
+              `relates_to:`,
+              `  - abrain://world/patterns/gmax`,  // (i) URL → world:gmax
+              `applied_in:`,
+              `  - gflow`,                      // (j) → workflow:gflow
+              `---`,
+              `# Mixed`,
+              ``,
+              `Body:`,
+              `- [[gmax]] (a)`,
+              `- [[gflow]] (b)`,
+              `- [[local-foo]] (c project-local)`,
+              `- [[world:gmax]] (d already explicit)`,
+              `- [[ghost-not-anywhere]] (g genuine dead)`,
+              ``,
+              "```",
+              "// code block — these MUST NOT be rewritten:",
+              "// [[gmax]] [[gflow]]",
+              "```",
+              ``,
+              "Inline `[[gmax]]` (f) must also be skipped.",
+              ``,
+              `## Timeline`,
+              ``,
+              `- 2026-05-13 | author | drafted`,
+              ``,
+            ].join("\n"),
+          );
+
+          const plan = await scanRewritePlan({ projectDir: projDir, abrainHome: home, settings: memSettings });
+
+          // Expected body changes: (a) gmax → world:gmax; (b) gflow → workflow:gflow.
+          // Code-block + inline-code [[gmax]] occurrences MUST NOT count.
+          const bodyChanges = plan.entries.flatMap((e) => e.changes).filter((c) => c.location === "body");
+          assert(bodyChanges.length === 2, `expected 2 body changes, got ${bodyChanges.length}: ${JSON.stringify(bodyChanges)}`);
+          const bodyAfters = bodyChanges.map((c) => c.after).sort();
+          assert(
+            JSON.stringify(bodyAfters) === JSON.stringify(["[[workflow:gflow]]", "[[world:gmax]]"]),
+            `body rewrites incorrect: ${JSON.stringify(bodyAfters)}`,
+          );
+
+          // Expected frontmatter changes:
+          //   derives_from: gmax → world:gmax
+          //   relates_to:  abrain://world/patterns/gmax → world:gmax
+          //   relations.to: gflow → workflow:gflow
+          const fmChanges = plan.entries.flatMap((e) => e.changes).filter((c) => c.location === "frontmatter");
+          assert(fmChanges.length === 3, `expected 3 frontmatter changes, got ${fmChanges.length}: ${JSON.stringify(fmChanges)}`);
+          const fmFields = fmChanges.map((c) => `${c.field}:${c.after}`).sort();
+          assert(
+            JSON.stringify(fmFields) === JSON.stringify([
+              "applied_in:workflow:gflow",
+              "derives_from:world:gmax",
+              "relates_to:world:gmax",
+            ]),
+            `frontmatter rewrites incorrect: ${JSON.stringify(fmFields)}`,
+          );
+
+          // Apply.
+          const apply = await applyRewritePlan(plan);
+          assert(apply.filesWritten === 1, `expected 1 file written, got ${apply.filesWritten}`);
+
+          // Re-read the written file and verify code-block content is
+          // untouched (the literal `[[gmax]]` inside the fenced block
+          // must persist).
+          const after = fs.readFileSync(path.join(projDir, "decisions", "mixed.md"), "utf-8");
+          assert(
+            /^\/\/ \[\[gmax\]\] \[\[gflow\]\]/m.test(after),
+            `fenced code-block wikilinks must be preserved verbatim:\n${after}`,
+          );
+          assert(
+            /Inline `\[\[gmax\]\]`/.test(after),
+            `inline-code wikilink must be preserved verbatim:\n${after}`,
+          );
+          // (g) genuine dead link must survive.
+          assert(
+            /\[\[ghost-not-anywhere\]\]/.test(after),
+            `genuine dead wikilink must be preserved (not eaten):\n${after}`,
+          );
+
+          // Idempotence: second scan must produce zero changes.
+          const plan2 = await scanRewritePlan({ projectDir: projDir, abrainHome: home, settings: memSettings });
+          assert(
+            plan2.totalChanges === 0,
+            `idempotence broken: second scan produced ${plan2.totalChanges} changes: ${JSON.stringify(plan2.entries.flatMap((e) => e.changes))}`,
+          );
+        } finally {
+          delete process.env.ABRAIN_ROOT;
+          fs.rmSync(home, { recursive: true, force: true });
+        }
+      }
+
       // --- Case h.3: migrate-go frontmatter-unparseable note path ---
       // Fixture: a .pensieve entry with frontmatter that's structurally
       // present (delimited by ---) but where parseFrontmatter returns an

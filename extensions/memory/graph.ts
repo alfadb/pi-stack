@@ -125,19 +125,25 @@ function abrainProjectContext(target: string): { abrainHome: string; projectId: 
 }
 
 /**
- * Collect the slug set for global abrain knowledge + workflows zones,
- * used as cross-scope fallback when resolving project-internal
- * wikilinks. Cached per buildGraphSnapshot call (one scan per zone)
- * since scanStore is O(file count) and rg-backed.
+ * Collect global abrain slug sets KEYED BY zone:
+ *   { world: Set(...knowledge slugs), workflow: Set(...workflows slugs) }
+ *
+ * Explicit `[[world:foo]]` / `[[workflow:foo]]` wikilinks resolve
+ * against the matching zone; implicit bare `[[foo]]` wikilinks fall
+ * back to either zone for transitional compatibility.
  */
-async function collectAbrainGlobalSlugs(
+async function collectAbrainGlobalSlugsByScope(
   abrainHome: string,
   settings: MemorySettings,
   signal?: AbortSignal,
   cwd = process.cwd(),
-): Promise<Set<string>> {
-  const slugs = new Set<string>();
-  for (const subdir of ["knowledge", "workflows"]) {
+): Promise<{ world: Set<string>; workflow: Set<string> }> {
+  const result = { world: new Set<string>(), workflow: new Set<string>() };
+  const mapping: Array<["world" | "workflow", string]> = [
+    ["world", "knowledge"],
+    ["workflow", "workflows"],
+  ];
+  for (const [scope, subdir] of mapping) {
     const root = path.join(abrainHome, subdir);
     try {
       const stat = await fs.stat(root);
@@ -151,9 +157,9 @@ async function collectAbrainGlobalSlugs(
       settings,
       signal,
     );
-    for (const entry of entries) slugs.add(entry.slug);
+    for (const entry of entries) result[scope].add(entry.slug);
   }
-  return slugs;
+  return result;
 }
 
 function storeRootForFile(abs: string): string {
@@ -263,19 +269,55 @@ export async function buildGraphSnapshot(
   // legacy .pensieve / arbitrary trees / the global abrain root itself
   // don't have a meaningful "cross-scope fallback" zone above them.
   const projectCtx = abrainProjectContext(root);
-  const globalSlugs = projectCtx
-    ? await collectAbrainGlobalSlugs(projectCtx.abrainHome, settings, signal, cwd)
+  const globalZones = projectCtx
+    ? await collectAbrainGlobalSlugsByScope(projectCtx.abrainHome, settings, signal, cwd)
     : null;
 
   const dead_links: Array<{ from: string; to: string; type: string }> = [];
   const cross_scope_links: Array<{ from: string; to: string; type: string }> = [];
   for (const edge of edges) {
     if (nodes[edge.from]) nodes[edge.from].out_degree += 1;
+
+    // Explicit scope from a prefixed wikilink (parseWikilinkTarget):
+    // bypass project-internal lookup entirely — the author named the
+    // zone explicitly, so route there directly.
+    if (edge.scope === "world" || edge.scope === "workflow") {
+      const zoneSlugs = globalZones ? globalZones[edge.scope] : null;
+      if (zoneSlugs && zoneSlugs.has(edge.to)) {
+        cross_scope_links.push({ from: edge.from, to: edge.to, type: edge.type });
+      } else {
+        // Explicit prefix but slug not in target zone — genuine dead
+        // link (typo / target moved / not yet seeded).
+        dead_links.push({ from: edge.from, to: edge.to, type: edge.type });
+      }
+      continue;
+    }
+    if (edge.scope === "project") {
+      // Cross-project reference (project:<id>:slug). Currently not
+      // resolved by buildGraphSnapshot — we'd need to scan another
+      // project's directory. Treat as cross-scope (acknowledged) so it
+      // doesn't fire as dead. Cross-project resolution is future work.
+      cross_scope_links.push({ from: edge.from, to: edge.to, type: edge.type });
+      continue;
+    }
+    if (edge.scope === "unknown") {
+      // User-defined typed link (`person:`, `company:`, etc.) — no
+      // scope routing. Try project-internal; otherwise treat as
+      // dead but DON'T cross-scope fall back (the prefix means the
+      // author already declared this isn't a regular slug).
+      if (nodes[edge.to]) nodes[edge.to].in_degree += 1;
+      else dead_links.push({ from: edge.from, to: edge.to, type: edge.type });
+      continue;
+    }
+
+    // Implicit bare wikilink: project-internal first, then global
+    // fallback (transitional compatibility per D3). Once rewriter has
+    // explicitised all historical cross-scope refs, this fallback is
+    // mostly dormant; we keep it so hand-edited / third-party entries
+    // that still use bare slugs don't immediately fire dead-link.
     if (nodes[edge.to]) {
       nodes[edge.to].in_degree += 1;
-    } else if (globalSlugs && globalSlugs.has(edge.to)) {
-      // Slug exists in global abrain; navigable via memory_search across
-      // scopes. Don't fire as dead-link.
+    } else if (globalZones && (globalZones.world.has(edge.to) || globalZones.workflow.has(edge.to))) {
       cross_scope_links.push({ from: edge.from, to: edge.to, type: edge.type });
     } else {
       dead_links.push({ from: edge.from, to: edge.to, type: edge.type });

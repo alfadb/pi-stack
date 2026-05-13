@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
 import type { MemorySettings } from "./settings";
-import type { Jsonish, MemoryEntry, RelationEdge, StoreRef, Scope } from "./types";
+import type { Jsonish, MemoryEntry, RelationEdge, RelationScope, StoreRef, Scope } from "./types";
 import { compareTimestamps, normalizeBareSlug, prettyPath, stableUnique, titleFromSlug, throwIfAborted } from "./utils";
 import { resolveActiveProject, abrainProjectDir } from "../_shared/runtime";
 
@@ -301,16 +301,110 @@ function stripCode(body: string): string {
   return out;
 }
 
-function extractBodyWikilinks(body: string): string[] {
-  const out: string[] = [];
+const KNOWN_SCOPE_PREFIXES: ReadonlySet<RelationScope> = new Set(["world", "workflow", "project"]);
+
+export interface WikilinkTarget {
+  slug: string;
+  scope?: RelationScope;
+  qualifier?: string;
+}
+
+/**
+ * Parse a wikilink target (or any "slug-like" relation value) into a
+ * structured tuple of {slug, scope, qualifier}. Recognises:
+ *
+ *   `[[foo]]`                 → {slug:"foo"}
+ *   `[[world:foo]]`           → {slug:"foo", scope:"world"}
+ *   `[[workflow:foo]]`        → {slug:"foo", scope:"workflow"}
+ *   `[[project:pi:foo]]`      → {slug:"foo", scope:"project", qualifier:"pi"}
+ *   `[[person:alfadb]]`       → {slug:"alfadb", scope:"unknown", qualifier:"person"}
+ *   `abrain://world/p/foo`    → {slug:"foo", scope:"world"}
+ *   `abrain://projects/<id>/x/foo` → {slug:"foo", scope:"project", qualifier:"<id>"}
+ *
+ * Empty / unparseable input → {slug:""}. Caller filters empties.
+ *
+ * NOTE: This is the canonical wikilink scope parser. `normalizeBareSlug`
+ * is the legacy bare-slug normalizer that silently DROPS the prefix —
+ * still used for id-suffix extraction and filename slugging, but no longer
+ * used for relation-target parsing where we need scope information.
+ */
+export function parseWikilinkTarget(raw: string): WikilinkTarget {
+  let s = String(raw || "").trim();
+  if (!s) return { slug: "" };
+  s = s.replace(/^\[\[/, "").replace(/\]\]$/, "");
+  // Strip alias / anchor; pi-astack data has 0 of these in pi-global but
+  // wikilink spec allows them.
+  s = s.split("|")[0]!.split("#")[0]!.trim();
+  if (!s) return { slug: "" };
+
+  // abrain:// URL form (legacy / prototype shape; seen in pi-global
+  // frontmatter `relates_to` from May 2026 spec drafts).
+  const urlMatch = /^abrain:\/\/([^/]+)\/(.+)$/i.exec(s);
+  if (urlMatch) {
+    const head = urlMatch[1]!.toLowerCase();
+    const tail = urlMatch[2]!;
+    if (head === "world" || head === "workflow") {
+      return { slug: normalizeBareSlug(tail), scope: head as RelationScope };
+    }
+    if (head === "projects") {
+      const projectMatch = /^([^/]+)\/(.+)$/.exec(tail);
+      if (projectMatch) {
+        return { slug: normalizeBareSlug(projectMatch[2]!), scope: "project", qualifier: projectMatch[1] };
+      }
+    }
+    // Unrecognised abrain:// host; fall through to bare normalize.
+    return { slug: normalizeBareSlug(tail) };
+  }
+
+  // Prefix form: <head>:<tail>
+  const colonIdx = s.indexOf(":");
+  if (colonIdx > 0) {
+    const head = s.slice(0, colonIdx);
+    const tail = s.slice(colonIdx + 1);
+    if (head === "world" || head === "workflow") {
+      return { slug: normalizeBareSlug(tail), scope: head as RelationScope };
+    }
+    if (head === "project") {
+      // `project:<id>:<slug>` — split off project id.
+      const innerIdx = tail.indexOf(":");
+      if (innerIdx > 0) {
+        return {
+          slug: normalizeBareSlug(tail.slice(innerIdx + 1)),
+          scope: "project",
+          qualifier: tail.slice(0, innerIdx),
+        };
+      }
+      // `project:<slug>` without id — treat as plain slug, no scope.
+      return { slug: normalizeBareSlug(tail) };
+    }
+    if (!KNOWN_SCOPE_PREFIXES.has(head as RelationScope)) {
+      // user-defined typed link (`person:`, `company:`, etc.)
+      return { slug: normalizeBareSlug(tail), scope: "unknown", qualifier: head };
+    }
+  }
+
+  return { slug: normalizeBareSlug(s) };
+}
+
+function extractBodyWikilinkTargets(body: string): WikilinkTarget[] {
+  const out: WikilinkTarget[] = [];
   const re = /\[\[([^\]]+)\]\]/g;
   const stripped = stripCode(body);
   let match: RegExpExecArray | null;
   while ((match = re.exec(stripped))) {
-    const slug = normalizeBareSlug(match[1]);
-    if (slug) out.push(slug);
+    const tgt = parseWikilinkTarget(match[1]!);
+    if (tgt.slug) out.push(tgt);
   }
-  return stableUnique(out);
+  // De-duplicate by (slug, scope, qualifier) tuple to preserve scope
+  // diversity (project entry MAY legitimately reference both bare `foo`
+  // and `world:foo` if they have distinct meanings).
+  const seen = new Set<string>();
+  return out.filter((t) => {
+    const sig = `${t.slug}\0${t.scope ?? ""}\0${t.qualifier ?? ""}`;
+    if (seen.has(sig)) return false;
+    seen.add(sig);
+    return true;
+  });
 }
 
 function extractRelations(frontmatter: Record<string, Jsonish>, body: string): RelationEdge[] {
@@ -318,18 +412,25 @@ function extractRelations(frontmatter: Record<string, Jsonish>, body: string): R
 
   for (const key of RELATION_KEYS) {
     for (const raw of relationValues(frontmatter[key])) {
-      const to = normalizeBareSlug(raw);
-      if (to) edges.push({ to, type: key, source: "frontmatter" });
+      const tgt = parseWikilinkTarget(raw);
+      if (!tgt.slug) continue;
+      const edge: RelationEdge = { to: tgt.slug, type: key, source: "frontmatter" };
+      if (tgt.scope) edge.scope = tgt.scope;
+      if (tgt.qualifier) edge.qualifier = tgt.qualifier;
+      edges.push(edge);
     }
   }
 
-  for (const to of extractBodyWikilinks(body)) {
-    edges.push({ to, type: "references", source: "body_wikilink" });
+  for (const tgt of extractBodyWikilinkTargets(body)) {
+    const edge: RelationEdge = { to: tgt.slug, type: "references", source: "body_wikilink" };
+    if (tgt.scope) edge.scope = tgt.scope;
+    if (tgt.qualifier) edge.qualifier = tgt.qualifier;
+    edges.push(edge);
   }
 
   const seen = new Set<string>();
   return edges.filter((edge) => {
-    const sig = `${edge.to}\0${edge.type}\0${edge.source}`;
+    const sig = `${edge.to}\0${edge.type}\0${edge.source}\0${edge.scope ?? ""}\0${edge.qualifier ?? ""}`;
     if (seen.has(sig)) return false;
     seen.add(sig);
     return true;
