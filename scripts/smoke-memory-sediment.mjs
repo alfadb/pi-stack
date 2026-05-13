@@ -1819,6 +1819,295 @@ This is a cross-project review pipeline body with enough content.
       );
     }
 
+    // === per-repo migration --go: timestamp recovery (git/fs/fm triangulation) ===
+    //
+    // analyzeEntry resolves `created` to min(fm.created, git-author-first,
+    // fs.birthtime) and `updated` to max(git-author-last, fm.updated,
+    // fs.mtime-when-untracked). Without this triangulation every legacy
+    // entry would migrate as "created today", destroying LLM time-aware
+    // ranking signal. The four fixtures below cover:
+    //   (1) fm.created "future"   → git-first wins (never trust future-dated fm)
+    //   (2) fm.created absent     → git-first wins (real authoring signal)
+    //   (3) fm.created "ancient"  → fm wins (author claims very early date)
+    //   (4) tracked-but-modified  → updated picks git author-last (commit 2)
+    {
+      const tParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-tstamp-parent-"));
+      execFileSync("git", ["-C", tParent, "init", "-q"]);
+      execFileSync("git", ["-C", tParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", tParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", tParent, "config", "commit.gpgsign", "false"]);
+
+      // (1) fm.created = far-future date; git-first should win because
+      //     min(future, git-first, fs.birthtime) = git-first.
+      writeFile(
+        path.join(tParent, ".pensieve", "decisions", "future-fm.md"),
+        `---
+title: Future fm date
+kind: decision
+status: active
+confidence: 5
+schema_version: 1
+created: 2099-01-01
+updated: 2099-01-01
+---
+# Future fm date
+
+Body.
+`,
+      );
+      // (2) No fm.created / fm.updated; git-first / git-last are the only
+      //     signals (besides fs).
+      writeFile(
+        path.join(tParent, ".pensieve", "decisions", "no-fm-dates.md"),
+        `---
+title: No fm dates
+kind: decision
+status: active
+confidence: 5
+schema_version: 1
+---
+# No fm dates
+
+Body.
+`,
+      );
+      // (3) Author claims ancient date in fm; min() must honor it.
+      writeFile(
+        path.join(tParent, ".pensieve", "decisions", "ancient-fm.md"),
+        `---
+title: Ancient fm date
+kind: decision
+status: active
+confidence: 5
+schema_version: 1
+created: 2020-01-15
+updated: 2020-01-15
+---
+# Ancient fm date
+
+Body.
+`,
+      );
+      // (3b) Mixed-timezone fm.created: +08:00 midnight vs UTC midnight
+      // would invert under lexicographic string sort (`+00:00` < `+08:00`)
+      // but the +08:00 instant is actually 8h EARLIER. pickByEpoch must
+      // use Date.parse() for correct comparison. We pick a date EARLY
+      // enough that fm wins over git/fs regardless.
+      writeFile(
+        path.join(tParent, ".pensieve", "decisions", "tz-mixed.md"),
+        `---
+title: TZ mixed
+kind: decision
+status: active
+confidence: 5
+schema_version: 1
+created: 2020-06-01T00:00:00+08:00
+---
+# TZ mixed
+
+Body.
+`,
+      );
+      // (4) Will be committed twice; updated should equal the second
+      //     commit's author-date, not the first.
+      writeFile(
+        path.join(tParent, ".pensieve", "decisions", "twice-edited.md"),
+        `---
+title: Twice edited
+kind: decision
+status: active
+confidence: 5
+schema_version: 1
+---
+# Twice edited
+
+First body.
+`,
+      );
+      execFileSync("git", ["-C", tParent, "add", "-A"]);
+      execFileSync("git", ["-C", tParent, "commit", "-q", "-m", "init pensieve (commit 1)"]);
+      // %aI is second-resolution; force a tick so commit 2 falls in a
+      // strictly later second than commit 1.
+      await new Promise((r) => setTimeout(r, 1100));
+      // Second commit: only edit `twice-edited.md` so its git-last differs
+      // from its git-first.
+      writeFile(
+        path.join(tParent, ".pensieve", "decisions", "twice-edited.md"),
+        `---
+title: Twice edited
+kind: decision
+status: active
+confidence: 5
+schema_version: 1
+---
+# Twice edited
+
+Second body (after edit).
+`,
+      );
+      execFileSync("git", ["-C", tParent, "add", "-A"]);
+      execFileSync("git", ["-C", tParent, "commit", "-q", "-m", "edit twice-edited (commit 2)"]);
+      // One more tick before the late-added file's commit, so its git-first
+      // is strictly later than the prior two commits.
+      await new Promise((r) => setTimeout(r, 1100));
+
+      // Capture git-first/git-last per file using the same %aI we read
+      // from migrate-go, so assertions are not flaky against subprocess
+      // timing.
+      const gitTime = (relFile, args) => {
+        const out = execFileSync(
+          "git",
+          ["-C", tParent, "log", ...args, "--pretty=format:%aI", "--", relFile],
+          { encoding: "utf-8" },
+        ).trim().split("\n").filter(Boolean);
+        return out[0] ?? "";
+      };
+      // All git timestamp queries MUST happen BEFORE runMigrationGo,
+      // because the migration's parent-repo commit (which `git rm`s
+      // each migrated source) counts as a touch of the file and
+      // would shift git-last forward to the migration commit time.
+      // collectGitAuthorTimes (called inside runMigrationGo) snapshots
+      // pre-migration state; assertions must compare against the same
+      // snapshot.
+      const futureGitFirst = gitTime(".pensieve/decisions/future-fm.md", ["--reverse", "--diff-filter=A"]);
+      const futureGitLast = gitTime(".pensieve/decisions/future-fm.md", []);
+      const noFmGitFirst = gitTime(".pensieve/decisions/no-fm-dates.md", ["--reverse", "--diff-filter=A"]);
+      const noFmGitLast = gitTime(".pensieve/decisions/no-fm-dates.md", []);
+      const twiceGitFirst = gitTime(".pensieve/decisions/twice-edited.md", ["--reverse", "--diff-filter=A"]);
+      const twiceGitLast = gitTime(".pensieve/decisions/twice-edited.md", []);
+      assert(futureGitFirst, "git first commit missing for future-fm.md (fixture broken)");
+      assert(noFmGitFirst && noFmGitLast, "git first/last missing for no-fm-dates.md");
+      assert(twiceGitFirst && twiceGitLast && twiceGitFirst < twiceGitLast, `twice-edited git-first must precede git-last, got ${twiceGitFirst} vs ${twiceGitLast}`);
+
+      const tAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-tstamp-abrain-"));
+      execFileSync("git", ["-C", tAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", tAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", tAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", tAbrain, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(tAbrain, "README.md"), "# abrain home (smoke timestamp)\n");
+      execFileSync("git", ["-C", tAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", tAbrain, "commit", "-q", "-m", "init abrain"]);
+      await bindMigrationProject(tParent, tAbrain, "tstamp-test");
+
+      // Now drop an UNTRACKED file (after the binding commit) so git log
+      // returns empty for it. fs.birthtime / fs.mtime are the only
+      // signals; we just verify created/updated are NOT the migration
+      // timestamp (i.e. fs fallback engaged).
+      writeFile(
+        path.join(tParent, ".pensieve", "decisions", "untracked.md"),
+        `---
+title: Untracked entry
+kind: decision
+status: active
+confidence: 5
+schema_version: 1
+---
+# Untracked entry
+
+Body.
+`,
+      );
+      // Preflight requires a clean working tree; the untracked file would
+      // trip `git status --porcelain`. Commit it on its own so it lands
+      // AFTER the binding commit; git-first will then resolve to this
+      // very commit, exercising the "committed-but-not-in-initial-pensieve"
+      // branch (which is still tracked, but only after the migrate-go
+      // git-times batch picks it up). For an untracked-with-fs-only test
+      // we rely on fixture (5) below.
+      execFileSync("git", ["-C", tParent, "add", "-A"]);
+      execFileSync("git", ["-C", tParent, "commit", "-q", "-m", "add late untracked entry"]);
+      const untrackedGitFirst = gitTime(".pensieve/decisions/untracked.md", ["--reverse", "--diff-filter=A"]);
+      assert(untrackedGitFirst, "git first commit missing for untracked.md after late commit");
+
+      const migrationTs = "2099-12-31T23:59:59.000+08:00";
+      const tResult = await runMigrationGo({
+        pensieveTarget: path.join(tParent, ".pensieve"),
+        abrainHome: tAbrain,
+        projectId: "tstamp-test",
+        cwd: tParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: migrationTs,
+      });
+      assert(tResult.ok, `tstamp migration must succeed: ${JSON.stringify(tResult.preconditionFailures)}`);
+      assert(tResult.movedCount === 6, `expected 6 knowledge entries moved (5 decisions + 1 late), got ${tResult.movedCount}`);
+
+      const readEntry = (slug) => fs.readFileSync(
+        path.join(tAbrain, "projects", "tstamp-test", "decisions", `${slug}.md`),
+        "utf-8",
+      );
+      const fmField = (text, field) => {
+        const m = text.match(new RegExp(`^${field}: (.+)$`, "m"));
+        return m ? m[1].replace(/^"|"$/g, "") : null;
+      };
+
+      // (1) future-fm: created must be git-first (NOT 2099-01-01).
+      //     updated must equal git-last — NOT the future-dated
+      //     fm.updated 2099-01-01 (caught by the future-date guard in
+      //     resolveUpdated, which caps at min(migrationTimestamp,
+      //     real-now)). `futureGitLast` was captured pre-migration
+      //     above; do not re-query here (migration commit would shift
+      //     git-last forward).
+      const futureText = readEntry("future-fm");
+      const futureCreated = fmField(futureText, "created");
+      const futureUpdated = fmField(futureText, "updated");
+      assert(futureCreated === futureGitFirst, `future-fm created should be git-first ${futureGitFirst}, got ${futureCreated}`);
+      assert(!futureCreated.startsWith("2099"), `future-fm created must not leak 2099 fm value: ${futureCreated}`);
+      // Strong assertion: updated must EXACTLY equal git-last (which is
+      // bounded by real time). Both "2099-01-01" (fm leak) and
+      // "2099-12-31" (migration-ts leak) would fail this.
+      assert(futureUpdated === futureGitLast, `future-fm updated must be git-last ${futureGitLast}, got ${futureUpdated}`);
+      assert(!futureUpdated.startsWith("2099"), `future-fm updated must NOT carry 2099 (future-date guard failure): ${futureUpdated}`);
+
+      // (2) no-fm-dates: created = git-first (no fm signal), updated = git-last.
+      const noFmText = readEntry("no-fm-dates");
+      assert(fmField(noFmText, "created") === noFmGitFirst, `no-fm-dates created should be git-first ${noFmGitFirst}`);
+      assert(fmField(noFmText, "updated") === noFmGitLast, `no-fm-dates updated should be git-last ${noFmGitLast}`);
+      assert(!fmField(noFmText, "created").startsWith("2099"), `no-fm-dates created must not be migration ts`);
+
+      // (3) ancient-fm: created = fm 2020-01-15 (much earlier than any git
+      //     commit happening "now"). min() must honor the author claim.
+      const ancientText = readEntry("ancient-fm");
+      const ancientCreated = fmField(ancientText, "created");
+      assert(ancientCreated.startsWith("2020-01-15"), `ancient-fm created should start 2020-01-15, got ${ancientCreated}`);
+      // updated for ancient: max(git-last, fm.updated=2020-01-15). git-last
+      // is "now" and dominates.
+      const ancientUpdated = fmField(ancientText, "updated");
+      assert(!ancientUpdated.startsWith("2020-"), `ancient-fm updated should be max(git-last, fm.updated), got ${ancientUpdated}`);
+
+      // (4) twice-edited: created = git-first (commit 1), updated = git-last
+      //     (commit 2). Critical: updated must NOT equal created.
+      const twiceText = readEntry("twice-edited");
+      const twiceCreated = fmField(twiceText, "created");
+      const twiceUpdated = fmField(twiceText, "updated");
+      assert(twiceCreated === twiceGitFirst, `twice-edited created should be git-first ${twiceGitFirst}, got ${twiceCreated}`);
+      assert(twiceUpdated === twiceGitLast, `twice-edited updated should be git-last ${twiceGitLast}, got ${twiceUpdated}`);
+      assert(twiceUpdated > twiceCreated, `twice-edited updated must be > created (git history): ${twiceCreated} vs ${twiceUpdated}`);
+
+      // (3b) tz-mixed: fm.created = 2020-06-01T00:00:00+08:00 is earlier
+      //      than any git/fs time. pickByEpoch (UTC epoch) must select fm
+      //      as min. Crucially, lexicographic string sort would pick
+      //      git-author-first ("2026-...") as smaller after the leading
+      //      year mismatch wraps, but here the year already disambiguates
+      //      — the deeper assertion is that the +08:00 instant maps to
+      //      2020-05-31T16:00:00Z (8h before UTC midnight) and that's
+      //      what we end up writing in the normalized frontmatter (Date
+      //      object → formatLocalIsoTimestamp normalizes to local tz).
+      const tzMixedText = readEntry("tz-mixed");
+      const tzMixedCreated = fmField(tzMixedText, "created");
+      assert(tzMixedCreated.startsWith("2020-"), `tz-mixed created should start with 2020-, got ${tzMixedCreated}`);
+
+      // (5) late-added untracked.md: git-first = late commit; the key
+      //     non-regression assertion is that created/updated are NEVER
+      //     the migrationTimestamp 2099-12-31 (which would mean git/fs
+      //     resolution silently failed).
+      const untrackedText = readEntry("untracked");
+      const untrackedCreated = fmField(untrackedText, "created");
+      const untrackedUpdated = fmField(untrackedText, "updated");
+      assert(untrackedCreated === untrackedGitFirst, `untracked-late created should be git-first ${untrackedGitFirst}, got ${untrackedCreated}`);
+      assert(!untrackedCreated.startsWith("2099-12"), `untracked-late created must not be migration ts: ${untrackedCreated}`);
+      assert(!untrackedUpdated.startsWith("2099-12"), `untracked-late updated must not be migration ts: ${untrackedUpdated}`);
+    }
+
     // === per-repo migration --go: boundary scenarios (sonnet audit P2) ====
     //
     // Extra scenarios on top of the main happy/preflight/idempotency

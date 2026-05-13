@@ -19,6 +19,7 @@ import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_F
 import { legacyPensieveSeedFor, legacyPensieveSeedPrunedReason } from "./legacy-seeds";
 import { writePostMigrationGuard } from "../sediment/writer";
 import { clamp, normalizeBareSlug, prettyPath, titleFromSlug, throwIfAborted } from "./utils";
+import { collectGitAuthorTimes, type GitAuthorTimes } from "./git-times";
 import {
   abrainProjectDir,
   abrainProjectWorkflowsDir,
@@ -404,6 +405,190 @@ function nowIsoLocal(): string {
   return formatLocalIsoTimestamp();
 }
 
+/* ── Timestamp recovery: git + fs + frontmatter triangulation ─────── */
+
+/**
+ * Normalize a frontmatter date scalar to a comparable ISO string.
+ *
+ * Legacy `.pensieve/` entries overwhelmingly carry `created: YYYY-MM-DD`
+ * (matching the file slug prefix); a small minority carry full ISO
+ * (e.g. `created: 2026-05-13T16:00:00.000+08:00`). We expand bare
+ * YYYY-MM-DD to local-tz midnight so YYYY-MM-DD `2026-04-30` sorts
+ * BEFORE a same-day git commit `2026-04-30T16:43:21+08:00`. Author
+ * declared "on 4-30" → midnight is the most conservative reading.
+ *
+ * Returns null for unparseable input — caller treats as "no signal".
+ */
+function normalizeFmDate(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    const d = new Date(`${trimmed}T00:00:00`);
+    if (Number.isNaN(d.getTime())) return null;
+    return formatLocalIsoTimestamp(d);
+  }
+  const d = new Date(trimmed);
+  if (Number.isNaN(d.getTime())) return null;
+  return formatLocalIsoTimestamp(d);
+}
+
+/**
+ * Read fs.stat-derived ISO timestamps. `birthtimeMs` is only honored
+ * when > 0 and finite — on filesystems without statx support Node
+ * silently falls back to ctime or 0, both of which would corrupt the
+ * min() result for `created`. `mtimeMs` is always present (any file
+ * has a last-write time) so we always return it.
+ */
+async function readFsTimes(fileAbs: string): Promise<{ birthtime: string | null; mtime: string | null }> {
+  try {
+    const stat = await fs.stat(fileAbs);
+    const birthtime =
+      stat.birthtimeMs > 0 && Number.isFinite(stat.birthtimeMs)
+        ? formatLocalIsoTimestamp(new Date(stat.birthtimeMs))
+        : null;
+    const mtime =
+      Number.isFinite(stat.mtimeMs)
+        ? formatLocalIsoTimestamp(new Date(stat.mtimeMs))
+        : null;
+    return { birthtime, mtime };
+  } catch {
+    return { birthtime: null, mtime: null };
+  }
+}
+
+/**
+ * Resolve `created` to the EARLIEST credible signal:
+ *
+ *   min(frontmatter.created, git-author-first, fs.birthtime)
+ *
+ * Why min works for all three:
+ *   - `frontmatter.created` is authoring-time declaration; rarely
+ *     ahead of reality, often slug-derived YYYY-MM-DD midnight.
+ *   - `git-author-first` is the time the file first entered git;
+ *     always ≥ real authoring time (you write, then commit).
+ *   - `fs.birthtime` is inode creation time. For a file you authored
+ *     locally and never re-checked-out, this is the REAL creation
+ *     time and is typically EARLIER than the git commit. For a file
+ *     pulled from `git clone`, birthtime = clone time and is
+ *     typically LATER than git-author-first; min() naturally lets
+ *     git win in that case.
+ *
+ * Both "clone-then-work" and "local-from-zero" workflows fall out
+ * correctly without special-casing.
+ *
+ * Fallback chain when all three are missing: migrationTimestamp.
+ */
+async function resolveCreated(
+  fileAbs: string,
+  frontmatter: Record<string, unknown>,
+  gitTimes: GitAuthorTimes,
+  migrationTimestamp: string,
+): Promise<string> {
+  const candidates: string[] = [];
+  const fmCreated = scalarString(frontmatter.created);
+  if (fmCreated) {
+    const iso = normalizeFmDate(fmCreated);
+    if (iso) candidates.push(iso);
+  }
+  const gitFirst = gitTimes.firstByPath.get(fileAbs);
+  if (gitFirst) candidates.push(gitFirst);
+  const fsTimes = await readFsTimes(fileAbs);
+  if (fsTimes.birthtime) candidates.push(fsTimes.birthtime);
+  return pickByEpoch(candidates, "min") ?? migrationTimestamp;
+}
+
+/**
+ * Resolve `updated` to the LATEST credible signal — but asymmetric
+ * vs `resolveCreated`: fs.mtime is NOT included when git tracks the
+ * file. Reason: clone / checkout / git restore rewrite mtime to the
+ * filesystem-write moment, producing a false "recently modified"
+ * signal for files that haven't actually been touched by the author
+ * since the last `git pull`. Trusting git-last-touch over fs.mtime
+ * for tracked files keeps `updated` honest.
+ *
+ * For untracked files (`git log` returns nothing), fs.mtime is the
+ * only available signal and falls through.
+ */
+async function resolveUpdated(
+  fileAbs: string,
+  frontmatter: Record<string, unknown>,
+  gitTimes: GitAuthorTimes,
+  migrationTimestamp: string,
+): Promise<string> {
+  const candidates: string[] = [];
+  const gitLast = gitTimes.lastByPath.get(fileAbs);
+  if (gitLast) candidates.push(gitLast);
+  const fmUpdated = scalarString(frontmatter.updated);
+  if (fmUpdated) {
+    const iso = normalizeFmDate(fmUpdated);
+    if (iso) candidates.push(iso);
+  }
+  if (!gitLast) {
+    // Untracked file: fs.mtime is the only modification signal.
+    const fsTimes = await readFsTimes(fileAbs);
+    if (fsTimes.mtime) candidates.push(fsTimes.mtime);
+  }
+  // Future-date guard: an author may have erroneously written
+  // `fm.updated: 2099-01-01`. Under max() that value would silently
+  // dominate git-author-last and poison the migrated entry. Cap
+  // candidates at the EARLIER of migrationTimestamp and real wall
+  // clock — nothing can have been modified after migration ran AND
+  // nothing can have been modified after the real present. Using
+  // min(migrationTimestamp, Date.now()) keeps production behavior
+  // bounded by migrationTimestamp (what callers pass), while tests
+  // that fabricate a far-future migrationTimestamp still see the
+  // guard engage at real-now.
+  // `created` does not need this guard: min() naturally rejects
+  // future-dated frontmatter as long as ANY past signal exists.
+  const migrationEpoch = Date.parse(migrationTimestamp);
+  const wallEpoch = Date.now();
+  const capEpoch = Number.isFinite(migrationEpoch)
+    ? Math.min(migrationEpoch, wallEpoch)
+    : wallEpoch;
+  const safe = candidates.filter((iso) => {
+    const e = Date.parse(iso);
+    return Number.isFinite(e) && e <= capEpoch;
+  });
+  return pickByEpoch(safe, "max") ?? migrationTimestamp;
+}
+
+/**
+ * Pick the min/max of a list of ISO timestamps by their UTC epoch, NOT
+ * by lexicographic string sort. ISO 8601 strings only sort
+ * lexicographically when their timezone offsets are identical:
+ *
+ *   "2026-04-30T00:00:00+08:00"  semantically = 2026-04-29T16:00:00Z
+ *   "2026-04-30T00:00:00+00:00"  semantically = 2026-04-30T00:00:00Z
+ *
+ * Lexicographically the +00:00 string is "smaller", but the +08:00
+ * instant is actually earlier (-8h). Real legacy frontmatter mixes
+ * bare `YYYY-MM-DD` (normalized to local-tz midnight), `Z`-suffixed
+ * UTC, and `+08:00` tagged values — string sort would silently pick
+ * the wrong candidate when these collide.
+ *
+ * Unparseable candidates (Date.parse returns NaN) are dropped; if
+ * every candidate is unparseable we return undefined and caller falls
+ * back to migrationTimestamp.
+ */
+function pickByEpoch(candidates: string[], mode: "min" | "max"): string | undefined {
+  let bestIso: string | undefined;
+  let bestEpoch: number | undefined;
+  for (const iso of candidates) {
+    const epoch = Date.parse(iso);
+    if (!Number.isFinite(epoch)) continue;
+    if (bestEpoch === undefined) {
+      bestEpoch = epoch;
+      bestIso = iso;
+      continue;
+    }
+    if (mode === "min" ? epoch < bestEpoch : epoch > bestEpoch) {
+      bestEpoch = epoch;
+      bestIso = iso;
+    }
+  }
+  return bestIso;
+}
+
 function buildNormalizedFrontmatter(input: {
   projectId: string;
   slug: string;
@@ -495,6 +680,7 @@ async function analyzeEntry(
   projectId: string,
   abrainHome: string,
   migrationTimestamp: string,
+  gitTimes: GitAuthorTimes,
   _settings: MemorySettings,
 ): Promise<AnalyzedEntry> {
   // markdownFilesForTarget already filters .index/, .state/, .git/, and
@@ -553,6 +739,12 @@ async function analyzeEntry(
     0,
     10,
   );
+  // `created` / `updated` triangulate frontmatter, git author-date,
+  // and fs.birthtime/mtime; see resolveCreated / resolveUpdated for
+  // the min/max policies. Pre-`git-times` versions hard-coded
+  // migrationTimestamp here, which made every legacy entry look
+  // "created today" — destroying time-aware LLM rerank signal.
+  // (Old comment kept for context):
   // Both `created` and `updated` default to the full ISO migrationTimestamp
   // when the source frontmatter is missing them. Earlier we used
   // `migrationTimestamp.slice(0, 10)` for `created` (YYYY-MM-DD only) but
@@ -562,8 +754,8 @@ async function analyzeEntry(
   // the *original* creation date when the source had none recorded —
   // there is no reliable byte-accurate "created" signal in legacy
   // .pensieve/ entries that didn't carry one in frontmatter.
-  const created = scalarString(frontmatter.created) || migrationTimestamp;
-  const updated = scalarString(frontmatter.updated) || migrationTimestamp;
+  const created = await resolveCreated(file, frontmatter, gitTimes, migrationTimestamp);
+  const updated = await resolveUpdated(file, frontmatter, gitTimes, migrationTimestamp);
 
   const notes: string[] = [];
   if (!frontmatterText) {
@@ -721,6 +913,13 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   const { DEFAULT_SEDIMENT_SETTINGS } = await import("../sediment/settings");
 
   const files = await markdownFilesForTarget(pensieveAbs, opts.settings, opts.signal);
+  // Batch git author-date lookup for the whole .pensieve scope. One
+  // subprocess pair (first-add + last-touch) replaces O(N) per-file
+  // git log calls and keeps the 364-file ~/.pi migration well under a
+  // second. analyzeEntry pulls per-file ISOs out of these maps; empty
+  // maps are a safe degenerate (resolveCreated/Updated fall back to
+  // fs.birthtime/mtime and frontmatter).
+  const gitTimes = await collectGitAuthorTimes(parentRepoRoot, pensieveAbs, opts.signal);
   const entries: MigrationGoEntryReport[] = [];
   let movedCount = 0;
   let workflowCount = 0;
@@ -770,7 +969,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
         continue;
       }
 
-      const analyzed = await analyzeEntry(file, pensieveAbs, projectId, abrainHome, migrationTimestamp, opts.settings);
+      const analyzed = await analyzeEntry(file, pensieveAbs, projectId, abrainHome, migrationTimestamp, gitTimes, opts.settings);
 
       if (analyzed.isPipeline) {
         const raw = await fs.readFile(file, "utf-8");
