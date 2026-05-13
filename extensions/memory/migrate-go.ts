@@ -16,6 +16,7 @@ import {
   splitFrontmatter,
 } from "./parser";
 import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_FIELDS } from "./lint";
+import { legacyPensieveSeedFor, legacyPensieveSeedPrunedReason } from "./legacy-seeds";
 import { writePostMigrationGuard } from "../sediment/writer";
 import { clamp, normalizeBareSlug, prettyPath, titleFromSlug, throwIfAborted } from "./utils";
 import {
@@ -81,7 +82,7 @@ export interface MigrationGoEntryReport {
   title: string;
   kind: string;
   route: "knowledge" | "workflow-project" | "workflow-cross-project";
-  action: "migrated" | "skipped" | "failed";
+  action: "migrated" | "skipped" | "pruned" | "failed";
   reason?: string;
   /** notes from analyzeEntry frontmatter normalization, e.g.
    *  ["missing frontmatter"], ["frontmatter-unparseable"],
@@ -104,6 +105,7 @@ export interface MigrationGoResult {
   movedCount: number;
   workflowCount: number;
   skippedCount: number;
+  seedPrunedCount: number;
   failedCount: number;
   parentCommitSha?: string | null;
   abrainCommitSha?: string | null;
@@ -701,6 +703,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       movedCount: 0,
       workflowCount: 0,
       skippedCount: 0,
+      seedPrunedCount: 0,
       failedCount: 0,
       parentPreSha: pre.parentPreSha ?? null,
       abrainPreSha: pre.abrainPreSha ?? null,
@@ -722,6 +725,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   let movedCount = 0;
   let workflowCount = 0;
   let skippedCount = 0;
+  let seedPrunedCount = 0;
   let failedCount = 0;
 
   for (const file of files) {
@@ -744,6 +748,26 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       continue;
     }
     try {
+      const raw = await fs.readFile(file, "utf-8");
+      const { frontmatterText } = splitFrontmatter(raw);
+      const seed = legacyPensieveSeedFor(relSource, parseFrontmatter(frontmatterText));
+      if (seed) {
+        await gitRmOrUnlink(parentRepoRoot, file);
+        skippedCount += 1;
+        seedPrunedCount += 1;
+        entries.push({
+          source: relSource,
+          target: seed.globalTarget,
+          slug: seed.slug,
+          title: seed.title,
+          kind: seed.kind,
+          route: seed.kind === "workflow" ? "workflow-cross-project" : "knowledge",
+          action: "pruned",
+          reason: legacyPensieveSeedPrunedReason(seed),
+        });
+        continue;
+      }
+
       const analyzed = await analyzeEntry(file, pensieveAbs, projectId, abrainHome, migrationTimestamp, opts.settings);
 
       if (analyzed.isPipeline) {
@@ -955,6 +979,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       movedCount,
       workflowCount,
       skippedCount,
+      seedPrunedCount,
       failedCount,
       parentPreSha: pre.parentPreSha ?? null,
       abrainPreSha: pre.abrainPreSha ?? null,
@@ -982,9 +1007,10 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   } catch {
     // best-effort — audit failure does not abort migration
   }
+  const seedPrunedSuffix = seedPrunedCount > 0 ? ` + ${seedPrunedCount} seed pruned` : "";
   const parentCommitSha = await gitCommitAll(
     parentRepoRoot,
-    `chore: migrate .pensieve → ~/.abrain/projects/${projectId} (${movedCount + workflowCount} entries)`,
+    `chore: migrate .pensieve → ~/.abrain/projects/${projectId} (${movedCount + workflowCount} entries${seedPrunedSuffix})`,
     parentPensieveRel,
   );
   // Abrain side: whole repo IS the migration target (knowledge entries +
@@ -1004,6 +1030,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
     movedCount,
     workflowCount,
     skippedCount,
+    seedPrunedCount,
     failedCount,
     parentCommitSha,
     abrainCommitSha,
@@ -1029,6 +1056,7 @@ export function formatMigrationGoSummary(result: MigrationGoResult, cwd: string 
     `${partial ? "Migration partially completed" : "Migration complete"}: projectId=${result.projectId} (${result.projectIdSource})`,
     `  moved (knowledge): ${result.movedCount}`,
     `  routed (workflow): ${result.workflowCount}`,
+    ...(result.seedPrunedCount > 0 ? [`  pruned (legacy seed): ${result.seedPrunedCount}`] : []),
     `  skipped: ${result.skippedCount}`,
     `  failed: ${result.failedCount}`,
     `  parent commit: ${result.parentCommitSha ?? "(none — no changes staged)"}`,

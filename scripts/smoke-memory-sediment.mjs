@@ -175,7 +175,7 @@ async function main() {
     const { lintMarkdown } = req("./memory/lint.js");
     const { rebuildGraphIndex } = req("./memory/graph.js");
     const { rebuildMarkdownIndex } = req("./memory/index-file.js");
-    const { planMigrationDryRun, writeMigrationReport } = req("./memory/migrate.js");
+    const { planMigrationDryRun, writeMigrationReport, formatMigrationPlan } = req("./memory/migrate.js");
     const { runMigrationGo, formatMigrationGoSummary } = req("./memory/migrate-go.js");
     const { bindAbrainProject } = req("./_shared/runtime.js");
     const { runDoctorLite, formatDoctorLiteReport } = req("./memory/doctor.js");
@@ -498,6 +498,18 @@ created: 2026-05-08
 
 Body.
 `);
+    writeFile(path.join(root, ".pensieve", "maxims", "eliminate-special-cases-by-redesigning-data-flow.md"), `---
+id: eliminate-special-cases-by-redesigning-data-flow
+type: maxim
+title: Eliminate special cases by redesigning data flow
+status: active
+created: 2026-02-11
+updated: 2026-02-11
+---
+# Eliminate special cases by redesigning data flow
+
+Original Pensieve seed content.
+`);
     // === Memory migrate dry-run (read-only planner) ========================
     // Round 7 P0-C (opus audit fix): dry-run now reflects --go's actual
     // routing in target_path, including pipelines (previously lied about
@@ -534,6 +546,14 @@ Body.
     // the schema flag is gone.)
     const stillUnsupported = migration.skipped.find((s) => /pipeline.*not migrated/i.test(s.reason));
     assert(!stillUnsupported, `pipelines must no longer be flagged 'unsupported' in dry-run, found: ${stillUnsupported?.reason}`);
+    const seedSkip = migration.skipped.find((s) => s.source_path === ".pensieve/maxims/eliminate-special-cases-by-redesigning-data-flow.md");
+    assert(seedSkip && /legacy Pensieve seed/.test(seedSkip.reason), `legacy seed should be skipped in dry-run: ${JSON.stringify(migration.skipped)}`);
+    assert(
+      !migration.items.some((item) => item.source_path === ".pensieve/maxims/eliminate-special-cases-by-redesigning-data-flow.md"),
+      `legacy seed must not appear as a project migration item`,
+    );
+    const formattedMigration = formatMigrationPlan(migration);
+    assert(/Skipped:/.test(formattedMigration) && /legacy Pensieve seed/.test(formattedMigration), `formatted migration should show skipped seed rows: ${formattedMigration}`);
     const migrationReport = await writeMigrationReport(path.join(root, ".pensieve"), migration, root);
     const migrationReportText = fs.readFileSync(path.join(root, ".pi-astack", "memory", "migration-report.md"), "utf-8");
     assert(fs.existsSync(path.join(root, ".pi-astack", "memory", "migration-report.md")), "migration report not written");
@@ -1422,6 +1442,23 @@ created: 2026-05-08
 Body.
 `,
       );
+      // legacy Pensieve bootstrap seed: belongs in global abrain, not in
+      // ~/.abrain/projects/<id>/; migrate-go prunes it from the project repo.
+      writeFile(
+        path.join(goParent, ".pensieve", "knowledge", "taste-review", "content.md"),
+        `---
+id: taste-review-content
+type: knowledge
+title: 代码品味审查知识库
+status: active
+created: 2026-02-28
+updated: 2026-02-28
+---
+# 代码品味审查知识库
+
+Original Pensieve seed content.
+`,
+      );
       // pipeline: project-specific (no cross_project flag)
       writeFile(
         path.join(goParent, ".pensieve", "pipelines", "run-when-coding.md"),
@@ -1520,13 +1557,19 @@ This is a cross-project review pipeline body with enough content.
       // (parser.ts IGNORE_DIRS + listFilesWithRg --glob), so they're invisible
       // to migrate-go and never show up as migrated OR skipped. Root-level
       // state.md is visible but unsupported, matching dry-run's skipped row.
-      assert(result.skippedCount === 1, `support state.md should be skipped, got ${result.skippedCount} skips: ${JSON.stringify(result.entries)}`);
+      // Legacy Pensieve bootstrap seeds are counted as skipped too, but are
+      // pruned from the project repo instead of copied into projects/<id>/.
+      assert(result.skippedCount === 2, `support state.md + legacy seed should be skipped, got ${result.skippedCount} skips: ${JSON.stringify(result.entries)}`);
+      assert(result.seedPrunedCount === 1, `expected 1 legacy seed pruned, got ${result.seedPrunedCount}: ${JSON.stringify(result.entries)}`);
       assert(
         !result.entries.some((e) => /\.state|\.index/.test(e.source)),
         `no entry should reference .state/.index source: ${JSON.stringify(result.entries)}`,
       );
       const stateSkip = result.entries.find((e) => e.source === "state.md" && e.action === "skipped");
       assert(stateSkip && /support file outside memory entry directories/.test(stateSkip.reason || ""), `state.md should be skipped as support file: ${JSON.stringify(result.entries)}`);
+      const seedPruned = result.entries.find((e) => e.source === path.join("knowledge", "taste-review", "content.md") && e.action === "pruned");
+      assert(seedPruned && /legacy Pensieve seed pruned/.test(seedPruned.reason || ""), `legacy seed should be pruned: ${JSON.stringify(result.entries)}`);
+      assert(seedPruned.target === path.join("knowledge", "taste-review-content.md"), `seed target hint should point at global knowledge: ${JSON.stringify(seedPruned)}`);
       // Derived/support files remain in .pensieve/ (untouched by migration).
       assert(
         fs.existsSync(path.join(goParent, ".pensieve", ".index", "graph.json")),
@@ -1543,6 +1586,14 @@ This is a cross-project review pipeline body with enough content.
       assert(
         !fs.existsSync(path.join(goAbrain, "projects", "test-project", "knowledge", "state.md")),
         `root state.md support file must not be migrated into abrain knowledge/`,
+      );
+      assert(
+        !fs.existsSync(path.join(goParent, ".pensieve", "knowledge", "taste-review", "content.md")),
+        `legacy Pensieve seed should be pruned from project .pensieve`,
+      );
+      assert(
+        !fs.existsSync(path.join(goAbrain, "projects", "test-project", "knowledge", "taste-review-content.md")),
+        `legacy Pensieve seed must not be migrated into project knowledge/`,
       );
 
       // 4) Knowledge entries moved to abrain projects dir
@@ -1619,6 +1670,7 @@ This is a cross-project review pipeline body with enough content.
       assert(migRow.movedCount === result.movedCount, `audit movedCount mismatch: ${migRow.movedCount} vs result ${result.movedCount}`);
       assert(migRow.workflowCount === result.workflowCount, `audit workflowCount mismatch: ${migRow.workflowCount} vs result ${result.workflowCount}`);
       assert(migRow.skippedCount === result.skippedCount, `audit skippedCount mismatch: ${migRow.skippedCount} vs result ${result.skippedCount}`);
+      assert(migRow.seedPrunedCount === result.seedPrunedCount, `audit seedPrunedCount mismatch: ${migRow.seedPrunedCount} vs result ${result.seedPrunedCount}`);
       assert(Array.isArray(migRow.entries) && migRow.entries.length > 0, `audit entries array missing`);
       assert(migRow.entries.every((e) => e.source && e.action), `audit entries must each carry source+action; got=${JSON.stringify(migRow.entries[0])}`);
       assert(migRow.parentPreSha === result.parentPreSha, `audit parentPreSha mismatch`);

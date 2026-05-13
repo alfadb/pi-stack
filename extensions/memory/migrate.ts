@@ -12,6 +12,7 @@ import {
   splitFrontmatter,
 } from "./parser";
 import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_FIELDS } from "./lint";
+import { legacyPensieveSeedDryRunReason, legacyPensieveSeedFor } from "./legacy-seeds";
 import { clamp, normalizeBareSlug, prettyPath, stableUnique, titleFromSlug, throwIfAborted } from "./utils";
 import {
   abrainProjectDir,
@@ -172,6 +173,12 @@ async function planMigrationForFile(
   const { frontmatterText, body } = splitFrontmatter(raw);
   const frontmatter = parseFrontmatter(frontmatterText);
   const { timeline } = splitCompiledTruth(body);
+  const sourceDisplay = prettyPath(file, cwd);
+
+  const seed = legacyPensieveSeedFor(relPath, frontmatter);
+  if (seed) {
+    return { skipped: { source_path: sourceDisplay, reason: legacyPensieveSeedDryRunReason(seed) } };
+  }
 
   const id = scalarString(frontmatter.id);
   const pathSlug = path.basename(file, path.extname(file)) === "content"
@@ -190,7 +197,6 @@ async function planMigrationForFile(
   );
   const created = scalarString(frontmatter.created);
   const targetPath = legacyTargetPath(file, projectRoot, relPath, slug, kind, status, frontmatter, opts);
-  const sourceDisplay = prettyPath(file, cwd);
   const targetDisplay = targetPath.startsWith("<unresolved") ? targetPath : prettyPath(targetPath, cwd);
 
   const reasons: string[] = [];
@@ -401,17 +407,27 @@ export function formatMigrationPlan(report: MigrationPlanReport, maxItems = 12):
     "target_path values below show where `--go` would route each entry into ~/.abrain/.",
   ];
 
-  if (report.items.length === 0) return lines.join("\n");
-
-  lines.push("");
-  for (const item of report.items.slice(0, maxItems)) {
-    lines.push(`- ${item.source_path} -> ${item.target_path}`);
-    lines.push(`  slug=${item.slug} kind=${item.kind} status=${item.status} confidence=${item.confidence}`);
-    lines.push(`  reasons: ${item.reasons.join(", ")}`);
-    lines.push(`  actions: ${item.actions.join("; ")}`);
+  if (report.items.length > 0) {
+    lines.push("");
+    for (const item of report.items.slice(0, maxItems)) {
+      lines.push(`- ${item.source_path} -> ${item.target_path}`);
+      lines.push(`  slug=${item.slug} kind=${item.kind} status=${item.status} confidence=${item.confidence}`);
+      lines.push(`  reasons: ${item.reasons.join(", ")}`);
+      lines.push(`  actions: ${item.actions.join("; ")}`);
+    }
+    if (report.items.length > maxItems) {
+      lines.push(`- ... ${report.items.length - maxItems} more migration item(s) omitted`);
+    }
   }
-  if (report.items.length > maxItems) {
-    lines.push(`- ... ${report.items.length - maxItems} more migration item(s) omitted`);
+
+  if (report.skipped.length > 0) {
+    lines.push("", "Skipped:");
+    for (const item of report.skipped.slice(0, maxItems)) {
+      lines.push(`- ${item.source_path}: ${item.reason}`);
+    }
+    if (report.skipped.length > maxItems) {
+      lines.push(`- ... ${report.skipped.length - maxItems} more skipped item(s) omitted`);
+    }
   }
   return lines.join("\n");
 }
