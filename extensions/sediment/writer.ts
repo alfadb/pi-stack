@@ -22,6 +22,7 @@ import type { Jsonish } from "../memory/types";
 // always slugify titles directly.
 import { slugify } from "../memory/utils";
 import {
+  abrainProjectDir,
   abrainProjectWorkflowsDir,
   abrainSedimentAuditPath,
   abrainSedimentLocksDir,
@@ -31,7 +32,6 @@ import {
   ensureSedimentLegacyMigrated,
   formatLocalIsoTimestamp,
   sedimentAuditPath,
-  sedimentLocksDir,
   validateAbrainProjectId,
 } from "../_shared/runtime";
 
@@ -59,7 +59,18 @@ export interface WriterAuditContext {
 }
 
 export interface WriteProjectEntryOptions {
+  /** Project repo root — still used as the audit/lock substrate root,
+   *  i.e. `<projectRoot>/.pi-astack/sediment/audit.jsonl`. Entry markdown
+   *  itself lands in abrain, not under projectRoot. */
   projectRoot: string;
+  /** Abrain home (required since the 2026-05-13 sediment cutover): the
+   *  entry markdown is written under `<abrainHome>/projects/<projectId>/`
+   *  and the corresponding git commit lands in the abrain repo. */
+  abrainHome: string;
+  /** Strict-binding project id (from `resolveActiveProject`). Embedded
+   *  in the entry frontmatter `id: project:<projectId>:<slug>` and used
+   *  to construct the abrain write path. */
+  projectId: string;
   settings: SedimentSettings;
   dryRun?: boolean;
   auditOperation?: string;
@@ -186,79 +197,35 @@ function normalizeCompiledTruth(title: string, body: string): string {
   return text.trim();
 }
 
-function projectSlug(projectRoot: string): string {
-  try {
-    const cfgPath = path.join(projectRoot, ".pensieve", "config.yml");
-    const raw = fsSync.readFileSync(cfgPath, "utf-8");
-    const match = raw.match(/^\s*id:\s*([A-Za-z0-9_.-]+)/m) || raw.match(/^\s*project:\s*\n(?:.*\n)*?\s+id:\s*([A-Za-z0-9_.-]+)/m);
-    if (match?.[1]) return slugify(match[1]);
-  } catch {}
-  return slugify(path.basename(projectRoot) || "project");
-}
-
-async function ensureProjectPensieveRoot(projectRoot: string): Promise<string> {
-  const pensieveRoot = path.join(projectRoot, ".pensieve");
-  await fs.mkdir(pensieveRoot, { recursive: true });
-  return pensieveRoot;
-}
-
-/** Round 7 P0-D (opus audit fix): `/memory migrate --go` writes a flag
- *  file at `<projectRoot>/.pi-astack/sediment/migrated-to-abrain.flag`
- *  with the abrain projectId + migration timestamp. While B5 (sediment
- *  writer cutover to ~/.abrain/projects/<id>/) is pending, any mutation
- *  call into the project's .pensieve substrate after a successful migration
- *  would silently rebuild `.pensieve/` and split memory across two stores
- *  (.pensieve fragment + ~/.abrain/projects/<id>/). This helper detects
- *  the flag and lets writer entry points return a structured `rejected`
- *  audit row instead of writing.
+/**
+ * Ensure the abrain project's <kind>/<status> tree exists under
+ * `<abrainHome>/projects/<projectId>/`. Replaces the V6.x
+ * `ensureProjectPensieveRoot` whose canonical write target was the
+ * project repo's own `.pensieve/`. Per the 2026-05-13 sediment cutover
+ * (writeProjectEntry / archive / delete / merge / supersede / update
+ * all migrated to abrain), `.pensieve/` is no longer a sediment write
+ * substrate; only migrate-go / doctor-lite still READ from `.pensieve/`
+ * when staring at legacy unmigrated repos.
  *
- *  Returns `{ migratedAt, projectId }` when the flag is present,
- *  `null` otherwise. Bad / unreadable flag files are ignored (returns
- *  null) so a hand-corrupted flag doesn't permanently brick the writer. */
-export interface PostMigrationGuardInfo {
-  migratedAt: string;
-  projectId: string;
+ * Replaces V6.x `projectSlug(projectRoot)` which read
+ * `<projectRoot>/.pensieve/config.yml` to recover a project id slug.
+ * That config has no successor in the abrain world: the project id is
+ * now part of strict-binding identity (passed in via opts.projectId).
+ */
+async function ensureAbrainEntryRoot(abrainHome: string, projectId: string): Promise<string> {
+  const root = abrainProjectDir(abrainHome, projectId);
+  await fs.mkdir(root, { recursive: true });
+  return root;
 }
 
-// Round 7 P0-D: flag lives INSIDE `.pensieve/` so that:
-//   1. migrate-go's parent-side commit (`git add .pensieve && git commit`)
-//      automatically captures it as part of the migration commit.
-//   2. `git reset --hard <parentPreSha>` rolls it back atomically with the
-//      .pensieve restoration — no manual cleanup needed for re-apply.
-//   3. `.pensieve/` is in the user's git tracking by design, so the flag
-//      becomes part of the durable migration audit trail.
-// File name uses ALL_CAPS + no extension to make it stand out in `ls`
-// output, mirroring the convention of MIGRATING/COMMIT_EDITMSG/etc.
-const POST_MIGRATION_FLAG_REL = path.join(".pensieve", "MIGRATED_TO_ABRAIN");
+// V6.x post-migration `.pensieve/MIGRATED_TO_ABRAIN` guard removed in the
+// 2026-05-13 sediment cutover: sediment writer no longer touches
+// `.pensieve/` under any condition, so a flag whose sole purpose was to
+// REJECT `.pensieve/` writes had no remaining caller. Binding identity
+// (`.abrain-project.json` + `<abrainHome>/projects/<id>/_project.json`
+// + local-map confirmed path) is the canonical post-migration marker now.
 
-export async function readPostMigrationGuard(projectRoot: string): Promise<PostMigrationGuardInfo | null> {
-  const flagPath = path.join(projectRoot, POST_MIGRATION_FLAG_REL);
-  try {
-    const raw = await fs.readFile(flagPath, "utf-8");
-    const parsed = JSON.parse(raw) as Partial<PostMigrationGuardInfo>;
-    if (typeof parsed.migratedAt !== "string" || typeof parsed.projectId !== "string") return null;
-    return { migratedAt: parsed.migratedAt, projectId: parsed.projectId };
-  } catch {
-    return null;
-  }
-}
-
-export async function writePostMigrationGuard(
-  projectRoot: string,
-  info: PostMigrationGuardInfo,
-): Promise<string> {
-  const flagPath = path.join(projectRoot, POST_MIGRATION_FLAG_REL);
-  await fs.mkdir(path.dirname(flagPath), { recursive: true });
-  await fs.writeFile(flagPath, JSON.stringify(info, null, 2) + "\n", "utf-8");
-  return flagPath;
-}
-
-export async function clearPostMigrationGuard(projectRoot: string): Promise<void> {
-  const flagPath = path.join(projectRoot, POST_MIGRATION_FLAG_REL);
-  try { await fs.unlink(flagPath); } catch { /* idempotent */ }
-}
-
-function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: string; markdown: string } {
+function buildMarkdown(draft: ProjectEntryDraft, projectId: string): { slug: string; markdown: string } {
   const timestamp = nowIso();
   const status = draft.status ?? "provisional";
   const confidence = Math.min(10, Math.max(0, Math.round(draft.confidence ?? 3)));
@@ -269,7 +236,14 @@ function buildMarkdown(draft: ProjectEntryDraft, projectRoot: string): { slug: s
 
   const frontmatter = [
     "---",
-    `id: project:${projectSlug(projectRoot)}:${slug}`,
+    // projectId is already validated by validateAbrainProjectId (allowed
+    // chars [a-zA-Z0-9_.-]+). DO NOT pass through slugify() here — that
+    // would lowercase and rewrite `_`/`.` to `-`, producing an id that
+    // disagrees with migrate-go's `id: project:<projectId>:<slug>`
+    // (migrate-go.ts uses raw projectId). Mismatched ids would split
+    // wikilink / backlink resolution between migrated and freshly-written
+    // entries when the projectId contains any non-lowercase / non-dash chars.
+    `id: project:${projectId}:${slug}`,
     "scope: project",
     `kind: ${draft.kind}`,
     `status: ${status}`,
@@ -330,8 +304,7 @@ function renderFrontmatter(frontmatter: Record<string, Jsonish>, originalOrder: 
   return lines.join("\n");
 }
 
-async function findProjectEntryFile(projectRoot: string, slug: string): Promise<string | undefined> {
-  const pensieveRoot = path.join(projectRoot, ".pensieve");
+async function findProjectEntryFile(entryRoot: string, slug: string): Promise<string | undefined> {
   const targetName = `${slug}.md`;
   async function walk(dir: string): Promise<string | undefined> {
     let entries: fsSync.Dirent[];
@@ -341,7 +314,10 @@ async function findProjectEntryFile(projectRoot: string, slug: string): Promise<
       return undefined;
     }
     for (const entry of entries) {
-      if (entry.name === ".git" || entry.name === ".state" || entry.name === ".index") continue;
+      // Skip metadata + lock + tmp + workflow output dirs (workflows live
+      // under the same project root but are written by a separate writer,
+      // and `_project.json` is the binding manifest, not an entry).
+      if (entry.name === ".git" || entry.name === ".state" || entry.name === ".index" || entry.name === "_project.json" || entry.name === "workflows" || entry.name === "vault") continue;
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         const hit = await walk(abs);
@@ -352,14 +328,14 @@ async function findProjectEntryFile(projectRoot: string, slug: string): Promise<
     }
     return undefined;
   }
-  return walk(pensieveRoot);
+  return walk(entryRoot);
 }
 
 function mergeUpdateMarkdown(
   raw: string,
   patch: ProjectEntryUpdateDraft,
   slug: string,
-  projectRoot: string,
+  projectId: string,
 ): { markdown: string; validationDraft: ProjectEntryDraft; sanitizedReplacements: string[] } | { error: string } {
   const timestamp = nowIso();
   const { frontmatterText, body } = splitFrontmatter(raw);
@@ -431,7 +407,10 @@ function mergeUpdateMarkdown(
 
   const nextFrontmatter: Record<string, Jsonish> = {
     ...frontmatter,
-    id: frontmatter.id ?? `project:${projectSlug(projectRoot)}:${slug}`,
+    // See buildMarkdown above: stay consistent with migrate-go's raw
+    // `project:<projectId>:<slug>` form; never run projectId through slugify
+    // (would corrupt ids whose projectId uses uppercase or `_`/`.`).
+    id: frontmatter.id ?? `project:${projectId}:${slug}`,
     scope: "project",
     kind,
     status,
@@ -490,8 +469,14 @@ function mergeUpdateMarkdown(
  */
 const SEDIMENT_LOCK_STEAL_AFTER_MS = 30_000;
 
-async function acquireLock(projectRoot: string, timeoutMs: number): Promise<LockHandle> {
-  const lockPath = path.join(sedimentLocksDir(projectRoot), "sediment.lock");
+async function acquireLock(abrainHome: string, timeoutMs: number): Promise<LockHandle> {
+  // Lock substrate moved from project-local `<projectRoot>/.pi-astack/
+  // sediment/locks/` to `<abrainHome>/.state/sediment/locks/` along with
+  // the entry write target: parallel sediment writes from multiple
+  // projects bound to the same abrain home must serialize against the
+  // SAME lock file, since they all commit into the same abrain git repo.
+  // Per-project lock would let two sessions race the abrain index head.
+  const lockPath = path.join(abrainSedimentLocksDir(abrainHome), "sediment.lock");
   const handle = await acquireFileLock(lockPath, {
     timeoutMs,
     staleMs: SEDIMENT_LOCK_STEAL_AFTER_MS,
@@ -517,12 +502,26 @@ async function atomicWrite(file: string, content: string) {
   }
 }
 
-async function gitCommit(projectRoot: string, filePath: string, slug: string): Promise<string | null> {
+async function gitCommit(
+  abrainHome: string,
+  filePath: string,
+  slug: string,
+  op: string,
+  projectId: string,
+): Promise<string | null> {
+  // Commits land in the abrain repo (cross-project knowledge substrate).
+  // Commit message convention since the 2026-05-13 cutover:
+  //   sediment: <op> <slug> (project:<id>)
+  // op ∈ {create, update, archive, merge, supersede, delete}.
   try {
-    const rel = path.relative(projectRoot, filePath);
-    await execFileAsync("git", ["-C", projectRoot, "add", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
-    await execFileAsync("git", ["-C", projectRoot, "commit", "-m", `memory: ${slug}`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
-    const { stdout } = await execFileAsync("git", ["-C", projectRoot, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    const rel = path.relative(abrainHome, filePath);
+    await execFileAsync("git", ["-C", abrainHome, "add", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
+    await execFileAsync(
+      "git",
+      ["-C", abrainHome, "commit", "-m", `sediment: ${op} ${slug} (project:${projectId})`],
+      { timeout: 20_000, maxBuffer: 1024 * 1024 },
+    );
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
     return stdout.trim() || null;
   } catch {
     return null;
@@ -575,6 +574,8 @@ export async function mergeProjectEntries(
     frontmatterPatch: nonTargetSources.length > 0 ? { derives_from: nonTargetSources } : undefined,
   }, {
     projectRoot: opts.projectRoot,
+    abrainHome: opts.abrainHome,
+    projectId: opts.projectId,
     settings: opts.settings,
     dryRun: opts.dryRun,
     auditOperation: "merge",
@@ -589,6 +590,8 @@ export async function mergeProjectEntries(
   for (const source of nonTargetSources) {
     results.push(await archiveProjectEntry(source, {
       projectRoot: opts.projectRoot,
+      abrainHome: opts.abrainHome,
+      projectId: opts.projectId,
       settings: opts.settings,
       dryRun: opts.dryRun,
       reason: `merged into ${targetSlug}: ${reason}`,
@@ -611,6 +614,8 @@ export async function archiveProjectEntry(
     timelineNote: reason,
   }, {
     projectRoot: opts.projectRoot,
+    abrainHome: opts.abrainHome,
+    projectId: opts.projectId,
     settings: opts.settings,
     dryRun: opts.dryRun,
     auditOperation: "archive",
@@ -634,6 +639,8 @@ export async function supersedeProjectEntry(
     frontmatterPatch: opts.newSlug ? { superseded_by: [opts.newSlug] } : undefined,
   }, {
     projectRoot: opts.projectRoot,
+    abrainHome: opts.abrainHome,
+    projectId: opts.projectId,
     settings: opts.settings,
     dryRun: opts.dryRun,
     auditOperation: "supersede",
@@ -649,33 +656,14 @@ export async function deleteProjectEntry(
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
-  const guard = await readPostMigrationGuard(projectRoot);
-  if (guard) {
-    const slug = slugify(slugRaw);
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
-      operation: "reject",
-      reason: "post_migration_pensieve_writes_disabled",
-      target: `project:${slug}`,
-      post_migration_guard: guard,
-      duration_ms: Date.now() - started,
-    }));
-    return {
-      slug,
-      path: path.join(projectRoot, ".pensieve", `${slug}.md`),
-      status: "rejected",
-      reason: "post_migration_pensieve_writes_disabled",
-      auditPath,
-      deleteMode: opts.mode === "hard" ? "hard" : "soft",
-      ...resultAuditFields(opts, opts.sessionId),
-    };
-  }
-  const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
+  const abrainHome = path.resolve(opts.abrainHome);
+  const entryRoot = await ensureAbrainEntryRoot(abrainHome, opts.projectId);
   const slug = slugify(slugRaw);
   const mode: DeleteMode = opts.mode === "hard" ? "hard" : "soft";
   const reason = opts.reason || "deleted by sediment curator";
   const resultCtx = resultAuditFields(opts, opts.sessionId);
 
-  const target = await findProjectEntryFile(projectRoot, slug);
+  const target = await findProjectEntryFile(entryRoot, slug);
   if (!target) {
     const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "reject",
@@ -684,7 +672,7 @@ export async function deleteProjectEntry(
       delete_mode: mode,
       duration_ms: Date.now() - started,
     }));
-    return { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, deleteMode: mode, ...resultCtx };
+    return { slug, path: path.join(entryRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, deleteMode: mode, ...resultCtx };
   }
 
   if (mode === "soft") {
@@ -695,6 +683,8 @@ export async function deleteProjectEntry(
       timelineNote: `soft delete: ${reason}`,
     }, {
       projectRoot,
+      abrainHome: opts.abrainHome,
+      projectId: opts.projectId,
       settings: opts.settings,
       dryRun: opts.dryRun,
       auditOperation: "delete",
@@ -710,9 +700,9 @@ export async function deleteProjectEntry(
 
   let lock: LockHandle | undefined;
   try {
-    lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
+    lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
     await fs.unlink(target);
-    const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `hard delete ${slug}`) : null;
+    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "delete", opts.projectId) : null;
     const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "delete",
       target: `project:${slug}`,
@@ -745,26 +735,8 @@ export async function updateProjectEntry(
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
-  const guard = await readPostMigrationGuard(projectRoot);
-  if (guard) {
-    const slug = slugify(slugRaw);
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
-      operation: "reject",
-      reason: "post_migration_pensieve_writes_disabled",
-      target: `project:${slug}`,
-      post_migration_guard: guard,
-      duration_ms: Date.now() - started,
-    }));
-    return {
-      slug,
-      path: path.join(projectRoot, ".pensieve", `${slug}.md`),
-      status: "rejected",
-      reason: "post_migration_pensieve_writes_disabled",
-      auditPath,
-      ...resultAuditFields(opts, patch.sessionId),
-    };
-  }
-  const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
+  const abrainHome = path.resolve(opts.abrainHome);
+  const entryRoot = await ensureAbrainEntryRoot(abrainHome, opts.projectId);
   const slug = slugify(slugRaw);
   const resultCtx = resultAuditFields(opts, patch.sessionId);
 
@@ -794,7 +766,7 @@ export async function updateProjectEntry(
     | { ok: true; target: string; merged: { markdown: string; sanitizedReplacements: string[] }; lintErrors: number; lintWarnings: number }
     | { ok: false; response: WriteProjectEntryResult }
   > {
-    const target = await findProjectEntryFile(projectRoot, slug);
+    const target = await findProjectEntryFile(entryRoot, slug);
     if (!target) {
       const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
         operation: "reject",
@@ -802,7 +774,7 @@ export async function updateProjectEntry(
         target: `project:${slug}`,
         duration_ms: Date.now() - started,
       }));
-      return { ok: false, response: { slug, path: path.join(pensieveRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, ...resultCtx } };
+      return { ok: false, response: { slug, path: path.join(entryRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, ...resultCtx } };
     }
     let raw: string;
     try {
@@ -817,7 +789,7 @@ export async function updateProjectEntry(
       }));
       return { ok: false, response: { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath, ...resultCtx } };
     }
-    const merged = mergeUpdateMarkdown(raw, patch, slug, projectRoot);
+    const merged = mergeUpdateMarkdown(raw, patch, slug, opts.projectId);
     if ("error" in merged) {
       const reason = merged.error.startsWith("credential pattern detected") ? merged.error : merged.error.split(":")[0];
       const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
@@ -869,7 +841,7 @@ export async function updateProjectEntry(
   let lintWarnings = 0;
   let mergedForCatch: { markdown: string; sanitizedReplacements: string[] } | undefined;
   try {
-    lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
+    lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
     // Re-do the find+read+merge+lint cycle INSIDE the lock to observe any
     // concurrent state changes (hard delete, prior atomic write).
     const prepared = await prepareMergedMarkdown();
@@ -881,7 +853,7 @@ export async function updateProjectEntry(
     const merged = prepared.merged;
     await atomicWrite(target, merged.markdown);
     const operation = opts.auditOperation || "update";
-    const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, `${operation} ${slug}`) : null;
+    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, operation, opts.projectId) : null;
     const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
       operation,
       target: `project:${slug}`,
@@ -922,27 +894,8 @@ export async function writeProjectEntry(
 ): Promise<WriteProjectEntryResult> {
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
-  const guard = await readPostMigrationGuard(projectRoot);
-  if (guard) {
-    const slug = slugify(draft.title);
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
-      operation: "reject",
-      reason: "post_migration_pensieve_writes_disabled",
-      target: `project:${slug}`,
-      title: draft.title,
-      post_migration_guard: guard,
-      duration_ms: Date.now() - started,
-    }));
-    return {
-      slug,
-      path: path.join(projectRoot, ".pensieve", `${slug}.md`),
-      status: "rejected",
-      reason: "post_migration_pensieve_writes_disabled",
-      auditPath,
-      ...resultAuditFields(opts, draft.sessionId),
-    };
-  }
-  const pensieveRoot = await ensureProjectPensieveRoot(projectRoot);
+  const abrainHome = path.resolve(opts.abrainHome);
+  const entryRoot = await ensureAbrainEntryRoot(abrainHome, opts.projectId);
   const resultCtx = resultAuditFields(opts, draft.sessionId);
 
   const validationErrors = validateProjectEntryDraft(draft);
@@ -956,7 +909,7 @@ export async function writeProjectEntry(
     }));
     return {
       slug: slugify(draft.title),
-      path: pensieveRoot,
+      path: entryRoot,
       status: "rejected",
       reason: "validation_error",
       validationErrors,
@@ -984,7 +937,7 @@ export async function writeProjectEntry(
       title: draft.title,
       duration_ms: Date.now() - started,
     }));
-    return { slug: slugify(draft.title), path: pensieveRoot, status: "rejected", reason: failedSanitize.error, auditPath, ...resultCtx };
+    return { slug: slugify(draft.title), path: entryRoot, status: "rejected", reason: failedSanitize.error, auditPath, ...resultCtx };
   }
 
   const sanitizedReplacements = [
@@ -1005,11 +958,11 @@ export async function writeProjectEntry(
     status: draft.status,
   };
 
-  const { slug, markdown } = buildMarkdown(safeDraft, projectRoot);
+  const { slug, markdown } = buildMarkdown(safeDraft, opts.projectId);
   const status = safeDraft.status ?? "provisional";
-  const target = path.join(pensieveRoot, kindDirectory(safeDraft.kind, status), `${slug}.md`);
+  const target = path.join(entryRoot, kindDirectory(safeDraft.kind, status), `${slug}.md`);
 
-  const duplicate = await detectProjectDuplicate(projectRoot, safeDraft.title, {
+  const duplicate = await detectProjectDuplicate(entryRoot, safeDraft.title, {
     slug,
     kind: safeDraft.kind,
   });
@@ -1060,7 +1013,7 @@ export async function writeProjectEntry(
 
   let lock: LockHandle | undefined;
   try {
-    lock = await acquireLock(projectRoot, opts.settings.lockTimeoutMs);
+    lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
     if (fsSync.existsSync(target)) {
       const duplicateRace: DedupeResult = {
         duplicate: true,
@@ -1079,7 +1032,7 @@ export async function writeProjectEntry(
     }
 
     await atomicWrite(target, markdown);
-    const git = opts.settings.gitCommit ? await gitCommit(projectRoot, target, slug) : null;
+    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "create", opts.projectId) : null;
     const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
       operation: "create",
       target: `project:${slug}`,

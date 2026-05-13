@@ -1,6 +1,6 @@
 # ADR 0017 — Project Binding Strict Mode（项目身份绑定严格模式）
 
-- **状态**：Accepted（2026-05-12），**B4.5 已实施**（runtime strict resolver + `/abrain bind/status` + `/memory migrate` strict + sediment/vault guards）。
+- **状态**：Accepted（2026-05-12），**B4.5 已实施**（runtime strict resolver + `/abrain bind/status` + `/memory migrate` strict + sediment/vault guards）。**B5 sediment writer cutover 2026-05-13 已实施**（writer 全切 abrain，删 `MIGRATED_TO_ABRAIN` guard 与所有 `.pensieve/` 写路径）。
 - **取代**：ADR 0014 / brain-redesign-spec 中早期 `~/.abrain/projects/_bindings.md` + git remote / cwd prefix 推断方案。
 - **依赖**：[ADR 0014](0014-abrain-as-personal-brain.md)、[migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)、[migration/vault-bootstrap.md](../migration/vault-bootstrap.md)
 - **触发**：`~/.config/opencode` 首仓 dry-run 时用户手动传 `--project=opencode-gloabl`（typo）仍被 planner 接受，证明 migration 命令不应同时承担“决定项目身份”的职责。
@@ -241,11 +241,14 @@ Run: /abrain bind
 }
 ```
 
-与 R7 `MIGRATED_TO_ABRAIN` guard 的关系：
+B5 sediment writer cutover（2026-05-13）：
 
-- strict binding guard 是 B4.5 的全局前置条件，防止未绑定项目产生任何 project-scoped 写入。
-- `MIGRATED_TO_ABRAIN` 是 B4 **所有 user entry 无失败迁移后**的 forward-only guard，防止已迁项目重新写回 `.pensieve`；partial migration（任一 entry failed）不会写 guard，失败条目保留在 `.pensieve` 供重试。
-- B5 writer cutover 后，strict binding 决定写到哪个 `~/.abrain/projects/<id>/`；post-migration guard 作为迁移期防 split-brain 保护仍有效。
+- writer 6 函数（write / update / archive / delete / merge / supersede）的 entry markdown / git commit / lock 全部切到 `<abrainHome>/projects/<projectId>/` 与 `<abrainHome>/.state/sediment/locks/`。
+- audit / checkpoint 仍 project-local（`<projectRoot>/.pi-astack/sediment/`），保留 forensic trace。
+- R7 `MIGRATED_TO_ABRAIN` guard 与所有相关 reject 路径在 cutover 中**完全删除**：guard 唯一职责（拒绝 post-migration `.pensieve/` 写入）在新世界已无意义 — writer 不再触及 `.pensieve/`。
+- strict binding guard 仍是 B4.5 全局前置：未绑定时所有 project-scoped writer 调用 reject（`project_not_bound` audit）；绑定后 writer 自动 route 到 `<abrainHome>/projects/<projectId>/`。
+- migration（`/memory migrate --go`）继续从 `.pensieve/` **读**入口，向 abrain 写出口；cutover 后**新的** sediment 写入不再触碰 `.pensieve/`，所以旧 `.pensieve/` 是只读迁移源。
+- partial migration 仍可重试：失败条目保留在 `.pensieve/`，再次 `/memory migrate --go` 继续搬。
 
 ## vault strict project scope
 

@@ -17,7 +17,6 @@ import {
 } from "./parser";
 import { isEmptyFrontmatterValue, markdownFilesForTarget, REQUIRED_FRONTMATTER_FIELDS } from "./lint";
 import { legacyPensieveSeedFor, legacyPensieveSeedPrunedReason } from "./legacy-seeds";
-import { writePostMigrationGuard } from "../sediment/writer";
 import { clamp, normalizeBareSlug, prettyPath, titleFromSlug, throwIfAborted } from "./utils";
 import { collectGitAuthorTimes, type GitAuthorTimes } from "./git-times";
 import {
@@ -1117,46 +1116,18 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   // staging files in `.pi-astack/`). pensieveAbs may be the canonical
   // `.pensieve` or a custom path; relativize against parentRepoRoot.
   const parentPensieveRel = path.relative(parentRepoRoot, pensieveAbs) || ".pensieve";
-  // Round 7 P0-D (opus audit fix): drop a post-migration flag inside
-  // `.pensieve/` BEFORE the parent-side commit, so the flag is captured
-  // as part of the migration commit (and rolled back atomically when the
-  // user runs `git reset --hard <parentPreSha>`). The flag tells sediment
-  // writer entry points to reject further .pensieve mutations until B5
-  // cutover ships; it carries the projectId so audit rows identify the
-  // canonical abrain destination for future writes.
-  // Round 9 P1 (deepseek R9 P2-1 fix): wrap writePostMigrationGuard in
-  // try/catch. If `fs.writeFile` to `.pensieve/MIGRATED_TO_ABRAIN` fails
-  // (ENOSPC, EROFS), the migration is already past per-entry writes and
-  // git rm — throwing here strands the user in a half-state with no
-  // commits made (deletions staged, abrain entries written, no guard,
-  // no rollback hint).
+  // Round 7 P0-D legacy `.pensieve/MIGRATED_TO_ABRAIN` guard removed in
+  // the 2026-05-13 sediment cutover. The guard's only job was to reject
+  // post-migration `.pensieve/` sediment writes during the B5 transition
+  // window. After the cutover, sediment writer no longer touches
+  // `.pensieve/` under any condition, so the guard has no remaining
+  // reader. Strict binding (`<projectRoot>/.abrain-project.json` +
+  // `<abrainHome>/projects/<id>/_project.json`) is now the only
+  // post-migration identity contract. New migrations leave `.pensieve/`
+  // empty (or with whatever the user kept manually); doctor-lite
+  // identifies a directory as already-migrated by absence of entries
+  // plus presence of the abrain project counterpart, not by a flag file.
   //
-  // Guard is a convenience for B5 sediment cutover (rejects post-
-  // migration .pensieve writes). NOT a data integrity invariant — the
-  // abrain side has canonical truth. Best-effort failure: log to audit
-  // and proceed to commits. If guard is missing, post-migration
-  // sediment writes go to old .pensieve until B5 ships, which is the
-  // pre-R7-P0-D behavior anyway.
-  let guardPath: string | null = null;
-  let guardError: string | null = null;
-  let guardSkippedReason: string | null = null;
-  if (failedCount > 0) {
-    // A partial migration is intentionally resumable: successfully moved
-    // entries are committed, failed entries remain in .pensieve for retry.
-    // Do NOT write the forward-only post-migration guard until every user
-    // entry migrated cleanly, otherwise the remaining legacy entries would
-    // be stranded behind MIGRATED_TO_ABRAIN.
-    guardSkippedReason = "entry_failures";
-  } else {
-    try {
-      guardPath = await writePostMigrationGuard(parentRepoRoot, {
-        migratedAt: migrationTimestamp,
-        projectId,
-      });
-    } catch (e: any) {
-      guardError = e instanceof Error ? e.message : String(e);
-    }
-  }
   // Round 8 P1 (sonnet R8 audit fix): write a single migration audit row
   // to the abrain-side sediment audit log so post-migration forensics
   // can reconstruct "which entries came from which project's .pensieve
@@ -1197,12 +1168,6 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       })),
       entries_total: entries.length,
       entries_truncated: entries.length > 200,
-      // R9 P1: record whether the post-migration guard was successfully
-      // written. Operators can grep guard_error / guard_skipped_reason to
-      // distinguish write failures from intentionally resumable partials.
-      guard_written: guardPath !== null,
-      ...(guardSkippedReason ? { guard_skipped_reason: guardSkippedReason } : {}),
-      ...(guardError ? { guard_error: guardError.slice(0, 200) } : {}),
     };
     await fs.appendFile(auditPath, JSON.stringify(row) + "\n", "utf-8");
   } catch {
@@ -1264,7 +1229,7 @@ export function formatMigrationGoSummary(result: MigrationGoResult, cwd: string 
     `  abrain commit: ${result.abrainCommitSha ?? "(none — no changes staged)"}`,
   );
   if (partial) {
-    lines.push(`  ⚠️  post-migration guard was not written; failed entries remain in .pensieve for retry.`);
+    lines.push(`  ⚠️  partial migration: failed entries remain in .pensieve for retry. Re-run /memory migrate --go after fixing the failures.`);
   }
   if (result.failedCount > 0) {
     lines.push("", "Failures:");

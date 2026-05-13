@@ -59,7 +59,7 @@ import {
   type WriterAuditContext,
 } from "./writer";
 import { FOOTER_STATUS_KEYS } from "../_shared/footer-status";
-import { resolveActiveProject } from "../_shared/runtime";
+import { abrainProjectDir, resolveActiveProject } from "../_shared/runtime";
 
 // ---------------------------------------------------------------
 // Phase 1.4 A2 / ADR 0016: in-process bg work tracking.
@@ -327,7 +327,21 @@ function registerSedimentCommand(pi: ExtensionAPI) {
           ctx.ui.notify("Usage: /sediment dedupe --title <title> (or /sediment dedupe <title>)", "warning");
           return;
         }
-        const result = await detectProjectDuplicate(cwd, title);
+        // Post-2026-05-13 B5 cutover: project entries live in
+        // `<abrainHome>/projects/<projectId>/`, not `<cwd>/.pensieve/`.
+        // Scan abrain target so dedupe sees the canonical store; require
+        // strict binding (same contract as sediment writer).
+        const abrainHomeForDedupe = resolveAbrainHomeForSediment();
+        const binding = resolveActiveProject(cwd, { abrainHome: abrainHomeForDedupe });
+        if (!binding.activeProject) {
+          ctx.ui.notify(
+            `Not bound (binding=${binding.reason}). Run /abrain bind --project=<id> before /sediment dedupe.`,
+            "warning",
+          );
+          return;
+        }
+        const scanRoot = abrainProjectDir(abrainHomeForDedupe, binding.activeProject.projectId);
+        const result = await detectProjectDuplicate(scanRoot, title);
         ctx.ui.notify(
           JSON.stringify(result, null, 2),
           result.duplicate ? "warning" : "info",
@@ -566,10 +580,16 @@ export default function (pi: ExtensionAPI) {
       }
       // From this point on, all checkpoint/audit/writer paths must use the
       // bound project root, not the launch subdirectory. Otherwise starting
-      // pi from <repo>/subdir would pass strict binding via git root but
-      // write split-brain state into <repo>/subdir/.pensieve and bypass the
-      // root-level MIGRATED_TO_ABRAIN guard.
+      // pi from <repo>/subdir would pass strict binding via git root and
+      // write checkpoint/audit into <repo>/subdir/.pi-astack/ — fragmenting
+      // forensic data across a real project root and a non-canonical sibling.
       cwd = binding.activeProject.projectRoot;
+      // Closure-scoped abrain identity, used by every writer invocation
+      // below. Per the 2026-05-13 sediment cutover, entry markdown lives
+      // in `<abrainHome>/projects/<projectId>/` (the project repo itself
+      // is no longer a sediment write substrate).
+      const projectId = binding.activeProject.projectId;
+      const abrainHome = resolveAbrainHomeForSediment();
 
       if (unhealthyStopReason) {
         await appendAudit(cwd, {
@@ -726,6 +746,8 @@ export default function (pi: ExtensionAPI) {
                         modelRegistry,
                         signal: undefined,
                         correlationId: corrId,
+                        abrainHome,
+                        projectId,
                       });
                       // Round 8 P1 (sonnet R8 audit fix): drain loop now
                       // writes audit rows for ALL outcomes (wrote /
@@ -883,6 +905,8 @@ export default function (pi: ExtensionAPI) {
               modelRegistry,
               signal: undefined,
               correlationId: autoCorrelationId,
+              abrainHome,
+              projectId,
             });
             const tAutoEnd = Date.now();
 
@@ -1119,14 +1143,14 @@ export default function (pi: ExtensionAPI) {
           candidateId: candidateIdFor(explicitCorrelationId, i),
         };
         results.push(
-          await writeProjectEntry(
+          await writeProjectEntry( /* writer-call: auto-write-block */
             {
               ...draft,
               sessionId,
               timelineNote:
                 draft.timelineNote || "captured from explicit MEMORY block",
             },
-            { projectRoot: cwd, settings, dryRun: false, auditContext },
+            { projectRoot: cwd, abrainHome, projectId, settings, dryRun: false, auditContext },
           ),
         );
       }
@@ -1309,8 +1333,19 @@ async function tryAutoWriteLane(args: {
   modelRegistry: unknown;
   signal?: AbortSignal;
   correlationId: string;
+  // 2026-05-13 B5 cutover: writer now requires abrain identity in opts.
+  // tryAutoWriteLane is a module-level function (not nested inside the
+  // agent_end closure where abrainHome / projectId live), so the curator
+  // -> writer call sites below need these explicitly threaded through.
+  // Without them, every non-skip curator decision crashes with
+  // `ReferenceError: abrainHome is not defined` at runtime
+  // (audit catches it as `auto_write_bg_threw`, footer shows `failed`).
+  // Production smoke missed this because the smoke fixture exercises
+  // writers directly, not via tryAutoWriteLane.
+  abrainHome: string;
+  projectId: string;
 }): Promise<AutoWriteLaneOutcome> {
-  const { cwd, sessionId, settings, window, correlationId } = args;
+  const { cwd, sessionId, settings, window, correlationId, abrainHome, projectId } = args;
   const modelRegistry = args.modelRegistry as ModelRegistryLike | undefined;
 
   if (!settings.autoLlmWriteEnabled) {
@@ -1443,6 +1478,8 @@ async function tryAutoWriteLane(args: {
           },
           {
             projectRoot: cwd,
+            abrainHome,
+            projectId,
             settings,
             dryRun: false,
             auditContext,
@@ -1467,6 +1504,8 @@ async function tryAutoWriteLane(args: {
           },
           {
             projectRoot: cwd,
+            abrainHome,
+            projectId,
             settings,
             dryRun: false,
             auditContext,
@@ -1479,6 +1518,8 @@ async function tryAutoWriteLane(args: {
       results.push(
         await archiveProjectEntry(curated.decision.slug, {
           projectRoot: cwd,
+          abrainHome,
+          projectId,
           settings,
           dryRun: false,
           reason:
@@ -1495,6 +1536,8 @@ async function tryAutoWriteLane(args: {
       results.push(
         await supersedeProjectEntry(curated.decision.oldSlug, {
           projectRoot: cwd,
+          abrainHome,
+          projectId,
           settings,
           dryRun: false,
           newSlug: curated.decision.newSlug,
@@ -1512,6 +1555,8 @@ async function tryAutoWriteLane(args: {
       results.push(
         await deleteProjectEntry(curated.decision.slug, {
           projectRoot: cwd,
+          abrainHome,
+          projectId,
           settings,
           dryRun: false,
           mode: curated.decision.mode,
@@ -1536,6 +1581,8 @@ async function tryAutoWriteLane(args: {
         },
         {
           projectRoot: cwd,
+          abrainHome,
+          projectId,
           settings,
           dryRun: false,
           auditContext,
@@ -1581,6 +1628,19 @@ export function _resetAutoWriteStateForTests(): void {
   autoWriteInFlight.clear();
   sedimentStatusBySession.clear();
 }
+
+/**
+ * Test-only export of `tryAutoWriteLane` so smoke can drive the
+ * extractor → curator → writer integration path that the explicit-marker
+ * lane bypasses. Added 2026-05-13 alongside the B5 sediment writer cutover
+ * after a code review found that `tryAutoWriteLane` had silently lost
+ * lexical access to its `abrainHome` / `projectId` closure variables
+ * (they live inside the `agent_end` listener, not at module scope) and
+ * production smoke missed it because every writer fixture calls the
+ * writer functions directly. Smoke should call this with a stub LLM /
+ * model registry to lock the closure-arg threading invariant.
+ */
+export const _tryAutoWriteLaneForTests = tryAutoWriteLane;
 
 /**
  * Test-only hook to await any background auto-write work to settle.

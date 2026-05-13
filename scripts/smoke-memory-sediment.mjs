@@ -198,6 +198,24 @@ async function main() {
       execFileSync("git", ["-C", repo, "commit", "-q", "-m", message]);
     }
 
+    /**
+     * Lightweight abrain target setup for sediment-writer fixtures that
+     * don't need a full bind. Post-2026-05-13 cutover the writer requires
+     * `abrainHome` + `projectId` in opts (no .pensieve fallback), so every
+     * writeProjectEntry / updateProjectEntry / archiveProjectEntry / etc.
+     * call must supply them. This helper creates an isolated abrain tmpdir
+     * with an empty `projects/<projectId>/` shell — enough for the writer
+     * to materialize the kind/status dir and land the entry. It does NOT
+     * write `_project.json` or a project-side `.abrain-project.json`
+     * because the writer itself doesn't read those (binding is the
+     * caller's responsibility in production via sediment/index.ts).
+     */
+    function setupAbrainTarget(projectId = "smoke-fixture") {
+      const abrainHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-abrain-"));
+      fs.mkdirSync(path.join(abrainHome, "projects", projectId), { recursive: true });
+      return { abrainHome, projectId };
+    }
+
     async function bindMigrationProject(projectRoot, abrainHome, projectId) {
       await bindAbrainProject({
         abrainHome,
@@ -575,14 +593,20 @@ Original Pensieve seed content.
     const sanitize = sanitizeForMemory("/home/worker a@example.com 127.0.0.1");
     assert(sanitize.ok && sanitize.replacements.includes("home_path") && sanitize.replacements.includes("email") && sanitize.replacements.includes("ip_address"), "sanitize replacements failed");
 
+    // Post-2026-05-13 cutover: writer requires explicit abrainHome + projectId.
+    const writerTarget1 = setupAbrainTarget("writer-fixture");
     const write = await writeProjectEntry({
       title: "Writer Fixture",
       kind: "fact",
       confidence: 5,
       compiledTruth: "This validates the sediment writer substrate with enough content.",
-    }, { projectRoot: root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+    }, { projectRoot: root, abrainHome: writerTarget1.abrainHome, projectId: writerTarget1.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
     assert(write.status === "created", `writer failed: ${write.reason}`);
+    // Entry markdown must land under abrain, not under projectRoot/.pensieve/.
+    assert(write.path.startsWith(path.join(writerTarget1.abrainHome, "projects", writerTarget1.projectId) + path.sep), `writer entry must land under abrain projects dir, got: ${write.path}`);
+    assert(!fs.existsSync(path.join(root, ".pensieve", "facts")), "writer must NOT create projectRoot/.pensieve/facts/ after cutover");
 
+    const writerTarget2 = setupAbrainTarget("writer-correlation");
     const correlatedWrite = await writeProjectEntry({
       title: "Writer Correlation Fixture",
       kind: "fact",
@@ -591,6 +615,8 @@ Original Pensieve seed content.
       compiledTruth: "This validates that writer-level audit rows carry lane, session, correlation, and candidate identifiers.",
     }, {
       projectRoot: root,
+      abrainHome: writerTarget2.abrainHome,
+      projectId: writerTarget2.projectId,
       settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false },
       dryRun: false,
       auditContext: {
@@ -602,6 +628,7 @@ Original Pensieve seed content.
     });
     assert(correlatedWrite.status === "created", `correlated writer failed: ${correlatedWrite.reason}`);
     assert(correlatedWrite.correlationId === "corr-smoke" && correlatedWrite.candidateId === "corr-smoke:c1", "writer result should echo audit correlation ids");
+    // Audit log remains project-local (forensic), even though entry markdown went to abrain.
     const auditRows = fs.readFileSync(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
     const correlatedAudit = auditRows.find((row) => row.operation === "create" && row.target === "project:writer-correlation-fixture");
     assert(correlatedAudit?.lane === "auto_write", "writer audit row should include lane");
@@ -609,17 +636,22 @@ Original Pensieve seed content.
     assert(correlatedAudit?.correlation_id === "corr-smoke", "writer audit row should include correlation_id");
     assert(correlatedAudit?.candidate_id === "corr-smoke:c1", "writer audit row should include candidate_id");
 
-    const missingPensieveRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-no-pensieve-"));
+    // Writer auto-creates the abrain projects/<id>/ kind subdir if missing.
+    const missingTarget = setupAbrainTarget("writer-creates-dir");
+    // Wipe the projects/<id>/ subdir to verify writer recreates it on demand.
+    fs.rmSync(path.join(missingTarget.abrainHome, "projects", missingTarget.projectId), { recursive: true, force: true });
+    const projectRootForCreate = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-no-abrain-"));
     const createdRootWrite = await writeProjectEntry({
-      title: "Writer Creates Pensieve Root",
+      title: "Writer Creates Abrain Root",
       kind: "fact",
       confidence: 5,
-      compiledTruth: "The sediment writer creates the project .pensieve directory on demand when it is missing.",
-    }, { projectRoot: missingPensieveRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-    assert(createdRootWrite.status === "created", `writer should create missing .pensieve root: ${createdRootWrite.reason}`);
-    assert(fs.existsSync(path.join(missingPensieveRoot, ".pensieve")), "writer did not create .pensieve root on demand");
+      compiledTruth: "The sediment writer creates the abrain projects/<id>/ directory on demand when it is missing.",
+    }, { projectRoot: projectRootForCreate, abrainHome: missingTarget.abrainHome, projectId: missingTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+    assert(createdRootWrite.status === "created", `writer should create missing abrain projects/<id>/: ${createdRootWrite.reason}`);
+    assert(fs.existsSync(path.join(missingTarget.abrainHome, "projects", missingTarget.projectId)), "writer did not create abrain projects/<id>/ on demand");
 
-    const duplicate = await detectProjectDuplicate(root, "Writer Fixture");
+    // Post-cutover: dedupe scans the abrain projects/<id>/ tree, not <projectRoot>/.pensieve/.
+    const duplicate = await detectProjectDuplicate(path.join(writerTarget1.abrainHome, "projects", writerTarget1.projectId), "Writer Fixture");
     assert(duplicate.duplicate, "dedupe failed to detect written entry");
 
     const branch = [
@@ -895,6 +927,7 @@ END_MEMORY`;
       execFileSync("git", ["init"], { cwd: g6Root, stdio: "ignore" });
       execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: g6Root });
       execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: g6Root });
+      const g6Target = setupAbrainTarget("frontmatter-breakout");
       const r = await writeProjectEntry({
         title: "Frontmatter Break Out",
         kind: "fact",
@@ -906,7 +939,7 @@ END_MEMORY`;
           "",
           "Body section B (after bare hr).",
         ].join("\n"),
-      }, { projectRoot: g6Root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      }, { projectRoot: g6Root, abrainHome: g6Target.abrainHome, projectId: g6Target.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
       assert(r.status === "created", `frontmatter breakout write failed: ${r.reason}`);
       const written = fs.readFileSync(r.path, "utf-8");
       // Re-parse the file: the surviving frontmatter must have exactly
@@ -927,13 +960,14 @@ END_MEMORY`;
       execFileSync("git", ["init"], { cwd: g8Root, stdio: "ignore" });
       execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: g8Root });
       execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: g8Root });
+      const g8Target = setupAbrainTarget("phrase-leak");
       const bad = await writeProjectEntry({
         title: "Phrase Leak",
         kind: "fact",
         confidence: 5,
         compiledTruth: "Body that is fine on its own and long enough to pass validation.",
         triggerPhrases: ["normal phrase", "sk-abcdef0123456789abcdef0123456789"],
-      }, { projectRoot: g8Root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      }, { projectRoot: g8Root, abrainHome: g8Target.abrainHome, projectId: g8Target.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
       assert(bad.status === "rejected" && /openai_api_key|credential/.test(bad.reason || ""), `trigger phrase sanitizer must reject credential in triggerPhrases: ${JSON.stringify(bad)}`);
       // Negative: phrases that only contain $HOME paths get scrubbed and pass.
       const ok = await writeProjectEntry({
@@ -942,7 +976,7 @@ END_MEMORY`;
         confidence: 5,
         compiledTruth: "Body that is fine on its own and long enough to pass validation.",
         triggerPhrases: [`work from ${require("node:os").homedir()}/projects`],
-      }, { projectRoot: g8Root, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      }, { projectRoot: g8Root, abrainHome: g8Target.abrainHome, projectId: g8Target.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
       assert(ok.status === "created", `trigger phrase scrub write should succeed: ${JSON.stringify(ok)}`);
       const okWritten = fs.readFileSync(ok.path, "utf-8");
       assert(okWritten.includes("$HOME") && !okWritten.includes("/home/worker") && !okWritten.includes(`${require("node:os").homedir()}/projects`), "trigger phrase $HOME scrub did not redact");
@@ -989,13 +1023,14 @@ END_MEMORY`;
       execFileSync("git", ["init"], { cwd: slugBugRoot, stdio: "ignore" });
       execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: slugBugRoot });
       execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: slugBugRoot });
+      const slugBugTarget = setupAbrainTarget("slug-bug-regression");
       const titleWithSlash = "Audit Rows Distinguished by extractor/reason Combinations";
       const w = await writeProjectEntry({
         title: titleWithSlash,
         kind: "fact",
         confidence: 5,
         compiledTruth: "Body content for the slug-from-title regression.",
-      }, { projectRoot: slugBugRoot, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
+      }, { projectRoot: slugBugRoot, abrainHome: slugBugTarget.abrainHome, projectId: slugBugTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
       assert(w.status === "created", `slug-bug write failed: ${w.reason}`);
       // Expected: slug derived from full title with / replaced by -.
       assert(
@@ -1004,9 +1039,9 @@ END_MEMORY`;
       );
       // Negative: must NOT be the truncated form from the bug.
       assert(w.slug !== "reason-combinations", `slug truncation bug regressed: ${w.slug}`);
-      // Dedupe should also see the same full slug.
+      // Dedupe should also see the same full slug (scan abrain target, not legacy .pensieve).
       const { detectProjectDuplicate } = req("./sediment/dedupe.js");
-      const dup = await detectProjectDuplicate(slugBugRoot, titleWithSlash);
+      const dup = await detectProjectDuplicate(path.join(slugBugTarget.abrainHome, "projects", slugBugTarget.projectId), titleWithSlash);
       assert(dup.duplicate && dup.reason === "slug_exact", `dedupe must see same title: ${JSON.stringify(dup)}`);
     }
 
@@ -1057,6 +1092,11 @@ END_MEMORY`;
       execFileSync("git", ["init"], { cwd: aRoot, stdio: "ignore" });
       execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: aRoot });
       execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: aRoot });
+      // Post-2026-05-13 cutover: writer needs abrainHome + projectId. The
+      // a2 fixture exercises the full lifecycle (write/update/merge/
+      // archive/supersede/delete) against a single abrain target so all
+      // mutations target the same projects/<id>/ tree.
+      const aTarget = setupAbrainTarget("a2-fixture");
 
 
       // Stub the @earendil-works/pi-ai module so streamSimple returns a
@@ -1181,7 +1221,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         ...drafts1[0],
         sessionId: "smoke-a2",
         timelineNote: "smoke A2 e2e",
-      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false });
+      }, { projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, settings: a2Settings, dryRun: false });
       assert(w1.status === "created", `r1 write failed: ${w1.reason}`);
       const r1Written = fs.readFileSync(w1.path, "utf-8");
       assert(/^status: provisional$/m.test(r1Written), `r1 omitted status should default to provisional, got:\n${r1Written}`);
@@ -1210,7 +1250,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         ...drafts3[0],
         sessionId: "smoke-a2",
         timelineNote: "trusted maxim smoke",
-      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false });
+      }, { projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, settings: a2Settings, dryRun: false });
       assert(w3.status === "created", `r3 default llm mode must create: ${JSON.stringify(w3)}`);
       const r3Written = fs.readFileSync(w3.path, "utf-8");
       assert(/^kind: maxim$/m.test(r3Written) && /^status: active$/m.test(r3Written) && /^confidence: 9$/m.test(r3Written), `r3 maxim/status/confidence not preserved:\n${r3Written}`);
@@ -1224,7 +1264,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         compiledTruth: "# A2 Mock Extracted Insight\n\nThe curator updated this existing memory instead of creating a parallel duplicate.",
         sessionId: "smoke-a2",
         timelineNote: "curator update smoke",
-      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false });
+      }, { projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, settings: a2Settings, dryRun: false });
       assert(update.status === "updated", `updateProjectEntry should update existing entry: ${JSON.stringify(update)}`);
       const updatedWritten = fs.readFileSync(update.path, "utf-8");
       assert(/^status: active$/m.test(updatedWritten), `update should preserve patched status active:\n${updatedWritten}`);
@@ -1236,33 +1276,95 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         compiledTruth: "# A2 Mock Extracted Insight\n\nThe curator merged two related memories into one best current compiled truth.",
         reason: "merge substrate smoke",
         sessionId: "smoke-a2",
-      }, { projectRoot: aRoot, settings: a2Settings, dryRun: false });
+      }, { projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, settings: a2Settings, dryRun: false });
       assert(merged.length === 2 && merged[0].status === "merged" && merged[1].status === "archived", `mergeProjectEntries should update target and archive non-target source: ${JSON.stringify(merged)}`);
       const mergedWritten = fs.readFileSync(merged[0].path, "utf-8");
       assert(/^derives_from:\n  - trusted-maxim-attempt$/m.test(mergedWritten), `merge should set derives_from relation:\n${mergedWritten}`);
       assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| merged \| merge substrate smoke$/m.test(mergedWritten), `merge timeline missing:\n${mergedWritten}`);
 
-      const archived = await archiveProjectEntry(w1.slug, { projectRoot: aRoot, settings: a2Settings, dryRun: false, reason: "archive substrate smoke", sessionId: "smoke-a2" });
+      const archived = await archiveProjectEntry(w1.slug, { projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, settings: a2Settings, dryRun: false, reason: "archive substrate smoke", sessionId: "smoke-a2" });
       assert(archived.status === "archived", `archiveProjectEntry should archive existing entry: ${JSON.stringify(archived)}`);
       const archivedWritten = fs.readFileSync(archived.path, "utf-8");
       assert(/^status: archived$/m.test(archivedWritten), `archive should mark status archived:\n${archivedWritten}`);
       assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| archived \| archive substrate smoke$/m.test(archivedWritten), `archive timeline missing:\n${archivedWritten}`);
 
-      const superseded = await supersedeProjectEntry(w1.slug, { projectRoot: aRoot, settings: a2Settings, dryRun: false, newSlug: w3.slug, reason: "supersede substrate smoke", sessionId: "smoke-a2" });
+      const superseded = await supersedeProjectEntry(w1.slug, { projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, settings: a2Settings, dryRun: false, newSlug: w3.slug, reason: "supersede substrate smoke", sessionId: "smoke-a2" });
       assert(superseded.status === "superseded", `supersedeProjectEntry should supersede existing entry: ${JSON.stringify(superseded)}`);
       const supersededWritten = fs.readFileSync(superseded.path, "utf-8");
       assert(/^status: superseded$/m.test(supersededWritten), `supersede should mark status superseded:\n${supersededWritten}`);
       assert(/^superseded_by:\n  - trusted-maxim-attempt$/m.test(supersededWritten), `supersede should set superseded_by relation:\n${supersededWritten}`);
       assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| superseded \| superseded by trusted-maxim-attempt: supersede substrate smoke$/m.test(supersededWritten), `supersede timeline missing:\n${supersededWritten}`);
 
-      const softDeleted = await deleteProjectEntry(w3.slug, { projectRoot: aRoot, settings: a2Settings, dryRun: false, reason: "delete substrate smoke", sessionId: "smoke-a2" });
+      const softDeleted = await deleteProjectEntry(w3.slug, { projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, settings: a2Settings, dryRun: false, reason: "delete substrate smoke", sessionId: "smoke-a2" });
       assert(softDeleted.status === "deleted" && softDeleted.deleteMode === "soft" && fs.existsSync(softDeleted.path), `soft delete should archive existing entry without unlinking it: ${JSON.stringify(softDeleted)}`);
       const softDeletedWritten = fs.readFileSync(softDeleted.path, "utf-8");
       assert(/^status: archived$/m.test(softDeletedWritten), `soft delete should mark status archived:\n${softDeletedWritten}`);
       assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| deleted \| soft delete: delete substrate smoke$/m.test(softDeletedWritten), `soft delete timeline missing:\n${softDeletedWritten}`);
 
-      const hardDeleted = await deleteProjectEntry(w3.slug, { projectRoot: aRoot, settings: a2Settings, dryRun: false, mode: "hard", reason: "hard delete substrate smoke" });
+      const hardDeleted = await deleteProjectEntry(w3.slug, { projectRoot: aRoot, abrainHome: aTarget.abrainHome, projectId: aTarget.projectId, settings: a2Settings, dryRun: false, mode: "hard", reason: "hard delete substrate smoke" });
       assert(hardDeleted.status === "deleted" && hardDeleted.deleteMode === "hard" && !fs.existsSync(hardDeleted.path), `hard delete should unlink existing entry: ${JSON.stringify(hardDeleted)}`);
+
+      // === B5 cutover regression: tryAutoWriteLane closure-arg threading ===
+      //
+      // 2026-05-13 opus code review found that `tryAutoWriteLane` is a
+      // module-level function that referenced bare `abrainHome` /
+      // `projectId` names that ONLY exist inside the agent_end listener
+      // closure. Production smoke missed it because every existing fixture
+      // calls the writer functions directly. This case drives the
+      // extractor → curator → writer integration path so the closure-arg
+      // wiring stays locked. ts.transpileModule() does not do name
+      // resolution, so a missing arg surfaces only at runtime.
+      {
+        const { _tryAutoWriteLaneForTests } = req("./sediment/index.js");
+        // Reset the per-window stub state and inject a fresh response.
+        globalThis.__A2_INVOCATIONS__ = 0;
+        globalThis.__A2_RESPONSES__ = [
+          "MEMORY:\ntitle: TryAutoWrite Lane Wiring\nkind: fact\nconfidence: 4\n---\n# TryAutoWrite Lane Wiring\n\nThis insight exists only to drive tryAutoWriteLane through the curator + writer integration path so the closure-arg threading invariant stays locked.\nEND_MEMORY",
+        ];
+        // RunWindow shape matches `interface RunWindow` in
+        // extensions/sediment/checkpoint.ts. `text` is the only field
+        // runLlmExtractor reads downstream; the others must be present
+        // for type discipline but aren't read by the lane code below.
+        const tryWinText = "--- ENTRY 1 try1 message/assistant ---\nWe figured out something insightful about tryAutoWriteLane that we want to capture.";
+        const tryWin = {
+          entries: [
+            { type: "message", id: "try1", timestamp: "2026-05-13T00:00:01Z", message: { role: "assistant", content: [{ type: "text", text: "We figured out something insightful about tryAutoWriteLane." }] } },
+          ],
+          text: tryWinText,
+          chars: tryWinText.length,
+          totalBranchEntries: 1,
+          candidateEntries: 1,
+          includedEntries: 1,
+          checkpointFound: false,
+          lastEntryId: "try1",
+        };
+        const outcome = await _tryAutoWriteLaneForTests({
+          cwd: aRoot,
+          sessionId: "smoke-trywire",
+          settings: a2Settings,
+          window: tryWin,
+          modelRegistry: mockModelRegistry,
+          signal: undefined,
+          correlationId: "smoke-trywire:auto",
+          abrainHome: aTarget.abrainHome,
+          projectId: aTarget.projectId,
+        });
+        // The fingerprint we care about: NO `ReferenceError`. If the
+        // closure-arg threading regresses, outcome.kind === "threw" with
+        // `error: "abrainHome is not defined"` (or projectId variant).
+        // Any other kind — wrote / ineligible / llm_skip / llm_error —
+        // means the lane reached its decision point without crashing.
+        if (outcome.kind === "threw") {
+          assert(
+            !/abrainHome is not defined|projectId is not defined/i.test(String(outcome.error || "")),
+            `tryAutoWriteLane regressed on closure-arg threading: ${outcome.error}`,
+          );
+        }
+        assert(
+          ["wrote", "ineligible", "llm_skip", "llm_error", "threw"].includes(outcome.kind),
+          `tryAutoWriteLane outcome.kind must be a known variant, got: ${outcome.kind}`,
+        );
+      }
 
       _resetAutoWriteStateForTests();
     }
@@ -2155,10 +2257,14 @@ Body.
       assert(failed, `must have a failed entry report`);
       assert(/already exists|exists/i.test(failed.reason || ""), `collision reason should mention existing target: ${failed.reason}`);
       assert(result.movedCount === 0, `no entry should move when its sole entry collides`);
-      assert(!fs.existsSync(path.join(cParent, ".pensieve", "MIGRATED_TO_ABRAIN")), `partial migration must not write MIGRATED_TO_ABRAIN guard`);
+      // Post-2026-05-13 sediment cutover: `.pensieve/MIGRATED_TO_ABRAIN`
+      // guard fully removed. Migration no longer writes any flag file;
+      // identity / post-migration state is conveyed by strict binding
+      // (.abrain-project.json + abrainHome/projects/<id>/_project.json).
+      assert(!fs.existsSync(path.join(cParent, ".pensieve", "MIGRATED_TO_ABRAIN")), `MIGRATED_TO_ABRAIN guard must not exist (removed in 2026-05-13 cutover)`);
       const summary = formatMigrationGoSummary(result, cParent);
       assert(/partially completed/.test(summary), `partial summary should not say complete-only: ${summary}`);
-      assert(/guard was not written/.test(summary), `partial summary should explain guard omission: ${summary}`);
+      assert(/partial migration/.test(summary), `partial summary should explain failed entries remain for retry: ${summary}`);
       // Pre-existing entry is untouched (no overwrite of existing data).
       const existingText = fs.readFileSync(path.join(cAbrain, "projects", "collide-test", "maxims", "shared-rule.md"), "utf-8");
       assert(/Shared Rule \(existing\)/.test(existingText), `pre-existing entry must not be overwritten by collision case`);
@@ -2496,9 +2602,15 @@ Body.
 
       const lockSettings = { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false, lockTimeoutMs: 1000 };
 
-      // --- Case g.1: stale sediment.lock (project side) gets reclaimed ---
+      // --- Case g.1: stale sediment.lock (abrain side) gets reclaimed ---
+      // Post-2026-05-13 cutover: sediment.lock moved from
+      // <projectRoot>/.pi-astack/sediment/locks/ to
+      // <abrainHome>/.state/sediment/locks/ so concurrent writes from
+      // multiple projects sharing one abrain home serialize against the
+      // SAME lock (the abrain git index head is the shared resource).
       {
-        const sedimentLockPath = path.join(gParent, ".pi-astack", "sediment", "locks", "sediment.lock");
+        const g1Target = setupAbrainTarget("stale-lock-reclaim");
+        const sedimentLockPath = path.join(g1Target.abrainHome, ".state", "sediment", "locks", "sediment.lock");
         fs.mkdirSync(path.dirname(sedimentLockPath), { recursive: true });
         fs.writeFileSync(sedimentLockPath, JSON.stringify({ pid: 999999, created_at: "2026-05-12T00:00:00.000+08:00" }));
         // Set mtime to 60s ago (well past the 30s SEDIMENT_LOCK_STEAL_AFTER_MS).
@@ -2507,7 +2619,7 @@ Body.
 
         const w = await writeProjectEntry(
           { title: "Stale Lock Reclaim Test", kind: "maxim", confidence: 5, compiledTruth: "This validates that a crashed-holder sediment.lock is reclaimed after the steal-after threshold." },
-          { projectRoot: gParent, settings: lockSettings, dryRun: false },
+          { projectRoot: gParent, abrainHome: g1Target.abrainHome, projectId: g1Target.projectId, settings: lockSettings, dryRun: false },
         );
         assert(w.status === "created" || w.status === "updated", `stale sediment.lock should be reclaimed, got status=${w.status} reason=${w.reason}`);
       }
@@ -2523,8 +2635,9 @@ Body.
         execFileSync("git", ["-C", gParent2, "config", "user.name", "pi-astack smoke"]);
         execFileSync("git", ["-C", gParent2, "config", "commit.gpgsign", "false"]);
         execFileSync("git", ["-C", gParent2, "commit", "-q", "--allow-empty", "-m", "init"]);
+        const g2Target = setupAbrainTarget("fresh-lock-block");
 
-        const sedimentLockPath = path.join(gParent2, ".pi-astack", "sediment", "locks", "sediment.lock");
+        const sedimentLockPath = path.join(g2Target.abrainHome, ".state", "sediment", "locks", "sediment.lock");
         fs.mkdirSync(path.dirname(sedimentLockPath), { recursive: true });
         fs.writeFileSync(sedimentLockPath, JSON.stringify({ pid: process.pid, created_at: "2026-05-12T10:00:00.000+08:00" }));
         // Leave mtime fresh (just now). acquireLock should refuse to steal
@@ -2533,7 +2646,7 @@ Body.
 
         const r = await writeProjectEntry(
           { title: "Fresh Lock Block Test", kind: "maxim", confidence: 5, compiledTruth: "This validates that a fresh sediment.lock is NOT stolen and write reports a lock timeout in result.reason." },
-          { projectRoot: gParent2, settings: lockSettings, dryRun: false },
+          { projectRoot: gParent2, abrainHome: g2Target.abrainHome, projectId: g2Target.projectId, settings: lockSettings, dryRun: false },
         );
         assert(r.status === "rejected", `fresh sediment.lock must NOT be reclaimed; expected rejected, got status=${r.status}`);
         assert(/sediment lock timeout/i.test(r.reason || ""), `expected sediment lock timeout in reason, got: ${r.reason}`);
@@ -3178,22 +3291,26 @@ Body.
         fs.rmSync(abrain, { recursive: true, force: true });
       }
 
-      // --- Case h.4: post-migration guard blocks sediment writes ---
+      // --- Case h.4: post-migration writes land in abrain, NOT .pensieve ---
       //
-      // Round 7 P0-D (opus audit fix): after `/memory migrate --go` succeeds,
-      // writeProjectEntry / updateProjectEntry / deleteProjectEntry must
-      // refuse to write into `.pensieve/` until B5 cutover ships. Verify:
-      //   (1) migrate-go writes `.pensieve/MIGRATED_TO_ABRAIN` flag with
-      //       { migratedAt, projectId } JSON
-      //   (2) flag is captured in the parent migration commit (so rollback
-      //       via `git reset --hard parentPreSha` removes it atomically)
-      //   (3) writeProjectEntry on a flagged repo returns
-      //       status="rejected", reason="post_migration_pensieve_writes_disabled",
-      //       writes an audit row with the same reason + post_migration_guard
-      //       field, and does NOT create the entry file
+      // History: Round 7 P0-D introduced a `.pensieve/MIGRATED_TO_ABRAIN`
+      // guard file so the (then-still-.pensieve-writing) sediment writer
+      // would refuse to write to an already-migrated repo. The 2026-05-13
+      // sediment cutover removed the guard entirely — sediment writer
+      // unconditionally writes into `<abrainHome>/projects/<projectId>/`
+      // and the legacy `.pensieve/` is read-only on the migration source
+      // side. The guard became dead code (no remaining reader).
+      //
+      // The replacement contract (this case): after a successful migrate-go,
+      //   (1) writeProjectEntry succeeds and writes into the abrain projects
+      //       dir, NOT into the post-migrate `.pensieve/`
+      //   (2) no `.pensieve/MIGRATED_TO_ABRAIN` flag file exists
+      //   (3) the project-side `.pensieve/` tree is untouched by the new
+      //       write (legacy entries that survived migration are not
+      //       resurrected, deleted entries stay deleted)
       {
-        const gParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-guard-parent-"));
-        const gAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-guard-abrain-"));
+        const gParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-postmigrate-parent-"));
+        const gAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-postmigrate-abrain-"));
         for (const r of [gParent, gAbrain]) {
           execFileSync("git", ["-C", r, "init", "-q"]);
           execFileSync("git", ["-C", r, "config", "user.email", "smoke@pi-astack.local"]);
@@ -3201,65 +3318,49 @@ Body.
           execFileSync("git", ["-C", r, "config", "commit.gpgsign", "false"]);
           execFileSync("git", ["-C", r, "commit", "-q", "--allow-empty", "-m", "init"]);
         }
-        // Seed a real user entry so preflight passes.
         const pensieve = path.join(gParent, ".pensieve");
         fs.mkdirSync(path.join(pensieve, "maxims"), { recursive: true });
         fs.writeFileSync(path.join(pensieve, "maxims", "x.md"), makeEntry({ title: "X", kind: "maxim" }));
         execFileSync("git", ["-C", gParent, "add", "."]);
         execFileSync("git", ["-C", gParent, "commit", "-q", "-m", "seed"]);
-        await bindMigrationProject(gParent, gAbrain, "guard-proj");
+        await bindMigrationProject(gParent, gAbrain, "postmigrate-proj");
         const goRes = await runMigrationGo({
           pensieveTarget: pensieve,
           abrainHome: gAbrain,
-          projectId: "guard-proj",
+          projectId: "postmigrate-proj",
           cwd: gParent,
           settings: DEFAULT_SETTINGS,
           migrationTimestamp: "2026-05-12T12:00:00.000+08:00",
         });
-        assert(goRes.ok === true, `guard setup migrate-go must succeed: ${JSON.stringify(goRes.preconditionFailures)}`);
+        assert(goRes.ok === true, `postmigrate setup migrate-go must succeed: ${JSON.stringify(goRes.preconditionFailures)}`);
 
-        // (1) Flag file exists with expected JSON shape
+        // (2) No flag file should be written after the 2026-05-13 cutover.
         const flagPath = path.join(gParent, ".pensieve", "MIGRATED_TO_ABRAIN");
-        assert(fs.existsSync(flagPath), `post-migration flag must exist at ${flagPath}`);
-        const flag = JSON.parse(fs.readFileSync(flagPath, "utf-8"));
-        assert(flag.projectId === "guard-proj", `flag.projectId mismatch: ${flag.projectId}`);
-        assert(flag.migratedAt === "2026-05-12T12:00:00.000+08:00", `flag.migratedAt mismatch: ${flag.migratedAt}`);
+        assert(!fs.existsSync(flagPath), `post-2026-05-13 cutover: MIGRATED_TO_ABRAIN must NOT be written, found at ${flagPath}`);
 
-        // (2) Flag is git-tracked in the parent commit (so rollback wipes it)
-        const trackedLs = execFileSync("git", ["-C", gParent, "ls-files", ".pensieve/MIGRATED_TO_ABRAIN"], { encoding: "utf-8" }).trim();
-        assert(trackedLs === ".pensieve/MIGRATED_TO_ABRAIN", `flag must be git-tracked, got ls-files: '${trackedLs}'`);
-
-        // (3) writeProjectEntry on flagged repo rejects with structured reason
-        const guardRes = await writeProjectEntry(
+        // (1) writeProjectEntry succeeds on a migrated repo and lands in abrain.
+        const postRes = await writeProjectEntry(
           {
-            title: "Post-migration probe",
-            kind: "maxim",
+            title: "Post-migration write",
+            kind: "fact",
             status: "provisional",
             confidence: 5,
-            compiledTruth: "# Post-migration probe\n\nshould be rejected.",
-            timelineNote: "smoke-guard",
-            sessionId: "smoke-guard",
+            compiledTruth: "# Post-migration write\n\nsediment writes after migration land in abrain, not in the legacy .pensieve/.",
+            timelineNote: "smoke-postmigrate",
+            sessionId: "smoke-postmigrate",
           },
-          { projectRoot: gParent, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+          { projectRoot: gParent, abrainHome: gAbrain, projectId: "postmigrate-proj", settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, auditContext: { lane: "explicit" } },
         );
-        assert(guardRes.status === "rejected", `writeProjectEntry on flagged repo must be rejected, got: ${guardRes.status}`);
+        assert(postRes.status === "created", `post-migration writeProjectEntry must create (cutover), got status=${postRes.status} reason=${postRes.reason}`);
+        // Entry file lives in abrain projects dir.
         assert(
-          guardRes.reason === "post_migration_pensieve_writes_disabled",
-          `rejection reason mismatch: ${guardRes.reason}`,
+          postRes.path.startsWith(path.join(gAbrain, "projects", "postmigrate-proj") + path.sep),
+          `post-migration write must land in abrain projects dir, got: ${postRes.path}`,
         );
-        // Entry file must NOT exist (writer did not even reach buildMarkdown).
+        // (3) The legacy .pensieve/ side must NOT have a fresh entry file.
         assert(
-          !fs.existsSync(path.join(gParent, ".pensieve", "maxims", "post-migration-probe.md")),
-          `flagged write must not create entry file on disk`,
-        );
-        // Audit row was written with the same reason + post_migration_guard payload.
-        const auditRows = fs.readFileSync(path.join(gParent, ".pi-astack", "sediment", "audit.jsonl"), "utf-8")
-          .trim().split("\n").map(JSON.parse);
-        const guardAudit = auditRows.find((r) => r.operation === "reject" && r.reason === "post_migration_pensieve_writes_disabled");
-        assert(guardAudit, `expected reject audit row with reason=post_migration_pensieve_writes_disabled; got ${auditRows.length} rows`);
-        assert(
-          guardAudit.post_migration_guard?.projectId === "guard-proj",
-          `guard audit row should embed flag info, got post_migration_guard=${JSON.stringify(guardAudit.post_migration_guard)}`,
+          !fs.existsSync(path.join(gParent, ".pensieve", "facts", "post-migration-write.md")),
+          `post-migration write must not also resurrect a copy under .pensieve/`,
         );
 
         fs.rmSync(gParent, { recursive: true, force: true });
@@ -3320,10 +3421,11 @@ Body.
       // the entry.
       {
         const raceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-rmw-race-"));
+        const raceTarget = setupAbrainTarget("rmw-race");
         // Seed an entry.
         const seedRes = await writeProjectEntry(
           { title: "RMW Race Probe", kind: "fact", status: "active", confidence: 5, compiledTruth: "# RMW Race Probe\n\noriginal body content for race test.", timelineNote: "smoke seed", sessionId: "smoke-rmw" },
-          { projectRoot: raceRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+          { projectRoot: raceRoot, abrainHome: raceTarget.abrainHome, projectId: raceTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
         );
         assert(seedRes.status === "created", `seed write should create, got: ${seedRes.status} / ${seedRes.reason}`);
         const targetPath = seedRes.path;
@@ -3337,11 +3439,11 @@ Body.
         const updatePromise = updateProjectEntry(
           "rmw-race-probe",
           { compiledTruth: "# RMW Race Probe\n\nNEW BODY — should not resurrect a deleted entry.", sessionId: "smoke-rmw", timelineNote: "smoke update" },
-          { projectRoot: raceRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+          { projectRoot: raceRoot, abrainHome: raceTarget.abrainHome, projectId: raceTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
         );
         const deletePromise = deleteProjectEntry(
           "rmw-race-probe",
-          { projectRoot: raceRoot, settings: DEFAULT_SEDIMENT_SETTINGS, mode: "hard", reason: "smoke race", sessionId: "smoke-rmw", auditContext: { lane: "explicit" } },
+          { projectRoot: raceRoot, abrainHome: raceTarget.abrainHome, projectId: raceTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, mode: "hard", reason: "smoke race", sessionId: "smoke-rmw", auditContext: { lane: "explicit" } },
         );
         const [updRes, delRes] = await Promise.all([updatePromise, deletePromise]);
 
@@ -3508,9 +3610,10 @@ Body.
       // Now must throw an Error mentioning the protected key.
       {
         const denyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-fmpatch-deny-"));
+        const denyTarget = setupAbrainTarget("fmpatch-deny");
         const seed = await writeProjectEntry(
           { title: "Patch Denylist Probe", kind: "fact", status: "active", confidence: 5, compiledTruth: "# Patch Denylist Probe\n\nsome body content here.", timelineNote: "seed", sessionId: "smoke-deny" },
-          { projectRoot: denyRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+          { projectRoot: denyRoot, abrainHome: denyTarget.abrainHome, projectId: denyTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
         );
         assert(seed.status === "created", `seed write should create: ${seed.status}`);
 
@@ -3521,7 +3624,7 @@ Body.
         const denyKind = await updateProjectEntry(
           "patch-denylist-probe",
           { compiledTruth: "# Patch Denylist Probe\n\nupdated body content here.", sessionId: "smoke-deny", frontmatterPatch: { kind: "workflow" } },
-          { projectRoot: denyRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+          { projectRoot: denyRoot, abrainHome: denyTarget.abrainHome, projectId: denyTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
         );
         assert(denyKind.status === "rejected", `frontmatterPatch protected key 'kind' must be rejected, got: ${denyKind.status}`);
         assert(
@@ -3533,7 +3636,7 @@ Body.
         const denyBadKey = await updateProjectEntry(
           "patch-denylist-probe",
           { compiledTruth: "# Patch Denylist Probe\n\nupdated body content here.", sessionId: "smoke-deny", frontmatterPatch: { "good\ninjected": "x" } },
-          { projectRoot: denyRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+          { projectRoot: denyRoot, abrainHome: denyTarget.abrainHome, projectId: denyTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
         );
         assert(denyBadKey.status === "rejected", `frontmatterPatch bad key shape must be rejected, got: ${denyBadKey.status}`);
         assert(
@@ -3545,7 +3648,7 @@ Body.
         const okPatch = await updateProjectEntry(
           "patch-denylist-probe",
           { compiledTruth: "# Patch Denylist Probe\n\nupdated body content here.", sessionId: "smoke-deny", frontmatterPatch: { tags: ["r8-smoke"] } },
-          { projectRoot: denyRoot, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+          { projectRoot: denyRoot, abrainHome: denyTarget.abrainHome, projectId: denyTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
         );
         assert(okPatch.status === "updated", `non-protected frontmatterPatch should succeed: ${okPatch.status} / ${okPatch.reason}`);
         const onDisk = fs.readFileSync(okPatch.path, "utf-8");

@@ -153,9 +153,14 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
   throw new Error(`unsupported curator op: ${op || "<missing>"}`);
 }
 
-function projectEntriesOnly(entries: MemoryEntry[], projectRoot: string): MemoryEntry[] {
-  const pensieveRoot = path.join(path.resolve(projectRoot), ".pensieve") + path.sep;
-  return entries.filter((entry) => entry.scope === "project" && path.resolve(entry.sourcePath).startsWith(pensieveRoot));
+function projectEntriesOnly(entries: MemoryEntry[]): MemoryEntry[] {
+  // Post-2026-05-13 sediment cutover: project-scoped entries live in
+  // `<abrainHome>/projects/<projectId>/`, not in `<projectRoot>/.pensieve/`.
+  // The pre-cutover filter required sourcePath to be under .pensieve/; we
+  // now keep ANY project-scoped entry that the memory store returned.
+  // resolveStores() already constrains the project store list to the
+  // bound project (no cross-project leakage).
+  return entries.filter((entry) => entry.scope === "project");
 }
 
 function entryForPrompt(entry: MemoryEntry): string {
@@ -288,7 +293,7 @@ export async function curateProjectDraft(
   let entries: MemoryEntry[];
   let cards: any[];
   try {
-    entries = projectEntriesOnly(await loadEntries(deps.projectRoot, deps.memorySettings, deps.signal), deps.projectRoot);
+    entries = projectEntriesOnly(await loadEntries(deps.projectRoot, deps.memorySettings, deps.signal));
     cards = await llmSearchEntries(
       entries,
       { query: makeSearchPrompt(draft), filters: { limit: 5, status: ["all"] } },

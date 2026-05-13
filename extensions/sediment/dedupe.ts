@@ -35,16 +35,23 @@ export interface DetectDuplicateOpts {
  * The writer still needs a deterministic storage guard for exact slug
  * collisions, because two markdown files cannot occupy the same path.
  */
+/**
+ * Detect duplicate by scanning the abrain project's entry dir.
+ *
+ * Pre-2026-05-13 this scanned `<projectRoot>/.pensieve/`; per the
+ * sediment cutover the canonical write substrate is
+ * `<abrainHome>/projects/<projectId>/`, so dedupe must look there.
+ * `projectRoot` is kept only for diagnostic labelling (audit / display).
+ */
 export async function detectProjectDuplicate(
-  projectRoot: string,
+  scanRoot: string,
   title: string,
   opts?: DetectDuplicateOpts,
 ): Promise<DedupeResult> {
-  const pensieveRoot = path.join(projectRoot, ".pensieve");
   const slug = opts?.slug ?? slugify(title);
   const entries = await scanStore(
-    { scope: "project", root: pensieveRoot, label: "project" },
-    projectRoot,
+    { scope: "project", root: scanRoot, label: "project" },
+    scanRoot,
     DEFAULT_SETTINGS,
     opts?.signal,
   );
