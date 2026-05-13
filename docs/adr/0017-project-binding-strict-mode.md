@@ -1,6 +1,6 @@
 # ADR 0017 — Project Binding Strict Mode（项目身份绑定严格模式）
 
-- **状态**：Accepted（2026-05-12），**B4.5 已实施**（runtime strict resolver + `/abrain bind/status` + `/memory migrate` strict + sediment/vault guards）。**B5 sediment writer cutover 2026-05-13 已实施**（writer 全切 abrain，删 `MIGRATED_TO_ABRAIN` guard 与所有 `.pensieve/` 写路径）。
+- **状态**：Accepted（2026-05-12），**B4.5 已实施**（runtime strict resolver + `/abrain bind/status` + `/memory migrate` strict + sediment/vault guards）。**B5 sediment writer cutover 2026-05-13 已实施**（writer 全切 abrain，删 `MIGRATED_TO_ABRAIN` guard 与所有 `.pensieve/` 写路径）。**B5 后 curator P0 data-loss 三层防御已实施**（详 [ADR 0018](0018-sediment-curator-defense-layers.md)）。
 - **取代**：ADR 0014 / brain-redesign-spec 中早期 `~/.abrain/projects/_bindings.md` + git remote / cwd prefix 推断方案。
 - **依赖**：[ADR 0014](0014-abrain-as-personal-brain.md)、[migration/abrain-pensieve-migration.md](../migration/abrain-pensieve-migration.md)、[migration/vault-bootstrap.md](../migration/vault-bootstrap.md)
 - **触发**：`~/.config/opencode` 首仓 dry-run 时用户手动传 `--project=opencode-gloabl`（typo）仍被 planner 接受，证明 migration 命令不应同时承担“决定项目身份”的职责。
