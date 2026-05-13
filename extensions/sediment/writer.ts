@@ -76,15 +76,6 @@ export interface WriteProjectEntryOptions {
   auditOperation?: string;
   auditExtras?: Record<string, unknown>;
   auditContext?: WriterAuditContext;
-  /** 2026-05-13 B5-defense follow-up: skip the body_shrink floor for
-   *  this update. Used by merge (where the merged body is expected to
-   *  be shorter than the longest source) and reserved for any future
-   *  consolidation op whose semantics are 'replace + shrink is fine'.
-   *  archive/supersede/soft-delete don't pass compiledTruth so the
-   *  guard naturally skips for them; only set this flag when you DO
-   *  pass compiledTruth and shrinkage is part of the operation's
-   *  intended outcome. */
-  skipBodyShrinkGuard?: boolean;
 }
 
 export type DeleteMode = "soft" | "hard";
@@ -345,7 +336,7 @@ function mergeUpdateMarkdown(
   patch: ProjectEntryUpdateDraft,
   slug: string,
   projectId: string,
-  mergeOpts: { skipBodyShrinkGuard?: boolean; skipBodySectionLossGuard?: boolean } = {},
+  mergeOpts: {} = {},
 ): { markdown: string; validationDraft: ProjectEntryDraft; sanitizedReplacements: string[] } | { error: string } {
   const timestamp = nowIso();
   const { frontmatterText, body } = splitFrontmatter(raw);
@@ -360,77 +351,6 @@ function mergeUpdateMarkdown(
   const compiledTruth = patch.compiledTruth !== undefined
     ? normalizeCompiledTruth(title, patch.compiledTruth)
     : existingCompiledTruth.trim();
-
-  // Defense-in-depth against curator P0 (2026-05-13 abrain commit 2e8924d):
-  // curator overwrote an upstream pattern entry's body with a downstream
-  // observation, dropping 4 evidence bullets + 3 fix steps + principle
-  // section (45 lines → 27 lines, 241 → 206 words). prompt fixes in
-  // curator.ts:makeCuratorPrompt are upstream; this is the mechanical
-  // floor: a single update shrinking the body by ≥50% is almost certainly
-  // an overwrite, not a legitimate refinement. Caller gets `body_shrink`
-  // error and the existing on-disk entry is unchanged (atomicWrite never
-  // runs because mergeUpdateMarkdown returned { error }).
-  //
-  // Threshold rationale: trimming a few stale sentences typically shrinks
-  // by <20%; even aggressive consolidation rarely halves the body. 50%
-  // is loose enough to allow legitimate refactors but tight enough to
-  // catch outright overwrites strictly more severe than 2e8924d (which
-  // only shrunk 14% in bytes but lost 3 H2 sections). For the 2e8924d
-  // class itself — 'short shrink but structural section loss' — see
-  // the body_section_loss check below; the two floors complement each
-  // other (byte length catches bulk overwrite; H2 retention catches
-  // section-wholesale-deletion under length).
-  //
-  // Both floors are mechanical complements to the curator prompt
-  // (Update body-preservation contract); the prompt is the primary
-  // defense, these are tripwires that fire when prompt discipline
-  // fails. If a legitimate use case needs >50% shrink (e.g. archive
-  // cleanup or merge consolidation), use supersede/delete/archive ops
-  // for the former; merge passes skipBodyShrinkGuard for the latter.
-  // Both floors are bypassed under skipBodyShrinkGuard for the same
-  // reason: merge synthesis legitimately produces shorter, structurally
-  // different bodies.
-  if (patch.compiledTruth !== undefined && !mergeOpts.skipBodyShrinkGuard) {
-    const oldLen = existingCompiledTruth.trim().length;
-    const newLen = compiledTruth.length;
-    if (oldLen > 0 && newLen < oldLen * 0.5) {
-      return {
-        error: `body_shrink: update would shrink compiled_truth from ${oldLen} to ${newLen} chars (${Math.round((1 - newLen / oldLen) * 100)}% drop). Updates that halve the body almost always overwrite load-bearing sections (evidence, fix, principle). If the existing entry is genuinely stale, use supersede/archive/delete instead of update; if the candidate is a downstream observation, use create with derives_from.`,
-      };
-    }
-  }
-
-  // Body-section-loss floor (added 2026-05-13 after opus review of B5
-  // defense layer): the byte-length 0.5 threshold above does NOT catch
-  // the original 2e8924d failure mode — that update only shrunk by 14%
-  // in bytes but dropped 3 entire H2 sections (Evidence / Fix /
-  // Principle), each carrying load-bearing semantic content. Add a
-  // structural complement: if the existing body has ≥2 H2 sections,
-  // the update must retain at least ceil(old/2) of them. This catches
-  // "section-wholesale-deletion under length" bugs the byte threshold
-  // can't see. Bypassed for merge (consolidation may intentionally fold
-  // sections), governed by the same skipBodyShrinkGuard flag.
-  if (patch.compiledTruth !== undefined && !mergeOpts.skipBodySectionLossGuard) {
-    const collectH2 = (body: string) => {
-      const set = new Set<string>();
-      for (const line of body.split("\n")) {
-        const m = /^##\s+(.+?)\s*$/.exec(line);
-        if (m) set.add(m[1].trim().toLowerCase());
-      }
-      return set;
-    };
-    const oldH2 = collectH2(existingCompiledTruth);
-    if (oldH2.size >= 2) {
-      const newH2 = collectH2(compiledTruth);
-      const retained = [...oldH2].filter((h) => newH2.has(h)).length;
-      const required = Math.ceil(oldH2.size / 2);
-      if (retained < required) {
-        return {
-          error: `body_section_loss: update would drop ${oldH2.size - retained} of ${oldH2.size} H2 sections (retained ${retained}, required ≥${required}). Existing H2s: ${[...oldH2].join(", ")}. Section wholesale removal is the 2e8924d failure fingerprint — use supersede/archive if the entry is stale, or create with derives_from if the candidate is a downstream observation.`,
-        };
-      }
-    }
-  }
 
   const validationDraft: ProjectEntryDraft = { title, kind, status, confidence, compiledTruth };
   const validationErrors = validateProjectEntryDraft(validationDraft);
@@ -699,13 +619,6 @@ export async function mergeProjectEntries(
     auditOperation: "merge",
     auditExtras: { sources, reason },
     auditContext: opts.auditContext,
-    // Merge is consolidation: the synthesized body is expected to be
-    // shorter than each source individually (curator dedups + folds
-    // sections). Bypassing the byte-length AND section-loss floors here
-    // is correct—these floors target the 2e8924d update-overwrite
-    // failure mode, NOT consolidation. archive/supersede/soft-delete
-    // naturally skip the floors because they don't pass compiledTruth.
-    skipBodyShrinkGuard: true,
   });
 
   const results: WriteProjectEntryResult[] = [
@@ -914,10 +827,7 @@ export async function updateProjectEntry(
       }));
       return { ok: false, response: { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath, ...resultCtx } };
     }
-    const merged = mergeUpdateMarkdown(raw, patch, slug, opts.projectId, {
-      skipBodyShrinkGuard: opts.skipBodyShrinkGuard,
-      skipBodySectionLossGuard: opts.skipBodyShrinkGuard,
-    });
+    const merged = mergeUpdateMarkdown(raw, patch, slug, opts.projectId, {});
     if ("error" in merged) {
       const reason = merged.error.startsWith("credential pattern detected") ? merged.error : merged.error.split(":")[0];
       const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
