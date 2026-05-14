@@ -195,9 +195,9 @@ export function writeBackendFile(abrainHome: string, info: BackendFile): void {
   fs.writeFileSync(tmp, lines.join("\n"), { mode: 0o600 });
   try {
     fs.renameSync(tmp, final);
-  } catch {
+  } catch (e: unknown) {
     try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
-    throw;
+    throw e;
   }
 }
 
@@ -233,9 +233,9 @@ export function writePubkeyFile(abrainHome: string, publicKey: string): void {
   fs.writeFileSync(tmp, publicKey + "\n", { mode: 0o644 });
   try {
     fs.renameSync(tmp, final);
-  } catch {
+  } catch (e: unknown) {
     try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
-    throw;
+    throw e;
   }
 }
 
