@@ -1,9 +1,15 @@
 /**
  * memory extension for pi-astack — read-only markdown memory Facade.
  *
- * Phase 1 implementation (2026-05-08): project-level `.pensieve/` read tools
- * plus optional read-only `~/.abrain/` world store when present. Markdown + git
- * remain the source of truth; this extension never writes memory files.
+ * Full implementation (2026-05-14): dual-stage LLM retrieval (ADR 0015),
+ * project-level `.pensieve/` + world `~/.abrain/` read tools, strict binding
+ * enforcement (ADR 0017), and `/memory migrate --go` one-shot migration.
+ * Markdown + git remain the source of truth.
+ *
+ * LLM-facing tools (memory_search/get/list/neighbors) are strictly read-only.
+ * `/memory rebuild --graph|--index` slash commands write derived indexes;
+ * `/memory migrate --go` performs one-shot B4 migration. Neither path writes
+ * canonical knowledge entries — that is sediment's exclusive role.
  */
 
 import * as path from "node:path";

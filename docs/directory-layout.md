@@ -51,6 +51,7 @@ alfadb/pi-astack/
 │   │   ├── 0015-memory-search-llm-driven-retrieval.md    # ✅ memory_search 双阶段 LLM rerank (2026-05-10, Accepted; Phase 0/1 implemented)
 │   │   ├── 0016-sediment-as-llm-curator.md               # ✅ sediment 从 gate-heavy extractor 转向 LLM curator (2026-05-10)
 │   │   └── 0017-project-binding-strict-mode.md           # ✅ B4.5 已实施：.abrain-project.json + registry + local-map strict binding
+│   │   └── 0018-sediment-curator-defense-layers.md       # ✅ curator 防线：三层 prompt+writer+input 门控（body_shrink 部分已 revert）
 │   ├── brain-redesign-spec.md         # ✅ ADR 0014/0017 详细规范 — abrain 七区拓扑/vault 双层/Lane G/V + strict project binding
 │   └── migration/
 │       ├── steps.md                   # 基于 memory-architecture.md Phase 1-6（Phase 2 起部分被 ADR 0014 重新规划）

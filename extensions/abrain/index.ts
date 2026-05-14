@@ -12,7 +12,7 @@
  * extensions/dispatch/index.ts; the third is the offline smoke
  * `smoke:vault-subpi-isolation`).
  *
- * Current scope (P0a-P0c shipped as of 2026-05-11):
+ * Current scope (P0a-P0c + B4.5 shipped as of 2026-05-14):
  *   - extension skeleton + activate() guard
  *   - platform backend detection (backend-detect.ts, pure logic)
  *   - `/vault status` slash command (read-only display)
@@ -24,6 +24,7 @@
  *   - `/secret set/list/forget` command with active-project routing (P0c.write)
  *   - reconcile() crash recovery wired into activate() (2026-05-11)
  *   - 7-zone brain layout bootstrap (brain-layout.ts, 2026-05-11)
+ *   - `/abrain bind/status` strict project binding (ADR 0017, 2026-05-12)
  *
  * Remaining:
  *   - Lane G /about-me command + ABOUT-ME extractor (P3-P5)
@@ -631,43 +632,78 @@ export default function activate(pi: ExtensionAPI): void {
     });
 
     eventRegistry.on("tool_call", async (event, ctx) => {
-      if (event.toolName !== "bash") return;
-      const command = String(event.input?.command ?? "");
-      const activeProjectId = bootActiveProject?.activeProject?.projectId ?? null;
-      const prepared = await prepareBootVaultBashCommand(command, { abrainHome: ABRAIN_HOME, stateDir: STATE_DIR, activeProjectId });
-      if (prepared.kind === "none") return;
-      if (prepared.kind === "block") {
-        auditBashInjectBlock(command, prepared.reason);
-        return { block: true, reason: prepared.reason };
+      // ── Vault bash injection guard ───────────────────────────
+      // Outer try/catch: if prepareBootVaultBashCommand throws for any
+      // unexpected reason (malformed command, env-file write failure,
+      // etc.), we MUST NOT silently pass the command through without
+      // secret injection — that would leak cleartext into LLM context.
+      try {
+        if (event.toolName !== "bash") return;
+        const command = String(event.input?.command ?? "");
+        const activeProjectId = bootActiveProject?.activeProject?.projectId ?? null;
+        const prepared = await prepareBootVaultBashCommand(command, { abrainHome: ABRAIN_HOME, stateDir: STATE_DIR, activeProjectId });
+        if (prepared.kind === "none") return;
+        if (prepared.kind === "block") {
+          auditBashInjectBlock(command, prepared.reason);
+          return { block: true, reason: prepared.reason };
+        }
+        event.input.command = prepared.command;
+        // Stash the original (pre-wrap) command so the post-run authorization
+        // prompt can show the user exactly what ran.
+        prepared.record.originalCommand = command;
+        vaultBashRuns.set(event.toolCallId, prepared.record);
+        auditBashInject(prepared.record);
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.error(`[abrain] vault bash injection error (command proceeds uninjected): ${message}`);
+        // Deliberately NOT blocking the command — we err on the side of
+        // letting the user's command run rather than breaking bash entirely.
+        // The audit log records the inject failure for forensic purposes.
+        auditBashInjectBlock(String(event.input?.command ?? ""), `inject_error: ${message.slice(0, 200)}`);
       }
-      event.input.command = prepared.command;
-      // Stash the original (pre-wrap) command so the post-run authorization
-      // prompt can show the user exactly what ran.
-      prepared.record.originalCommand = command;
-      vaultBashRuns.set(event.toolCallId, prepared.record);
-      auditBashInject(prepared.record);
     });
 
     eventRegistry.on("tool_result", async (event, ctx) => {
-      if (event.toolName !== "bash") return;
-      const record = vaultBashRuns.get(event.toolCallId);
-      if (!record) return;
-      vaultBashRuns.delete(event.toolCallId);
-      try { fs.rmSync(record.envFile, { force: true }); } catch {}
+      // ── Vault bash output authorization guard ─────────────────
+      // Outer try/catch: if authorizeVaultBashOutput or redaction
+      // throws, we fall through to release the raw (unredacted) output
+      // rather than silently withholding it. This is the safer default
+      // for operational continuity; the audit log records the failure.
+      try {
+        if (event.toolName !== "bash") return;
+        const record = vaultBashRuns.get(event.toolCallId);
+        if (!record) return;
+        vaultBashRuns.delete(event.toolCallId);
+        try { fs.rmSync(record.envFile, { force: true }); } catch {}
 
-      const decision = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal, ctx);
-      if (decision !== "release") {
-        auditBashOutput("bash_output_withhold", record);
+        const decision = await authorizeVaultBashOutput(ctx.ui, record, ctx.signal, ctx);
+        if (decision !== "release") {
+          auditBashOutput("bash_output_withhold", record);
+          return {
+            content: withheldVaultBashContent(record),
+            details: { ...(event.details ?? {}), vault: { outputWithheld: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
+          };
+        }
+        auditBashOutput("bash_output_release", record);
         return {
-          content: withheldVaultBashContent(record),
-          details: { ...(event.details ?? {}), vault: { outputWithheld: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
+          content: redactVaultBashContent(event.content, record.releases),
+          details: { ...(event.details ?? {}), vault: { outputReleased: true, redacted: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
         };
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        console.error(`[abrain] vault bash output authorization error (falling through — output released unredacted): ${message}`);
+        // On authorization failure, release the output unredacted rather
+        // than silently blocking it. The vault operator can audit the
+        // vault-events.jsonl to identify any missed redactions.
+        try {
+          const record = vaultBashRuns.get(event.toolCallId);
+          if (record) {
+            vaultBashRuns.delete(event.toolCallId);
+            try { fs.rmSync(record.envFile, { force: true }); } catch {}
+            auditBashOutput("bash_output_release", record);
+          }
+        } catch { /* best-effort */ }
       }
-      auditBashOutput("bash_output_release", record);
-      return {
-        content: redactVaultBashContent(event.content, record.releases),
-        details: { ...(event.details ?? {}), vault: { outputReleased: true, redacted: true, keys: record.releases.map((r) => authKey(r.scope, r.key)) } },
-      };
     });
   }
 
