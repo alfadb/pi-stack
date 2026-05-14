@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import type { SedimentSettings } from "./settings";
 import { detectProjectDuplicate, type DedupeResult } from "./dedupe";
 import { sanitizeForMemory } from "./sanitizer";
-import { type EntryKind, type EntryStatus, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
+import { type EntryKind, type EntryStatus, ENTRY_KINDS, ENTRY_STATUSES, validateProjectEntryDraft } from "./validation";
 import { lintMarkdown } from "../memory/lint";
 import { parseFrontmatter, splitCompiledTruth, splitFrontmatter } from "../memory/parser";
 import type { Jsonish } from "../memory/types";
@@ -365,8 +365,10 @@ function mergeUpdateMarkdown(
   const { compiledTruth: existingCompiledTruth, timeline } = splitCompiledTruth(body);
 
   const title = patch.title ?? (typeof frontmatter.title === "string" ? frontmatter.title : slug);
-  const kind = patch.kind ?? (typeof frontmatter.kind === "string" ? frontmatter.kind as EntryKind : "fact");
-  const status = patch.status ?? (typeof frontmatter.status === "string" ? frontmatter.status as EntryStatus : "provisional");
+  const kindRaw = typeof frontmatter.kind === "string" ? frontmatter.kind : null;
+  const kind = (patch.kind ?? ((kindRaw && (ENTRY_KINDS as readonly string[]).includes(kindRaw)) ? kindRaw as EntryKind : undefined)) ?? "fact";
+  const statusRaw = typeof frontmatter.status === "string" ? frontmatter.status : null;
+  const status = (patch.status ?? ((statusRaw && (ENTRY_STATUSES as readonly string[]).includes(statusRaw)) ? statusRaw as EntryStatus : undefined)) ?? "provisional";
   const confidenceRaw = patch.confidence ?? (typeof frontmatter.confidence === "number" ? frontmatter.confidence : Number(frontmatter.confidence ?? 3));
   const confidence = Math.min(10, Math.max(0, Math.round(Number.isFinite(confidenceRaw) ? confidenceRaw : 3)));
   const compiledTruth = patch.compiledTruth !== undefined
@@ -827,7 +829,7 @@ export async function updateProjectEntry(
   const resultCtx = resultAuditFields(opts, patch.sessionId);
   const doAudit = (event: Record<string, unknown>) =>
     scope === "world"
-      ? appendAbrainAudit(abrainHome, (event.lane as string) ?? "auto_write", event)
+      ? appendAbrainAudit(abrainHome, (typeof event.lane === "string" ? event.lane : undefined) ?? "auto_write", event)
       : appendAudit(projectRoot, event);
 
   // Round 8 P0 (gpt-5.5 audit fix): the full read-modify-write (find target +
@@ -995,7 +997,7 @@ export async function writeProjectEntry(
   const resultCtx = resultAuditFields(opts, draft.sessionId);
   const audit = (event: Record<string, unknown>) =>
     scope === "world"
-      ? appendAbrainAudit(abrainHome, (event.lane as string) ?? "auto_write", event)
+      ? appendAbrainAudit(abrainHome, (typeof event.lane === "string" ? event.lane : undefined) ?? "auto_write", event)
       : appendAudit(projectRoot, event);
 
   const validationErrors = validateProjectEntryDraft(draft);

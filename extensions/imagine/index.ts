@@ -170,6 +170,10 @@ function validateEnum<T extends string>(
 // ── Extension entry ─────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // ── Sub-pi enforce ──────────────────────────────────────────
+  // ADR 0014 §6: sub-pi should not have image generation.
+  if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
   pi.registerTool({
     name: "imagine",
     label: "AI Image Generation",

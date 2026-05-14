@@ -215,7 +215,7 @@ Hint: pass tasks as actual JSON array. Example:
 | 场景 | tools 默认 | 允许 |
 |---|---|---|
 | 主会话普通 `dispatch_agent(s)` | `[]` | 纯推理,无工具 |
-| 显式 readonly | `read,grep,find,ls,gbrain_search,gbrain_get,gbrain_query` | 只读;路径与输出仍受工具自身限制 |
+| 显式 readonly | `read,grep,find,ls,memory_search,memory_get,memory_list,memory_neighbors` | 只读;路径与输出仍受工具自身限制 |
 | vision / imagine | 单独 allow | 需要模型/图像场景时显式列出 |
 | mutating tools | 默认拒绝 | `edit/write/bash` 不委托给子代理;若未来要开必须用户 confirm + env gate + audit |
 | sediment voter | **永远 `[]`** | voter 是 pure reasoning;audit 记录 `voter_tools: []` |

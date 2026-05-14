@@ -277,6 +277,12 @@ function registerMemoryCommand(pi: ExtensionAPI) {
 }
 
 export default function (pi: ExtensionAPI) {
+  // ── Sub-pi enforce ──────────────────────────────────────────
+  // ADR 0014 §6 defense-in-depth: sub-pi should not register
+  // memory_search/get/list/neighbors (though dispatch's --tools
+  // allowlist also blocks them).
+  if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
   registerMemoryCommand(pi);
 
   pi.registerTool({

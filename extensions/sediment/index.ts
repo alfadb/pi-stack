@@ -358,6 +358,11 @@ function registerSedimentCommand(pi: ExtensionAPI) {
 }
 
 export default function (pi: ExtensionAPI) {
+  // ── Sub-pi enforce ──────────────────────────────────────────
+  // ADR 0014 §6 defense-in-depth: sub-pi has no need for sediment
+  // write hooks or tools. Dispatch sets PI_ABRAIN_DISABLED=1.
+  if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
   registerSedimentCommand(pi);
 
   // Footer state machine: session_start always sets idle.
