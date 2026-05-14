@@ -260,15 +260,17 @@ function runSubprocess(
 
     let child: ChildProcess | null = null;
     let timedOut = false;
+    let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
     const timer = setTimeout(() => {
       timedOut = true;
       child?.kill("SIGTERM");
       // Force kill after 5s grace
-      setTimeout(() => child?.kill("SIGKILL"), 5000);
+      forceKillTimer = setTimeout(() => child?.kill("SIGKILL"), 5000);
     }, timeoutMs);
 
     const cleanup = () => {
       clearTimeout(timer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
       signal.removeEventListener("abort", onAbort);
       cleanupTemp?.();
     };
@@ -532,6 +534,11 @@ function formatResult(
 // ── Extension ───────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // Sub-pi guard (2026-05-14 audit): dispatch tools must not register
+  // in sub-pi — nested dispatch is blocked at execute() time, but the
+  // tools shouldn't appear in the sub-pi tool schema at all.
+  if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
   // Footer status: reset to idle on session/agent boundaries so the
   // previous turn's completed/failed result doesn't linger past the
   // next user message. Mirrors sediment's lifecycle.
@@ -766,7 +773,7 @@ export default function (pi: ExtensionAPI) {
               running--;
               failed++;
               updateRunning();
-              return;
+              continue;  // continue to next task — do NOT return (kills the worker permanently)
             }
             res = await runSubprocess(
               t.model, t.thinking, t.prompt, signal,

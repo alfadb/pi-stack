@@ -130,6 +130,11 @@ function classifyDecision(
 }
 
 export default function (pi: ExtensionAPI) {
+  // Sub-pi guard (2026-05-14 audit): compaction-tuner must not fire
+  // in sub-pi — sub-agents have their own ephemeral sessions and
+  // shouldn't trigger compaction of the parent's context.
+  if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
   pi.on("agent_end", async (_event: unknown, ctx: CompactionTunerCtx) => {
     // Capture ctx fields synchronously — pi may invalidate ctx during
     // async work (same pattern sediment uses).

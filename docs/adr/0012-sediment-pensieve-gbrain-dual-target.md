@@ -2,11 +2,11 @@
 
 - **Status:** **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）— 本 ADR 的 pensieve+gbrain 双 target 被 memory-architecture.md 整体取代。新架构转向纯 markdown+git：项目级走 `<project>/.pensieve/`（md+git），世界级走 `~/.abrain/`（独立 git repo）。gbrain 被完全去除（memory-architecture.md 决策 2）。
 - **Date:** 2026-05-06 (accepted), 2026-05-07 (superseded)
-- **Supersedes:** ADR 0005 (pensieve-deprecated), ADR 0011 (two-track via gbrain sources)
+- **Supersedes:** ADR 0002 (gbrain as sole memory store), ADR 0005 (pensieve-deprecated), ADR 0008 (pi dotfiles dual-role / .gbrain-source routing), ADR 0011 (two-track via gbrain sources)
 - **Superseded by:** [memory-architecture.md](../memory-architecture.md) § 2 决策 2 + 附录 B.2
 - **Implements:** the proven dual-target sediment architecture from
   garrytan/pi-sediment, lifted verbatim into pi-astack/extensions/sediment/
-- **Related:** ADR 0002 (gbrain as sole memory store — REVISED), ADR 0010
+- **Related:** ADR 0002 (gbrain as sole memory store — REVISED, now superseded by this ADR), ADR 0010
   (single-agent with lookup tools — RETAINED), ADR 0008 (pi dotfiles dual-role
   — partially retired: `.gbrain-source` no longer needed in v6.8)
 

@@ -281,8 +281,6 @@ mergeProjectEntries → updateProjectEntry({ skipBodyShrinkGuard: true })
 
 ## 经验教训
 
-## 经验教训
-
 1. ~~prompt 单层防御不够~~（`07e4a3e` 原始结论）。**`ee1c809` 后修订：** 机械门控的 silent reject 制造不可修复的死条目，比单次 LLM knowledge degradation 危害更严重。当前策略改为信任 LLM curator 的自进化能力——单次知识降级可被后续迭代自我修复。保留 trigger_phrases UNION 作为安全的数据 enrichment 兜底（非阻塞），同时依赖 sanitizer 作为硬安全边界。详见 world maxim `prefer-prompt-engineering-over-mechanical-guards`。
 2. **Byte-length 不是 semantic loss 的好 proxy**。`2e8924d` 只 shrunk 14% 字节但删了全部 load-bearing sections。Structural check（H2 retention）才能抓"短 shrink 但 wholesale section loss"。
 3. **Sample size = 2 已构成 systematic problem 证据**。首次 P0 仅 trigger_phrases 被换、易被忽视；第二次 body overwrite 才暴露真实严重性。第一次发生时若立即介入，可避免第二次。今后类似单次"奇怪"observation 应当被认真追踪。

@@ -269,6 +269,11 @@ function buildAvailableModelsBlock(
 // ── Extension entry ─────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // Sub-pi guard (2026-05-14 audit): model-curator must not modify
+  // a sub-pi's model registry — it could remove the model the parent
+  // dispatched the sub-agent with.
+  if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
   pi.on("session_start", async (_event, ctx) => {
     const reg = ctx.modelRegistry;
     if (!reg) return;

@@ -218,6 +218,12 @@ function parseEntry(entry: string): { provider: string; id: string } | undefined
 // ── Extension entry ───────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+	// Sub-pi guard (2026-05-14 audit): dispatch sub-agents set
+	// PI_ABRAIN_DISABLED=1. model-fallback must not fire inside sub-pi
+	// — it would silently switch the sub-agent's model instead of
+	// failing fast and letting the parent handle the error.
+	if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
 	const config = loadConfig();
 	// Auto-detect pi's retry budget so we always align the give-up node.
 	const piMaxRetries = loadPiMaxRetries();

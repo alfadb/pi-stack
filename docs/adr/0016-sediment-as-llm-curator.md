@@ -1,6 +1,6 @@
 # ADR 0016 — Sediment 从 gate-heavy extractor 转向 LLM curator
 
-- **状态**: Accepted（2026-05-10）。**2026-05-13 [ADR 0018](0018-sediment-curator-defense-layers.md) 补充**：curator "update over create" 原则在 LLM 实践中需要三层防御（prompt update-vs-create discipline + writer body_shrink/body_section_loss/trigger_phrases UNION mechanical floor + smoke invariant lock）防止 candidate 覆盖上游 entry 的 evidence/fix/principle sections。
+- **状态**: Accepted（2026-05-10）。**2026-05-13 [ADR 0018](0018-sediment-curator-defense-layers.md) 补充并随后修订**：curator "update over create" 原则在 LLM 实践中需要防御；当前保留 curator prompt update-vs-create discipline + writer trigger_phrases UNION；body_shrink/body_section_loss 机械门控及对应 smoke fixtures 已于 ADR 0018 revert (`ee1c809`) 移除。详见 ADR 0018 头部决策摘要。
 - **日期**: 2026-05-10
 - **决策者**: alfadb
 - **依赖**: [ADR 0015](0015-memory-search-llm-driven-retrieval.md) / [ADR 0013](0013-asymmetric-trust-three-lanes.md) / [memory-architecture.md](../memory-architecture.md) §8
