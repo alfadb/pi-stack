@@ -1146,7 +1146,16 @@ export async function writeProjectEntry(
     // disk but git has no record. Without cleanup, the next write for this
     // slug hits the duplicate_slug race check forever (orphan wedge).
     // Unlink the orphan and reject — parity with writeAbrainWorkflow R9 P1-3.
+    //
+    // P4 fix (2026-05-14 R5 audit): gitCommit() does git add + git commit.
+    // If add succeeds but commit fails, the file is staged in git index even
+    // after unlink. The next successful commit then commits this ghost file
+    // (staged add of a now-deleted file), leaving a "deleted" entry in git
+    // history with no corresponding disk file — a silent wedge in the abrain
+    // repo. git reset HEAD -- <rel> below cleans the index.
     if (opts.settings.gitCommit && git === null) {
+      const rel = path.relative(abrainHome, target);
+      try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
       await fs.unlink(target).catch(() => {});
       const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
         operation: "reject",
@@ -1612,7 +1621,12 @@ export async function writeAbrainWorkflow(
     // entry was forever wedged. Detect null git + treat as a write
     // failure: unlink the orphan, emit audit row with reason, and
     // return rejected so caller can retry.
+    //
+    // P4 fix (2026-05-14 R5 audit): also git reset HEAD to unstage
+    // the ghost file from the index — same bug as writeProjectEntry.
     if (git === null && opts.settings.gitCommit) {
+      const rel = path.relative(abrainHome, target);
+      try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
       try { await fs.unlink(target); } catch { /* file may already be gone */ }
       const auditPath = await appendAbrainWorkflowAudit(abrainHome, {
         operation: "error",
