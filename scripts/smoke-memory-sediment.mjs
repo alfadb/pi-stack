@@ -1134,8 +1134,7 @@ END_MEMORY`;
         // observation, curator did update instead of create+derives_from,
         // dropping evidence/fix/principle sections).
         "Update vs create discipline",
-        "`derives_from: [<neighbor-slug>]`",
-        "prefer CREATE with derives_from over UPDATE",
+        "prefer CREATE over UPDATE",
         "Update body-preservation contract",
         "PRESERVE the neighbor's Evidence, Fix, Principle",
         "trigger_phrases on update: UNION",

@@ -38,7 +38,9 @@ const PI_STACK_SETTINGS_PATH = path.join(
 function loadPiStackSettings(): Record<string, unknown> {
   try {
     return JSON.parse(fsSync.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8"));
-  } catch {
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`pi-astack: failed to parse ${PI_STACK_SETTINGS_PATH}: ${message}. Using defaults.`);
     return {};
   }
 }
@@ -382,8 +384,10 @@ async function analyzeImage(
 function loadVisionPrefs(): string[] {
   const settings = loadPiStackSettings();
   const visionConfig = settings.vision as Record<string, unknown> | undefined;
-  const prefs = visionConfig?.modelPreferences as string[] | undefined;
-  if (prefs && prefs.length > 0) return prefs;
+  const prefs = visionConfig?.modelPreferences;
+  // Guard against mis-typed values (e.g. a bare string would pass
+  // prefs.length > 0 and break scoreByPrefs character iteration).
+  if (Array.isArray(prefs) && prefs.length > 0) return prefs as string[];
   return DEFAULT_VISION_PREFS;
 }
 

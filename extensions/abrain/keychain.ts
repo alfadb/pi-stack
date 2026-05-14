@@ -193,7 +193,12 @@ export function writeBackendFile(abrainHome: string, info: BackendFile): void {
   const final = path.join(abrainHome, BACKEND_FILE);
   const tmp = `${final}.tmp.${process.pid}`;
   fs.writeFileSync(tmp, lines.join("\n"), { mode: 0o600 });
-  fs.renameSync(tmp, final);
+  try {
+    fs.renameSync(tmp, final);
+  } catch {
+    try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
+    throw;
+  }
 }
 
 /** Read ~/.abrain/.vault-backend. Returns null if missing or malformed. */
@@ -226,7 +231,12 @@ export function writePubkeyFile(abrainHome: string, publicKey: string): void {
   const final = path.join(abrainHome, PUBKEY_FILE);
   const tmp = `${final}.tmp.${process.pid}`;
   fs.writeFileSync(tmp, publicKey + "\n", { mode: 0o644 });
-  fs.renameSync(tmp, final);
+  try {
+    fs.renameSync(tmp, final);
+  } catch {
+    try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
+    throw;
+  }
 }
 
 export function readPubkeyFile(abrainHome: string): string | null {

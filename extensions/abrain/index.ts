@@ -684,7 +684,7 @@ export default function activate(pi: ExtensionAPI): void {
         "Use vault_release only when plaintext is strictly necessary for the current task.",
         "Always provide a concise reason explaining why the secret must enter model context.",
         "Do not use vault_release for bash commands; $VAULT_<key> injection is the safer execution path.",
-        "Project scope binds to the boot-time active project; restart pi (or use `pi project switch`) to change it.",
+        "Project scope binds to the boot-time active project; to change it, restart pi (or run `/abrain bind --project=<id>` in the relevant project directory).",
       ],
       parameters: {
         type: "object",

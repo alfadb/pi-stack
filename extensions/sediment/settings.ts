@@ -62,7 +62,9 @@ export const DEFAULT_SEDIMENT_SETTINGS: SedimentSettings = {
 function loadPiStackSettings(): Record<string, unknown> {
   try {
     return JSON.parse(fsSync.readFileSync(PI_STACK_SETTINGS_PATH, "utf-8"));
-  } catch {
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    console.error(`pi-astack: failed to parse ${PI_STACK_SETTINGS_PATH}: ${message}. Using defaults.`);
     return {};
   }
 }
