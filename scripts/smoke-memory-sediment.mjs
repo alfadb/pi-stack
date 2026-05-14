@@ -1141,6 +1141,10 @@ END_MEMORY`;
         // ADR / file path discipline added 2026-05-13.
         "Wikilink target discipline",
         "MUST be referenced in PROSE",
+        // Scope on non-create operations (R5 2026-05-14 fix):
+        // update/merge/archive/supersede/delete schemas now include
+        // "scope"?: "world" — was previously only on create.
+        '"scope"?: "world"',
       ];
       for (const needle of curatorRequired) {
         assert(cp.includes(needle), `curator prompt missing required marker: ${JSON.stringify(needle)}`);
