@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Smoke test: verify dispatch_agents spawn enforces PI_ABRAIN_DISABLED=1
+// Smoke test: verify dispatch_parallel spawn enforces PI_ABRAIN_DISABLED=1
 // regardless of the user's parent env. This is the runtime mechanism that
 // backs ADR 0014 invariant #6 (sub-pi 默认看不到任何 vault).
 //

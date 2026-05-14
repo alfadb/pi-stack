@@ -120,7 +120,14 @@ async function generateImage(
   }
 
   if (!imageBase64) {
-    return { ok: false, error: "No image data in API response." };
+    const outputTypes = (output ?? []).map((x: any) => x.type).filter(Boolean).join(", ");
+    return {
+      ok: false,
+      error: `No image_generation_call in API response. Response output types: [${outputTypes || "empty"}]. ` +
+        `If using a proxy or non-native OpenAI endpoint, the model may require ` +
+        `tools:[{type:"image_generation"}] in the request body. ` +
+        `Request was sent to: ${url}`,
+    };
   }
 
   const filepath = await makeOutputPath(opts.cwd);
@@ -188,10 +195,10 @@ export default function (pi: ExtensionAPI) {
         description: "Image dimensions: 1024x1024, 1792x1024, or 1024x1792",
       })),
       quality: Type.Optional(Type.String({
-        description: "Quality level: standard or hd (default)",
+        description: "Quality level: standard or hd. OpenAI API default when omitted: standard.",
       })),
       style: Type.Optional(Type.String({
-        description: "Style hint: vivid (hyper-real, dramatic) or natural (realistic, subdued)",
+        description: "Style hint injected as prompt suffix '[Style: vivid|natural]' (gpt-image-2 has no native style API parameter). vivid = hyper-real/dramatic, natural = realistic/subdued.",
       })),
     }),
 

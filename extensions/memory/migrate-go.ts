@@ -950,6 +950,31 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       const { frontmatterText } = splitFrontmatter(raw);
       const seed = legacyPensieveSeedFor(relSource, parseFrontmatter(frontmatterText));
       if (seed) {
+        // P0 fix (2026-05-14 audit): extract-disposition seeds reference a
+        // canonical global copy that may not exist yet. If the globalTarget
+        // file is missing, DO NOT prune — the content would be permanently
+        // lost. Fail the entry instead so the operator can create the
+        // canonical copy first.
+        if (seed.globalTarget) {
+          const globalCopy = path.join(abrainHome, seed.globalTarget);
+          try {
+            await fs.access(globalCopy);
+          } catch {
+            skippedCount += 1;
+            failedCount += 1;
+            entries.push({
+              source: relSource,
+              target: seed.globalTarget,
+              slug: seed.slug,
+              title: seed.title,
+              kind: seed.kind,
+              route: seed.kind === "workflow" ? "workflow-cross-project" : "knowledge",
+              action: "failed",
+              reason: `extract seed's canonical copy not found in abrain: ${seed.globalTarget}. Create it first (e.g. copy the file manually into ~/.abrain/${seed.globalTarget}) or the content will be lost on prune.`,
+            });
+            continue;
+          }
+        }
         await gitRmOrUnlink(parentRepoRoot, file);
         skippedCount += 1;
         seedPrunedCount += 1;

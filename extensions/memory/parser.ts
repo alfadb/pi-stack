@@ -523,6 +523,12 @@ export async function listFilesWithRg(root: string, signal?: AbortSignal): Promi
         "--glob", "!**/.state/**",
         "--glob", "!**/.index/**",
         "--glob", "!**/.git/**",
+        // World store root is ~/.abrain/ which contains projects/<id>/ —
+        // those are project-scoped entries, not world knowledge. Exclude
+        // them so other projects don't leak into the current project's
+        // curator neighbor pool.
+        "--glob", "!**/projects/**",
+        "--glob", "!**/vault/**",
         root,
       ],
       { signal, timeout: 3_000, maxBuffer: 2 * 1024 * 1024 },

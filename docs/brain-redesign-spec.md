@@ -565,14 +565,14 @@ v1.3 将不变量 #1 wording 拆为两段（Round 5 Opus NP1-1：避免“修辞
 
 **层 1 mechanic enforcement**（机制性不变量）：LLM tool call surface 中**没有**定制 brain mutation tool——没有 `vault_write` / `vault_put` / `secret_*` / `brain_write` 这类专门入口。sediment 仍为异步记忆写入唯一 dedicated writer；vaultWriter library **仅在 abrain extension activate 期间被 TUI command handler 同进程调用**。
 
-**层 2 best-effort residual surface**（已知 trade-off，不是机制保证）：LLM 仍可通过通用 tool（bash / edit / write / dispatch_agents）间接写 brain SOT——例如：
+**层 2 best-effort residual surface**（已知 trade-off，不是机制保证）：LLM 仍可通过通用 tool（bash / edit / write / dispatch_parallel）间接写 brain SOT——例如：
 
 ```bash
 # bash 路径一：直接调 keychain + age CLI、手写加密文件
 secret-tool lookup service abrain key master | age -e -r $(cat ~/.abrain/.vault-pubkey) > ~/.abrain/vault/foo.md.age
 # bash 路径二：node -e require vaultWriter library 直接调用
 node -e 'require("/path/to/extensions/abrain/vault-writer.js").writeSecret("key","v")'
-# bash 路径三：bash spawn 子 pi（不走 dispatch_agents）不带 PI_ABRAIN_DISABLED
+# bash 路径三：bash spawn 子 pi（不走 dispatch_parallel）不带 PI_ABRAIN_DISABLED
 pi /secret malicious-key "$(cat ~/.ssh/id_ed25519)"
 ```
 
@@ -842,7 +842,7 @@ $ gh auth status            (uses $VAULT_github_token)
 
 **跨层 trade-off 声明**（已知已选，入 ADR 0014 坟处§9）：LLM 主动 exfiltration 在代码生成场景下始终是一个面。§6.5.1 是机制性防御（8 成场景默认拦住），§6.6 是字面 redaction（補充拦截），两者合起来使“意外泄露”几乎不可能，但“受 prompt injection 诱导的主动 exfil” 仍是剩余面。
 
-### 6.7 sub-pi 隔离（dispatch_agents 子进程）
+### 6.7 sub-pi 隔离（dispatch_parallel 子进程）
 
 子 pi 默认看不到任何 vault 元数据（连 key name 都不传）。要传必须父 pi 显式 pass，且每次 pass 必须用户授权。父 pi 已有的授权**不传给**子 pi。
 
@@ -976,7 +976,7 @@ echo ".pensieve" >> <cwd>/.gitignore
 | 不做 | 理由 |
 |---|---|
 | 主体进程（long-running Jarvis daemon） | 用户已经反思——先把 brain 跑通，多 pi 进程通过共享 brain 协调就够。等真有"无主体不行"的 pain point 再考虑 |
-| 分身（spawn-and-queue / sub-agent orchestration） | 同上。当前 dispatch_agents 已经能处理多模型并行，不需要更复杂的编排层 |
+| 分身（spawn-and-queue / sub-agent orchestration） | 同上。当前 dispatch_parallel 已经能处理多模型并行，不需要更复杂的编排层 |
 | Thread 抽象（跨 session 的"思考线程"） | 真正的长程认知是不是需要这个抽象，还没用真实使用验证。先看 brain 共享够不够 |
 | Long-running daemon（HTTP/Unix socket server） | 任何长跑后台进程都会引入 lifecycle 管理、auth、IPC 三块新工程。证明必要再加 |
 | Multi-channel inbox（IM 接入） | OpenClaw 的方向，不是这套架构的方向 |

@@ -11,8 +11,8 @@
  *   - Structured JSON event stream (free observability)
  *
  * Registers:
- *   dispatch_agent  — single task
- *   dispatch_agents — parallel tasks (max 16)
+ *   dispatch_agent    — single task
+ *   dispatch_parallel — parallel tasks (max 16, renamed from dispatch_agents 2026-05-13 to prevent LLM confusion with dispatch_agent)
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
@@ -47,13 +47,13 @@ const MUTATING_TOOLS = new Set(["bash", "edit", "write"]);
 // Transitions:
 //   - session_start                          -> idle
 //   - agent_start                            -> idle (resets prev result)
-//   - dispatch_agent / dispatch_agents start -> running
+//   - dispatch_agent / dispatch_parallel start -> running
 //   - dispatch finishes, no errors           -> completed
 //   - dispatch finishes with any error       -> failed
 //
 // Concurrent dispatch tool calls are theoretically possible (pi default
 // is parallel tool mode) but semantically unusual — a model wanting
-// parallelism uses dispatch_agents(tasks[]) rather than firing two tool
+// parallelism uses dispatch_parallel(tasks[]) rather than firing two tool
 // calls. We accept simple last-writer-wins overlap rather than
 // maintaining a multi-call counter.
 
@@ -142,7 +142,7 @@ function validateTools(toolsStr: string | undefined): ToolValidation {
   const names = toolsStr.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
 
   for (const name of names) {
-    if (name === "dispatch_agent" || name === "dispatch_agents") {
+    if (name === "dispatch_agent" || name === "dispatch_parallel") {
       return { ok: false, reason: `nested dispatch not allowed` };
     }
     if (MUTATING_TOOLS.has(name)) {
@@ -549,15 +549,15 @@ export default function (pi: ExtensionAPI) {
     name: "dispatch_agent",
     label: "Dispatch Agent",
     description:
-      "Spawn a SINGLE sub-agent. For 2+ independent tasks, use dispatch_agents instead " +
+      "Spawn a SINGLE sub-agent. For 2+ independent tasks, use dispatch_parallel instead " +
       "(calling dispatch_agent N times runs them serially, wasting wall-clock time). " +
       "The sub-agent runs as an independent pi process, capable of multi-turn " +
       "tool calling (read, grep, find, ls). Mutating tools (bash, edit, write) " +
       "are blocked by default.",
     promptSnippet: "dispatch_agent(model, thinking, prompt, tools?, timeoutMs?) — SINGLE task only",
     promptGuidelines: [
-      "Use dispatch_agent ONLY for a single analysis/reasoning task. For 2+ tasks, use dispatch_agents.",
-      "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_agents which runs them in parallel (~30s).",
+      "Use dispatch_agent ONLY for a single analysis/reasoning task. For 2+ tasks, use dispatch_parallel.",
+      "⚠️ Anti-pattern: calling dispatch_agent 3 times for 3 models. Each call blocks for the sub-agent to finish, so 3×30s=90s vs dispatch_parallel which runs them in parallel (~30s).",
       "Sub-agents CAN use read, grep, find, ls. Mutating tools require PI_MULTI_AGENT_ALLOW_MUTATING=1.",
       "The sub-agent is an independent pi process — its context does NOT count against your token budget.",
     ],
@@ -565,7 +565,7 @@ export default function (pi: ExtensionAPI) {
       model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
       thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
       prompt: Type.String({ description: "Prompt sent to this task" }),
-      tools: Type.Optional(Type.String({ description: "Comma-separated tool names hint. Sub-pi runs with its own built-in tool set; this field is still validated for safety (mutating tools like bash/edit/write require PI_MULTI_AGENT_ALLOW_MUTATING=1, and nested dispatch_agent/dispatch_agents is always rejected)." })),
+      tools: Type.Optional(Type.String({ description: "Comma-separated tool names allowlist. Sub-pi runs with its own built-in tool set; this field controls the --tools parameter passed to the sub-pi. The sub-agent can ONLY call tools in this list (default: read,grep,find,ls). Mutating tools (bash/edit/write) require PI_MULTI_AGENT_ALLOW_MUTATING=1, and nested dispatch_agent/dispatch_parallel is always rejected." })),
       timeoutMs: Type.Optional(Type.Number({ description: "Timeout in ms (default 1800000 = 30min)" })),
     }),
 
@@ -625,21 +625,21 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ═══════════════════════════════════════════════════════════════
-  // dispatch_agents
+  // dispatch_parallel
   // ═══════════════════════════════════════════════════════════════
   pi.registerTool({
-    name: "dispatch_agents",
-    label: "Dispatch Agents",
+    name: "dispatch_parallel",
+    label: "Dispatch Parallel",
     description:
       "Run multiple sub-agents IN PARALLEL. Each is an independent pi process. " +
       "Results are collected when ALL complete. This is the primary tool for " +
       "multi-model analysis — do NOT call dispatch_agent N times instead. " +
       "Mutating tools blocked by default. " +
       `Up to ${MAX_PARALLEL} tasks per call; up to ${MAX_CONCURRENCY} run concurrently.`,
-    promptSnippet: "dispatch_agents([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
+    promptSnippet: "dispatch_parallel([{model, thinking, prompt}, ...], timeoutMs?) — parallel execution",
     promptGuidelines: [
-      "Use dispatch_agents EVERY TIME you have 2+ independent analysis tasks with different models. All tasks run in parallel — do NOT call dispatch_agent N times.",
-      "Example: dispatch_agents([{model:'claude-opus-4-7', thinking:'high', prompt:'audit docs'}, {model:'gpt-5.5', thinking:'high', prompt:'audit code'}, {model:'deepseek-v4-pro', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together.",
+      "Use dispatch_parallel EVERY TIME you have 2+ independent analysis tasks with different models. All tasks run in parallel — do NOT call dispatch_agent N times.",
+      "Example: dispatch_parallel([{model:'claude-opus-4-7', thinking:'high', prompt:'audit docs'}, {model:'gpt-5.5', thinking:'high', prompt:'audit code'}, {model:'deepseek-v4-pro', thinking:'high', prompt:'audit architecture'}]) → all 3 run concurrently, results returned together.",
       `Concurrency: up to ${MAX_PARALLEL} tasks accepted; ${MAX_CONCURRENCY} run at once, others queue. Choose models from DIFFERENT providers for diversity.`,
       "For reasoning-only tasks, omit tools (sub-pi uses built-in read/grep/find/ls).",
     ],
@@ -649,6 +649,7 @@ export default function (pi: ExtensionAPI) {
           model: Type.String({ description: 'Provider/model e.g. "openai/gpt-5.5"' }),
           thinking: Type.String({ description: "Thinking level: off, minimal, low, medium, high, xhigh" }),
           prompt: Type.String({ description: "Prompt sent to this task" }),
+          tools: Type.Optional(Type.String({ description: "Comma-separated tool allowlist for this task (default: read,grep,find,ls). Per-task override of the global allowlist." })),
           timeoutMs: Type.Optional(Type.Number({ description: "Per-task timeout in ms (default 1800000 = 30min)" })),
         }),
         { description: `Array of task specifications (max ${MAX_PARALLEL})` },
@@ -674,7 +675,7 @@ export default function (pi: ExtensionAPI) {
               ? `string of length ${rawTasks.length} starting with ${JSON.stringify(rawTasks.slice(0, 40))}`
               : `${typeof rawTasks} (${Array.isArray(rawTasks) ? "empty array" : "non-array"})`;
         throw new Error(
-          `dispatch_agents: 'tasks' must be a non-empty array of task objects {model, thinking, prompt}. ` +
+          `dispatch_parallel: 'tasks' must be a non-empty array of task objects {model, thinking, prompt}. ` +
             `Got ${got}. ` +
             `Pass tasks directly as a JSON array — do NOT wrap the entire array in a JSON string. ` +
             `If your prompt contains quote characters, the host's tool-call serializer handles escaping; ` +
@@ -687,6 +688,7 @@ export default function (pi: ExtensionAPI) {
           model: n.model,
           thinking: n.thinking,
           prompt: n.prompt,
+          tools: n.tools,
           timeoutMs: n.timeoutMs,
         };
       });
@@ -698,6 +700,20 @@ export default function (pi: ExtensionAPI) {
       if (tasks.length === 0) {
         return {
           content: [{ type: "text" as const, text: "No tasks provided." }],
+          isError: true,
+        };
+      }
+      if (tasks.length === 1) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: `❌ dispatch_parallel requires 2+ tasks. You provided 1 task.\n\n` +
+              `For a single task, use dispatch_agent instead — it has the same ` +
+              `model/thinking/prompt/timeoutMs parameters and returns a simpler result. ` +
+              `dispatch_parallel exists ONLY for parallel multi-model analysis; ` +
+              `calling it with 1 task wastes the parallelism infrastructure and makes ` +
+              `the output harder to read (table format for a single row).`,
+          }],
           isError: true,
         };
       }
@@ -734,11 +750,29 @@ export default function (pi: ExtensionAPI) {
           updateRunning();
           let res: SubprocessResult;
           try {
+            // P1 fix (2026-05-14 audit): validateTools was missing in
+            // dispatch_parallel, allowing per-task `tools: "bash,edit,write"`
+            // to bypass the PI_MULTI_AGENT_ALLOW_MUTATING gate that
+            // dispatch_agent enforces. Per-task tools must pass the same
+            // validation.
+            const toolCheck = validateTools(t.tools);
+            if (!toolCheck.ok) {
+              res = {
+                output: "",
+                error: `task[${i}] rejected: ${toolCheck.reason}`,
+                durationMs: 0,
+              };
+              results[i] = res;
+              running--;
+              failed++;
+              updateRunning();
+              return;
+            }
             res = await runSubprocess(
               t.model, t.thinking, t.prompt, signal,
               t.timeoutMs ?? timeoutMs,
               undefined,
-              "read,grep,find,ls",
+              t.tools || "read,grep,find,ls",
             );
           } catch (err: any) {
             res = {

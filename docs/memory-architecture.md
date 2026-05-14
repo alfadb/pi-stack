@@ -123,7 +123,7 @@ lifetime:                               # 时间边界
 |---|---|---|
 | **maxim** | MUST | "tmux 中永不关主 pane" |
 | **decision** | WANT | "本项目用 pnpm，不用 npm" |
-| **anti-pattern** | WARN | "dispatch_agents 表面并行可能实际串行" |
+| **anti-pattern** | WARN | "dispatch_parallel 表面并行可能实际串行" |
 | **pattern** | SUGGEST | "用 @file 传 long prompt" |
 | **fact** | IS | "pi 的 _emitExtensionEvent 透传引用" |
 | **preference** | PREFER | "用户喜欢中文回复" |

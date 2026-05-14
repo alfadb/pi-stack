@@ -1443,13 +1443,36 @@ async function tryAutoWriteLane(args: {
       correlationId,
       candidateId,
     };
-    const curated = await curateProjectDraft(draft, {
-      projectRoot: cwd,
-      sedimentSettings: settings,
-      memorySettings: resolveMemorySettings(),
-      modelRegistry,
-      signal: args.signal,
-    });
+    let curated: Awaited<ReturnType<typeof curateProjectDraft>>;
+    try {
+      curated = await curateProjectDraft(draft, {
+        projectRoot: cwd,
+        sedimentSettings: settings,
+        memorySettings: resolveMemorySettings(),
+        modelRegistry,
+        signal: args.signal,
+      });
+    } catch (e: any) {
+      // F4 defense (2026-05-14): curateProjectDraft has internal try/catch
+      // for loadEntries / llmSearchEntries / callCuratorModel, but no
+      // catch-all at the outermost function boundary. An unexpected runtime
+      // error (e.g. path.resolve on malformed data, OOM) would previously
+      // kill ALL remaining candidates in the loop. Now we isolate each
+      // candidate's curator call and continue to the next.
+      const error = e?.message ?? String(e);
+      curatorAudits.push({ decision: { op: "skip", reason: "curator_crashed", rationale: error }, neighbors: [], stage_ms: { search: 0, decide: 0, total: 0 }, error });
+      results.push({
+        slug: draft.title,
+        path: "",
+        status: "skipped",
+        reason: `curator_crashed: ${error}`,
+        lane: "auto_write",
+        sessionId,
+        correlationId,
+        candidateId,
+      });
+      continue;
+    }
     curatorAudits.push(curated.audit);
     if (curated.decision.op === "skip") {
       results.push({
@@ -1480,6 +1503,7 @@ async function tryAutoWriteLane(args: {
             projectRoot: cwd,
             abrainHome,
             projectId,
+            scope: curated.decision.scope,
             settings,
             dryRun: false,
             auditContext,
@@ -1506,6 +1530,7 @@ async function tryAutoWriteLane(args: {
             projectRoot: cwd,
             abrainHome,
             projectId,
+            scope: curated.decision.scope,
             settings,
             dryRun: false,
             auditContext,
@@ -1520,6 +1545,7 @@ async function tryAutoWriteLane(args: {
           projectRoot: cwd,
           abrainHome,
           projectId,
+          scope: curated.decision.scope,
           settings,
           dryRun: false,
           reason:
@@ -1538,6 +1564,7 @@ async function tryAutoWriteLane(args: {
           projectRoot: cwd,
           abrainHome,
           projectId,
+          scope: curated.decision.scope,
           settings,
           dryRun: false,
           newSlug: curated.decision.newSlug,
@@ -1557,6 +1584,7 @@ async function tryAutoWriteLane(args: {
           projectRoot: cwd,
           abrainHome,
           projectId,
+          scope: curated.decision.scope,
           settings,
           dryRun: false,
           mode: curated.decision.mode,
@@ -1583,6 +1611,7 @@ async function tryAutoWriteLane(args: {
           projectRoot: cwd,
           abrainHome,
           projectId,
+          scope: curated.decision.op === "create" ? (curated.decision.scope ?? "project") : "project",
           settings,
           dryRun: false,
           auditContext,

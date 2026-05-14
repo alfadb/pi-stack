@@ -400,7 +400,7 @@ async function loadMasterKey(): Promise<MasterKey | null> {
 
 ADR 0014 §关键不变量 #6 要求 "sub-pi 默认看不到任何 vault" 是**机制性的**不只是 documentation。下面三点同时生效：
 
-#### (a) `dispatch_agents` spawn 强制 env override（不允许上层覆盖）
+#### (a) `dispatch_parallel` spawn 强制 env override（不允许上层覆盖）
 
 ```typescript
 // extensions/dispatch/index.ts

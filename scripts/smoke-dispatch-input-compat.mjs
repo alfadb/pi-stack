@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Regression test for the `raw.slice(...).map is not a function` bug in
- * dispatch_agents (2026-05-09).
+ * dispatch_parallel (2026-05-09, renamed from dispatch_agents 2026-05-13).
  *
  * Failure chain that produced the cryptic error:
  *   1. LLM hand-stringifies the entire `tasks` array into the tool_use input.
@@ -15,7 +15,7 @@
  *
  * The fix has two parts:
  *   A. coerceTasksParam returns `[]` on failure (honest signature).
- *   B. dispatch_agents `prepareArguments` throws an actionable error before
+ *   B. dispatch_parallel `prepareArguments` throws an actionable error before
  *      the .slice().map() chain when raw is empty/non-array.
  *
  * This script transpiles the live TS source (no rebuild step required) and
@@ -155,7 +155,7 @@ function prepareArguments(args) {
           ? `string of length ${rawTasks.length} starting with ${JSON.stringify(rawTasks.slice(0, 40))}`
           : `${typeof rawTasks} (${Array.isArray(rawTasks) ? "empty array" : "non-array"})`;
     throw new Error(
-      `dispatch_agents: 'tasks' must be a non-empty array of task objects {model, thinking, prompt}. ` +
+      `dispatch_parallel: 'tasks' must be a non-empty array of task objects {model, thinking, prompt}. ` +
         `Got ${got}. ` +
         `Pass tasks directly as a JSON array — do NOT wrap the entire array in a JSON string.`,
     );

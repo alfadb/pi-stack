@@ -22,6 +22,7 @@ import type { Jsonish } from "../memory/types";
 // always slugify titles directly.
 import { slugify } from "../memory/utils";
 import {
+  abrainKnowledgeDir,
   abrainProjectDir,
   abrainProjectWorkflowsDir,
   abrainSedimentAuditPath,
@@ -59,18 +60,22 @@ export interface WriterAuditContext {
 }
 
 export interface WriteProjectEntryOptions {
-  /** Project repo root — still used as the audit/lock substrate root,
-   *  i.e. `<projectRoot>/.pi-astack/sediment/audit.jsonl`. Entry markdown
-   *  itself lands in abrain, not under projectRoot. */
+  /** Project repo root — still used as the audit/lock substrate root
+   *  for project-scoped entries (i.e. `<projectRoot>/.pi-astack/sediment/audit.jsonl`).
+   *  For world-scoped entries, audit goes to abrain-side path. */
   projectRoot: string;
   /** Abrain home (required since the 2026-05-13 sediment cutover): the
    *  entry markdown is written under `<abrainHome>/projects/<projectId>/`
+   *  (project scope) or `<abrainHome>/knowledge/` (world scope),
    *  and the corresponding git commit lands in the abrain repo. */
   abrainHome: string;
-  /** Strict-binding project id (from `resolveActiveProject`). Embedded
-   *  in the entry frontmatter `id: project:<projectId>:<slug>` and used
-   *  to construct the abrain write path. */
+  /** Strict-binding project id (from `resolveActiveProject`). Required
+   *  for project-scoped entries; ignored for world-scoped entries. */
   projectId: string;
+  /** Scope routing (ADR 014 Lane C): "project" (default) writes to
+   *  `<abrainHome>/projects/<projectId>/<kindDir>/<slug>.md`;
+   *  "world" writes to `<abrainHome>/knowledge/<slug>.md` (flat, no kindDir). */
+  scope?: "project" | "world";
   settings: SedimentSettings;
   dryRun?: boolean;
   auditOperation?: string;
@@ -225,26 +230,30 @@ async function ensureAbrainEntryRoot(abrainHome: string, projectId: string): Pro
 // (`.abrain-project.json` + `<abrainHome>/projects/<id>/_project.json`
 // + local-map confirmed path) is the canonical post-migration marker now.
 
-function buildMarkdown(draft: ProjectEntryDraft, projectId: string): { slug: string; markdown: string } {
+function buildMarkdown(draft: ProjectEntryDraft, scope: "project" | "world", projectId?: string): { slug: string; markdown: string } {
   const timestamp = nowIso();
   const status = draft.status ?? "provisional";
   const confidence = Math.min(10, Math.max(0, Math.round(draft.confidence ?? 3)));
   const slug = slugify(draft.title);
   const compiledTruth = normalizeCompiledTruth(draft.title, draft.compiledTruth);
   const timelineSession = draft.sessionId || "sediment";
-  const timelineNote = draft.timelineNote || "created by sediment project writer";
+  const timelineNote = draft.timelineNote || `created by sediment ${scope} writer`;
 
-  const frontmatter = [
+  // projectId is already validated by validateAbrainProjectId (allowed
+  // chars [a-zA-Z0-9_.-]+). DO NOT pass through slugify() here — that
+  // would lowercase and rewrite `_`/`.` to `-`, producing an id that
+  // disagrees with migrate-go's `id: project:<projectId>:<slug>`
+  // (migrate-go.ts uses raw projectId). Mismatched ids would split
+  // wikilink / backlink resolution between migrated and freshly-written
+  // entries when the projectId contains any non-lowercase / non-dash chars.
+  const entryId = scope === "world"
+    ? `world:${slug}`
+    : `project:${projectId}:${slug}`;
+
+  const frontmatter: string[] = [
     "---",
-    // projectId is already validated by validateAbrainProjectId (allowed
-    // chars [a-zA-Z0-9_.-]+). DO NOT pass through slugify() here — that
-    // would lowercase and rewrite `_`/`.` to `-`, producing an id that
-    // disagrees with migrate-go's `id: project:<projectId>:<slug>`
-    // (migrate-go.ts uses raw projectId). Mismatched ids would split
-    // wikilink / backlink resolution between migrated and freshly-written
-    // entries when the projectId contains any non-lowercase / non-dash chars.
-    `id: project:${projectId}:${slug}`,
-    "scope: project",
+    `id: ${entryId}`,
+    `scope: ${scope}`,
     `kind: ${draft.kind}`,
     `status: ${status}`,
     `confidence: ${confidence}`,
@@ -253,9 +262,11 @@ function buildMarkdown(draft: ProjectEntryDraft, projectId: string): { slug: str
     `created: ${timestamp}`,
     `updated: ${timestamp}`,
     ...yamlList("trigger_phrases", draft.triggerPhrases),
-    "---",
-    "",
   ];
+  if (scope === "project" && projectId) {
+    frontmatter.push(`project_id: ${yamlString(projectId)}`);
+  }
+  frontmatter.push("---", "");
 
   const markdown = [
     ...frontmatter,
@@ -302,6 +313,16 @@ function renderFrontmatter(frontmatter: Record<string, Jsonish>, originalOrder: 
   }
   lines.push("---", "");
   return lines.join("\n");
+}
+
+async function findWorldEntryFile(abrainHome: string, slug: string): Promise<string | undefined> {
+  const target = path.join(abrainKnowledgeDir(abrainHome), `${slug}.md`);
+  try {
+    await fs.access(target);
+    return target;
+  } catch {
+    return undefined;
+  }
 }
 
 async function findProjectEntryFile(entryRoot: string, slug: string): Promise<string | undefined> {
@@ -545,18 +566,20 @@ async function gitCommit(
   filePath: string,
   slug: string,
   op: string,
-  projectId: string,
+  projectId?: string,
 ): Promise<string | null> {
   // Commits land in the abrain repo (cross-project knowledge substrate).
   // Commit message convention since the 2026-05-13 cutover:
-  //   sediment: <op> <slug> (project:<id>)
+  //   sediment: <op> <slug> (project:<id>)   — project-scoped entries
+  //   sediment: <op> <slug> (world)           — world-scoped entries
   // op ∈ {create, update, archive, merge, supersede, delete}.
+  const scopeTag = projectId ? `project:${projectId}` : "world";
   try {
     const rel = path.relative(abrainHome, filePath);
     await execFileAsync("git", ["-C", abrainHome, "add", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
     await execFileAsync(
       "git",
-      ["-C", abrainHome, "commit", "-m", `sediment: ${op} ${slug} (project:${projectId})`],
+      ["-C", abrainHome, "commit", "-m", `sediment: ${op} ${slug} (${scopeTag})`],
       { timeout: 20_000, maxBuffer: 1024 * 1024 },
     );
     const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
@@ -604,6 +627,9 @@ export async function mergeProjectEntries(
   const sources = Array.from(new Set(sourceSlugRaws.map((slug) => slugify(slug)).filter(Boolean)));
   const nonTargetSources = sources.filter((slug) => slug !== targetSlug);
   const reason = patch.reason || patch.timelineNote || "merged by sediment curator";
+  // P1 fix (2026-05-14 audit): thread opts.scope through so world-scoped
+  // merge target resolution uses abrainKnowledgeDir instead of
+  // abrainProjectDir.
   const targetResult = await updateProjectEntry(targetSlug, {
     compiledTruth: patch.compiledTruth,
     sessionId: patch.sessionId,
@@ -614,6 +640,7 @@ export async function mergeProjectEntries(
     projectRoot: opts.projectRoot,
     abrainHome: opts.abrainHome,
     projectId: opts.projectId,
+    scope: opts.scope,
     settings: opts.settings,
     dryRun: opts.dryRun,
     auditOperation: "merge",
@@ -630,6 +657,7 @@ export async function mergeProjectEntries(
       projectRoot: opts.projectRoot,
       abrainHome: opts.abrainHome,
       projectId: opts.projectId,
+      scope: opts.scope,
       settings: opts.settings,
       dryRun: opts.dryRun,
       reason: `merged into ${targetSlug}: ${reason}`,
@@ -654,6 +682,7 @@ export async function archiveProjectEntry(
     projectRoot: opts.projectRoot,
     abrainHome: opts.abrainHome,
     projectId: opts.projectId,
+    scope: opts.scope,
     settings: opts.settings,
     dryRun: opts.dryRun,
     auditOperation: "archive",
@@ -679,6 +708,7 @@ export async function supersedeProjectEntry(
     projectRoot: opts.projectRoot,
     abrainHome: opts.abrainHome,
     projectId: opts.projectId,
+    scope: opts.scope,
     settings: opts.settings,
     dryRun: opts.dryRun,
     auditOperation: "supersede",
@@ -695,18 +725,29 @@ export async function deleteProjectEntry(
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
-  const entryRoot = await ensureAbrainEntryRoot(abrainHome, opts.projectId);
+  const scope = opts.scope ?? "project";
+  // P1 fix (2026-05-14 audit): thread scope through entry root resolution.
+  // World-scoped entries live flat under abrainHome/knowledge/, not under
+  // abrainHome/projects/<projectId>/. Without this, world-scope delete
+  // always returns entry_not_found.
+  const entryRoot = scope === "world"
+    ? abrainKnowledgeDir(abrainHome)
+    : await ensureAbrainEntryRoot(abrainHome, opts.projectId);
+  const auditRoot = scope === "world" ? abrainHome : projectRoot;
+  const targetPrefix = scope === "world" ? "world" : "project";
   const slug = slugify(slugRaw);
   const mode: DeleteMode = opts.mode === "hard" ? "hard" : "soft";
   const reason = opts.reason || "deleted by sediment curator";
   const resultCtx = resultAuditFields(opts, opts.sessionId);
 
-  const target = await findProjectEntryFile(entryRoot, slug);
+  const target = scope === "world"
+    ? await findWorldEntryFile(abrainHome, slug)
+    : await findProjectEntryFile(entryRoot, slug);
   if (!target) {
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
+    const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "reject",
       reason: "entry_not_found",
-      target: `project:${slug}`,
+      target: `${targetPrefix}:${slug}`,
       delete_mode: mode,
       duration_ms: Date.now() - started,
     }));
@@ -723,6 +764,7 @@ export async function deleteProjectEntry(
       projectRoot,
       abrainHome: opts.abrainHome,
       projectId: opts.projectId,
+      scope: opts.scope,
       settings: opts.settings,
       dryRun: opts.dryRun,
       auditOperation: "delete",
@@ -740,11 +782,12 @@ export async function deleteProjectEntry(
   try {
     lock = await acquireLock(abrainHome, opts.settings.lockTimeoutMs);
     await fs.unlink(target);
-    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "delete", opts.projectId) : null;
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
+    const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
+    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "delete", gitCommitProjectId) : null;
+    const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "delete",
-      target: `project:${slug}`,
-      path: path.relative(projectRoot, target),
+      target: `${targetPrefix}:${slug}`,
+      path: path.relative(auditRoot, target),
       delete_mode: "hard",
       reason,
       git_commit: git,
@@ -753,9 +796,9 @@ export async function deleteProjectEntry(
     return { slug, path: target, status: "deleted", gitCommit: git, auditPath, deleteMode: "hard", ...resultCtx };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, opts.sessionId, {
+    const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "error",
-      target: `project:${slug}`,
+      target: `${targetPrefix}:${slug}`,
       delete_mode: "hard",
       reason: message,
       duration_ms: Date.now() - started,
@@ -774,9 +817,18 @@ export async function updateProjectEntry(
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
-  const entryRoot = await ensureAbrainEntryRoot(abrainHome, opts.projectId);
+  const scope = opts.scope ?? "project";
+  const entryRoot = scope === "world"
+    ? await fs.mkdir(abrainKnowledgeDir(abrainHome), { recursive: true }).then(() => abrainKnowledgeDir(abrainHome))
+    : await ensureAbrainEntryRoot(abrainHome, opts.projectId);
+  const auditRoot = scope === "world" ? abrainHome : projectRoot;
+  const targetPrefix = scope === "world" ? `world` : `project`;
   const slug = slugify(slugRaw);
   const resultCtx = resultAuditFields(opts, patch.sessionId);
+  const doAudit = (event: Record<string, unknown>) =>
+    scope === "world"
+      ? appendAbrainAudit(abrainHome, (event.lane as string) ?? "auto_write", event)
+      : appendAudit(projectRoot, event);
 
   // Round 8 P0 (gpt-5.5 audit fix): the full read-modify-write (find target +
   // readFile + merge + lint + write) MUST happen inside the sediment lock.
@@ -806,10 +858,10 @@ export async function updateProjectEntry(
   > {
     const target = await findProjectEntryFile(entryRoot, slug);
     if (!target) {
-      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
         operation: "reject",
         reason: "entry_not_found",
-        target: `project:${slug}`,
+        target: `${targetPrefix}:${slug}`,
         duration_ms: Date.now() - started,
       }));
       return { ok: false, response: { slug, path: path.join(entryRoot, `${slug}.md`), status: "rejected", reason: "entry_not_found", auditPath, ...resultCtx } };
@@ -819,10 +871,10 @@ export async function updateProjectEntry(
       raw = await fs.readFile(target, "utf-8");
     } catch (e: unknown) {
       const message = e instanceof Error ? e.message : String(e);
-      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
         operation: "reject",
         reason: `read_error: ${message}`,
-        target: `project:${slug}`,
+        target: `${targetPrefix}:${slug}`,
         duration_ms: Date.now() - started,
       }));
       return { ok: false, response: { slug, path: target, status: "rejected", reason: `read_error: ${message}`, auditPath, ...resultCtx } };
@@ -830,10 +882,10 @@ export async function updateProjectEntry(
     const merged = mergeUpdateMarkdown(raw, patch, slug, opts.projectId, {});
     if ("error" in merged) {
       const reason = merged.error.startsWith("credential pattern detected") ? merged.error : merged.error.split(":")[0];
-      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
         operation: "reject",
         reason,
-        target: `project:${slug}`,
+        target: `${targetPrefix}:${slug}`,
         detail: merged.error,
         duration_ms: Date.now() - started,
       }));
@@ -843,10 +895,10 @@ export async function updateProjectEntry(
     const lintErrors = lint.filter((issue) => issue.severity === "error").length;
     const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
     if (lintErrors > 0) {
-      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+      const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
         operation: "reject",
         reason: "lint_error",
-        target: `project:${slug}`,
+        target: `${targetPrefix}:${slug}`,
         lintErrors,
         lintWarnings,
         duration_ms: Date.now() - started,
@@ -891,11 +943,12 @@ export async function updateProjectEntry(
     const merged = prepared.merged;
     await atomicWrite(target, merged.markdown);
     const operation = opts.auditOperation || "update";
-    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, operation, opts.projectId) : null;
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+    const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
+    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, operation, gitCommitProjectId) : null;
+    const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
       operation,
-      target: `project:${slug}`,
-      path: path.relative(projectRoot, target),
+      target: `${targetPrefix}:${slug}`,
+      path: path.relative(auditRoot, target),
       lint_result: "pass",
       git_commit: git,
       duration_ms: Date.now() - started,
@@ -914,9 +967,9 @@ export async function updateProjectEntry(
     };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, patch.sessionId, {
+    const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
       operation: "error",
-      target: `project:${slug}`,
+      target: `${targetPrefix}:${slug}`,
       reason: message,
       duration_ms: Date.now() - started,
     }));
@@ -933,12 +986,21 @@ export async function writeProjectEntry(
   const started = Date.now();
   const projectRoot = path.resolve(opts.projectRoot);
   const abrainHome = path.resolve(opts.abrainHome);
-  const entryRoot = await ensureAbrainEntryRoot(abrainHome, opts.projectId);
+  const scope = opts.scope ?? "project";
+  const entryRoot = scope === "world"
+    ? await fs.mkdir(abrainKnowledgeDir(abrainHome), { recursive: true }).then(() => abrainKnowledgeDir(abrainHome))
+    : await ensureAbrainEntryRoot(abrainHome, opts.projectId);
+  // World-scope entries audit to the abrain-side audit log (no project root).
+  const auditRoot = scope === "world" ? abrainHome : projectRoot;
   const resultCtx = resultAuditFields(opts, draft.sessionId);
+  const audit = (event: Record<string, unknown>) =>
+    scope === "world"
+      ? appendAbrainAudit(abrainHome, (event.lane as string) ?? "auto_write", event)
+      : appendAudit(projectRoot, event);
 
   const validationErrors = validateProjectEntryDraft(draft);
   if (validationErrors.length > 0) {
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
+    const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
       operation: "reject",
       reason: "validation_error",
       title: draft.title,
@@ -969,7 +1031,7 @@ export async function writeProjectEntry(
   const triggerPhraseSanitizes = (draft.triggerPhrases ?? []).map((p) => sanitizeForMemory(p));
   const failedSanitize = [titleSanitize, bodySanitize, noteSanitize, ...triggerPhraseSanitizes].find((result) => !result.ok);
   if (failedSanitize) {
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
+    const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
       operation: "reject",
       reason: failedSanitize.error,
       title: draft.title,
@@ -996,19 +1058,24 @@ export async function writeProjectEntry(
     status: draft.status,
   };
 
-  const { slug, markdown } = buildMarkdown(safeDraft, opts.projectId);
+  const { slug, markdown } = buildMarkdown(safeDraft, scope, opts.projectId);
   const status = safeDraft.status ?? "provisional";
-  const target = path.join(entryRoot, kindDirectory(safeDraft.kind, status), `${slug}.md`);
+  // World-scope entries are flat under knowledge/; project-scope entries
+  // nest under kind/status subdirectories per the abrain project layout.
+  const target = scope === "world"
+    ? path.join(entryRoot, `${slug}.md`)
+    : path.join(entryRoot, kindDirectory(safeDraft.kind, status), `${slug}.md`);
+  const targetId = scope === "world" ? `world:${slug}` : `project:${slug}`;
 
   const duplicate = await detectProjectDuplicate(entryRoot, safeDraft.title, {
     slug,
     kind: safeDraft.kind,
   });
   if (duplicate.duplicate) {
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
+    const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
       operation: "reject",
       reason: "duplicate_slug",
-      target: `project:${slug}`,
+      target: targetId,
       duplicate,
       duration_ms: Date.now() - started,
     }));
@@ -1026,10 +1093,10 @@ export async function writeProjectEntry(
   const lintErrors = lint.filter((issue) => issue.severity === "error").length;
   const lintWarnings = lint.filter((issue) => issue.severity === "warning").length;
   if (lintErrors > 0) {
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
+    const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
       operation: "reject",
       reason: "lint_error",
-      target: `project:${slug}`,
+      target: targetId,
       lintErrors,
       lintWarnings,
       duration_ms: Date.now() - started,
@@ -1057,12 +1124,12 @@ export async function writeProjectEntry(
         duplicate: true,
         reason: "slug_exact",
         score: 1,
-        match: { slug, title: safeDraft.title, kind: safeDraft.kind, status, source_path: path.relative(projectRoot, target) },
+        match: { slug, title: safeDraft.title, kind: safeDraft.kind, status, source_path: path.relative(auditRoot, target) },
       };
-      const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
+      const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
         operation: "reject",
         reason: "duplicate_slug",
-        target: `project:${slug}`,
+        target: targetId,
         duplicate: duplicateRace,
         duration_ms: Date.now() - started,
       }));
@@ -1070,11 +1137,27 @@ export async function writeProjectEntry(
     }
 
     await atomicWrite(target, markdown);
-    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "create", opts.projectId) : null;
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
+    const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
+    const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "create", gitCommitProjectId) : null;
+    // P2 fix (2026-05-14 audit): when gitCommit is enabled but returns null
+    // (e.g. index.lock race, hook failure, EACCES), the markdown file is on
+    // disk but git has no record. Without cleanup, the next write for this
+    // slug hits the duplicate_slug race check forever (orphan wedge).
+    // Unlink the orphan and reject — parity with writeAbrainWorkflow R9 P1-3.
+    if (opts.settings.gitCommit && git === null) {
+      await fs.unlink(target).catch(() => {});
+      const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
+        operation: "reject",
+        reason: "git_commit_failed",
+        target: targetId,
+        duration_ms: Date.now() - started,
+      }));
+      return { slug, path: target, status: "rejected", reason: "git_commit_failed", auditPath, ...resultCtx };
+    }
+    const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
       operation: "create",
-      target: `project:${slug}`,
-      path: path.relative(projectRoot, target),
+      target: targetId,
+      path: path.relative(auditRoot, target),
       lint_result: "pass",
       git_commit: git,
       duration_ms: Date.now() - started,
@@ -1093,9 +1176,9 @@ export async function writeProjectEntry(
     };
   } catch (e: unknown) {
     const message = e instanceof Error ? e.message : String(e);
-    const auditPath = await appendAudit(projectRoot, withWriterAuditContext(opts, draft.sessionId, {
+    const auditPath = await audit(withWriterAuditContext(opts, draft.sessionId, {
       operation: "error",
-      target: `project:${slug}`,
+      target: targetId,
       reason: message,
       duration_ms: Date.now() - started,
     }));
@@ -1276,7 +1359,7 @@ async function acquireAbrainWorkflowLock(abrainHome: string, timeoutMs: number):
   return { release: handle.release };
 }
 
-async function appendAbrainWorkflowAudit(abrainHome: string, event: Record<string, unknown>): Promise<string> {
+async function appendAbrainAudit(abrainHome: string, lane: string, event: Record<string, unknown>): Promise<string> {
   const auditPath = abrainSedimentAuditPath(abrainHome);
   await fs.mkdir(path.dirname(auditPath), { recursive: true });
   const enriched = {
@@ -1284,11 +1367,15 @@ async function appendAbrainWorkflowAudit(abrainHome: string, event: Record<strin
     audit_version: AUDIT_SCHEMA_VERSION,
     pid: process.pid,
     abrain_home: path.resolve(abrainHome),
-    lane: "workflow",
+    lane,
     ...event,
   };
   await fs.appendFile(auditPath, `${JSON.stringify(enriched)}\n`, "utf-8");
   return auditPath;
+}
+
+async function appendAbrainWorkflowAudit(abrainHome: string, event: Record<string, unknown>): Promise<string> {
+  return appendAbrainAudit(abrainHome, "workflow", event);
 }
 
 async function gitCommitAbrain(abrainHome: string, filePath: string, slug: string): Promise<string | null> {

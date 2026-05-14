@@ -44,5 +44,5 @@
 ## 引用
 
 - 后续 per-repo 迁移：[abrain-pensieve-migration.md](./abrain-pensieve-migration.md)
-- ADR 0014「待实施」表：`workflows lane writer` (B1, ✅ shipped 2026-05-12, commit `b6a4a49`) → `一次性 per-repo 迁移` (B4, ✅ shipped 2026-05-12, commits `cc40792` + `a819302` + `37f03a6` + `122c0b2`) → 接下来是 B5 `writeProjectEntry` cutover (pending) + Lane G `/about-me` + identity / skills / habits writer (pending)
+- ADR 0014「待实施」表：`workflows lane writer` (B1, ✅ shipped 2026-05-12, commit `b6a4a49`) → `一次性 per-repo 迁移` (B4, ✅ shipped 2026-05-12, commits `cc40792` + `a819302` + `37f03a6` + `122c0b2`) → `B5 writeProjectEntry cutover` (✅ shipped 2026-05-13, commit `da4bf65`) → 接下来是 Lane G `/about-me` + identity / skills / habits writer (pending)
 - open-questions.md `Q1` 已 ✅ 结案

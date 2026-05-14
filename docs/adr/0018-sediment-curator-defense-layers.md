@@ -1,6 +1,6 @@
 # ADR 0018 — Sediment Curator Defense Layers（沉积器 curator 三层防御）
 
-- **状态**：Accepted（2026-05-13），**全部已实施**（pi-astack commits `07e4a3e` / `3c604c8`，abrain `f066279` 数据恢复）。
+- **状态**：Accepted（2026-05-13），**已实施后部分 revert**。Layer 1（curator prompt 约束）与 Layer 2 trigger_phrases UNION 保留；Layer 2 的 body_shrink / body_section_loss 机械门控于 `ee1c809` 按设计移除（信任 LLM 自进化哲学，见 world maxim `prefer-prompt-engineering-over-mechanical-guards`）；Layer 3 对应 smoke fixtures 同步移除。实施时间线：`07e4a3e`（三层落地）→ `3c604c8`（清理）→ `ee1c809`（revert 机械门控）。
 - **依赖**：[ADR 0014](0014-abrain-as-personal-brain.md) §"B5 sediment writer cutover"、[ADR 0016](0016-sediment-as-llm-curator.md) §"curator workflow"、[ADR 0017](0017-project-binding-strict-mode.md) §"sediment strict write guard"。
 - **触发**：B5 sediment writer cutover（2026-05-13）让 sediment auto-write 落 abrain 后，48 小时内出现 2 次 curator data-loss P0：abrain commits `521405b`（trigger_phrases 5 个被替换为不相关 4 个，丢失检索锚点）+ `2e8924d`（45 行 entry 被压成 27 行，4 evidence + 3 fix + principle 三个 load-bearing sections 整段消失，原本应该 CREATE with derives_from 的 downstream observation 被当成 UPDATE）。
 
@@ -8,16 +8,15 @@
 
 sediment curator（ADR 0016）的"update over create"原则在 LLM-driven 实践中表现出**过度激进**倾向：任何 topic 相关的 candidate 都被解释为 update 现有 entry，且 update 时的 compiled_truth "new current best truth, not append-only delta" 指令被解释为**整体覆盖**而非**整合 delta**。
 
-针对此问题落地**三层互补防御**：
+针对此问题落地**三层互补防御**（后经哲学反思，部分调整）：
 
-1. **Layer 1（curator prompt 上游约束）**：更严格区分 update vs create 的语义边界；明确 update 是 INTEGRATE delta，不是 REPLACE；trigger_phrases UNION 而非 REPLACE。
-2. **Layer 2（writer mechanical floor）**：不依赖 LLM 遵守 prompt。即使 curator 决定 overwrite，writer 在 `mergeUpdateMarkdown` 层拒绝两类危险 update：
-   - `body_shrink`：新 body < 旧 body * 0.5
-   - `body_section_loss`：旧 body ≥2 H2 sections，新 body retain < ceil(旧/2)
-   - trigger_phrases auto-UNION（writer 强制，curator 想 replace 也做不到）
-3. **Layer 3（smoke regression lock）**：所有上述 invariant 进 `smoke-memory-sediment.mjs`，防未来重构静默回归。
+1. **Layer 1（curator prompt 上游约束）** ✅ 保留：更严格区分 update vs create 的语义边界；明确 update 是 INTEGRATE delta，不是 REPLACE；trigger_phrases UNION 而非 REPLACE。
+2. **Layer 2（writer 层兜底）**：
+   - ~~`body_shrink`~~ / ~~`body_section_loss`~~ **已于 `ee1c809` 移除**。决策理由：silent reject 创建不可修复的死条目（curator 反复尝试同一操作 → 反复被拒 → 无人通知 → entry 永久腐烂），违反 sediment 自我进化哲学（信任 LLM curator 自纠错，偶然的知识降级可被后续迭代修复）。详见 world maxim `prefer-prompt-engineering-over-mechanical-guards`。
+   - trigger_phrases auto-UNION ✅ 保留（非 reject gate，为数据 enrichment；writer 强制 case-insensitive dedup，现有 casing 优先）。
+3. **Layer 3（smoke regression lock）**：body_shrink / body_section_loss 的 4 个 smoke fixtures 于 `ee1c809` 同步移除；trigger_phrases UNION 的 smoke fixtures 保留。
 
-一句话：**prompt 是主防线、writer 是机械底线、smoke 是 invariant 锁。三层独立失效才会再次 data loss。**
+当前防线总结：**prompt 是主防线（update-vs-create discipline + body-preservation contract）、trigger_phrases UNION 是数据 enrichment 兜底。自进化哲学下，偶然的知识降级可被后续迭代自我修复——不设机械 blocking，仅保留安全边界（sanitizer）。**
 
 ## 背景与问题
 
@@ -128,11 +127,18 @@ curator 把"topic 相关"等同于"update target"，又把 update 解释成 over
      replace trigger_phrases, you almost certainly meant CREATE.
    ```
 
-### Layer 2：Writer 机械底线（`extensions/sediment/writer.ts:mergeUpdateMarkdown`）
+### Layer 2：Writer 机械底线 — 已部分移除 ⚠️
 
-prompt 是 primary defense，但 LLM 总有可能不遵守。writer 层 enforce 三个**不可绕过**的 invariant：
+> **⚠️ `ee1c809` 后状态（2026-05-13 revert）：** 以下 (a) `body_shrink` 和 (b) `body_section_loss` 机械门控已被按设计移除，不再存在于当前 writer 代码中。保留此节仅作决策历史记录。
+> 移除理由：silent reject 创建不可修复的死条目（curator 反复尝试同一操作 → 反复被拒 → 无人通知 → entry 永久腐烂），违反 sediment 自我进化哲学。
+> 当前 writer 仅保留 **(c) trigger_phrases auto-UNION** 作为数据 enrichment 兜底（非阻塞门控），以及 **(d) skipBodyShrinkGuard 已随 (a)(b) 一并移除**，
+> `mergeUpdateMarkdown` 的 `mergeOpts: {} = {}` 参数是无用残留。
+>
+> 参考头部决策摘要获取当前实际防线。
 
-#### (a) `body_shrink` reject
+以下为 `07e4a3e` 原实施内容（历史参考）：
+
+#### (a) ~~`body_shrink` reject~~（已于 `ee1c809` 移除）
 
 ```text
 if (patch.compiledTruth !== undefined && !mergeOpts.skipBodyShrinkGuard) {
@@ -148,7 +154,7 @@ if (patch.compiledTruth !== undefined && !mergeOpts.skipBodyShrinkGuard) {
 - 阈值 0.5 选择依据：常规 trim（删少量 stale 句子）通常 <20%；激进 consolidation 罕见过半。0.5 loose 够允许合法 refactor，tight 够 catch 字节级 outright overwrite。
 - 注：单独的 byte-length 检测 catch 不住 `2e8924d` 类（只 shrunk 14% 但删 3 个 H2 sections），需要 (b) 补强。
 
-#### (b) `body_section_loss` reject
+#### (b) ~~`body_section_loss` reject~~（已于 `ee1c809` 移除）
 
 ```text
 if (patch.compiledTruth !== undefined && !mergeOpts.skipBodySectionLossGuard) {
@@ -168,7 +174,7 @@ if (patch.compiledTruth !== undefined && !mergeOpts.skipBodySectionLossGuard) {
 - 比 byte-length 更准抓 `2e8924d` 类——"短 shrink 但删 sections"。
 - 案例：旧 4 个 sections（Evidence / Fix / Principle / Implications）→ required ≥2；如果新 body 只保留 1 个，触发 reject。
 
-#### (c) trigger_phrases auto-UNION
+#### (c) trigger_phrases auto-UNION ✅ 保留
 
 ```text
 const existingRaw = frontmatter.trigger_phrases;
@@ -192,7 +198,7 @@ for (const p of [...existing, ...candidate]) {
 - case-insensitive dedup：`"alpha phrase"` 与 `"ALPHA Phrase"` 视为同一 phrase，保留先遇到的 casing（通常是 existing）。
 - 同时支持 scalar string 形式（手写 / legacy entry 可能用 `trigger_phrases: only-one` 而非列表）——defense-in-depth，避免 Array.isArray 检查导致 silent drop。
 
-#### (d) `skipBodyShrinkGuard` opt-in 旁路
+#### (d) ~~`skipBodyShrinkGuard` opt-in 旁路~~（已于 `ee1c809` 随 (a)(b) 一并移除）
 
 ```text
 mergeProjectEntries → updateProjectEntry({ skipBodyShrinkGuard: true })
@@ -201,7 +207,13 @@ mergeProjectEntries → updateProjectEntry({ skipBodyShrinkGuard: true })
 - 仅 `mergeProjectEntries` 设 true，因为 merge 是 consolidation：合成 body 比每个 source 都短是正常工作产物，不应被 floor 误杀。
 - archive / supersede / soft-delete 不传 compiledTruth，guard 自然 skip（`if (patch.compiledTruth !== undefined)`），无需 flag。
 
-### Layer 3：Smoke regression lock（`scripts/smoke-memory-sediment.mjs`）
+### Layer 3：Smoke regression lock — 已部分移除 ⚠️
+
+> **⚠️ `ee1c809` 后状态：** body_shrink / body_section_loss 的 4 个 smoke fixtures 已同步移除。
+> 保留的 fixtures：trigger_phrases UNION（create + update + legacy scalar form）、curator prompt marker 检查、sanitizer 防线。
+> 以下为历史 fixture 表（已不反映当前 smoke）：
+
+以下为 `07e4a3e` 原 fixture 清单（历史参考）：
 
 新增 6 个 curator prompt marker 断言 + 7 个 writer defense fixture：
 
@@ -217,16 +229,22 @@ mergeProjectEntries → updateProjectEntry({ skipBodyShrinkGuard: true })
 
 未来重构若 break 任一 invariant，smoke 立即报红。
 
-## 实施现状
+## 实施现状（含 revert 记录）
 
-| 工作 | 状态 | commit |
-|---|---|---|
-| 受损 entry restore | ✅ | abrain `f066279` (git checkout HEAD~1) |
-| Layer 1 prompt | ✅ | pi-astack `07e4a3e` 内 curator.ts |
-| Layer 2 writer | ✅ | pi-astack `07e4a3e` 内 writer.ts |
-| Layer 3 smoke | ✅ | pi-astack `07e4a3e` 内 smoke-memory-sediment.mjs |
-| 父仓 bump + re-enable | ✅ | `3e3adf1` settings.json autoLlmWriteEnabled: true |
-| production end-to-end verify | ✅ | abrain `c3c659f` (create) + `1695728` (update +14/-5, 6→7 H2 sections) |
+> **⚠️ 2026-05-14 审计更新：** 当前实际防线 = Layer 1 prompt + writer trigger_phrases UNION + sanitizer/storage gates。
+> 原机械门控（body_shrink, body_section_loss, skipBodyShrinkGuard, 对应 smoke fixtures）已于 `ee1c809` 移除。
+> 下方表格记录完整实施时间线，标注哪些已保留、哪些已移除。
+
+| 工作 | 状态 | commit | 当前 |
+|---|---|---|---|
+| 受损 entry restore | ✅ | abrain `f066279` (git checkout HEAD~1) | — |
+| Layer 1 prompt | ✅ | pi-astack `07e4a3e` 内 curator.ts | ✅ 保留 |
+| Layer 2 writer trigger_phrases UNION | ✅ | pi-astack `07e4a3e` 内 writer.ts | ✅ 保留 |
+| Layer 2 writer body_shrink / body_section_loss | ✅ | pi-astack `07e4a3e` → **`ee1c809`** | ❌ 已移除 |
+| Layer 3 smoke: trigger_phrases UNION + prompt markers | ✅ | pi-astack `07e4a3e` 内 smoke | ✅ 保留 |
+| Layer 3 smoke: body_shrink / body_section_loss fixtures | ✅ | pi-astack `07e4a3e` → **`ee1c809`** | ❌ 已移除 |
+| 父仓 bump + re-enable | ✅ | `3e3adf1` settings.json autoLlmWriteEnabled: true | — |
+| production end-to-end verify | ✅ | abrain `c3c659f` (create) + `1695728` (update +14/-5, 6→7 H2 sections) | — |
 
 ## 双模型 review 关键发现
 
@@ -235,9 +253,19 @@ mergeProjectEntries → updateProjectEntry({ skipBodyShrinkGuard: true })
 
 两个 model 都 GO。
 
-## 不变量保护范围
+## 不变量保护范围（当前 `ee1c809` 后）
 
-| 保护对象 | 由哪层 enforce | 失效条件 |
+> **⚠️ 2026-05-14 审计更新：** 当前不变量的实际保护机制：
+> - `trigger_phrases` 可被覆盖（无 reject）：writer UNION 兜底
+> - `entry` load-bearing sections：**无机械保护**（信任 curator prompt + 后续迭代自修复）
+> - `entry.body` 50% shrink：**无机械保护**
+> - `entry.body` H2 sections：**无机械保护**
+>
+> 原 `07e4a3e` 声称的 Layer 2 guard 保护已不再适用。详见决策摘要。
+
+以下为 `07e4a3e` 原不变量的历史记录：
+
+| 保护对象 | 由哪层 enforce（`07e4a3e`） | 失效条件 |
 |---|---|---|
 | Entry 不被整体覆盖 | Layer 1 prompt + Layer 2 (a) body_shrink | 字节 ≥50% 保留 |
 | H2 sections 不被 wholesale 删除 | Layer 2 (b) body_section_loss | 旧有 ≥2 H2 时新版必须 retain ≥ ceil(旧/2) |
@@ -253,7 +281,9 @@ mergeProjectEntries → updateProjectEntry({ skipBodyShrinkGuard: true })
 
 ## 经验教训
 
-1. **prompt 单层防御不够**。即使 prompt 写得严密，LLM 在解释 "update over create" / "new best truth" 时仍可能与设计意图偏离。Critical 数据通路上必须有 mechanical floor。
+## 经验教训
+
+1. ~~prompt 单层防御不够~~（`07e4a3e` 原始结论）。**`ee1c809` 后修订：** 机械门控的 silent reject 制造不可修复的死条目，比单次 LLM knowledge degradation 危害更严重。当前策略改为信任 LLM curator 的自进化能力——单次知识降级可被后续迭代自我修复。保留 trigger_phrases UNION 作为安全的数据 enrichment 兜底（非阻塞），同时依赖 sanitizer 作为硬安全边界。详见 world maxim `prefer-prompt-engineering-over-mechanical-guards`。
 2. **Byte-length 不是 semantic loss 的好 proxy**。`2e8924d` 只 shrunk 14% 字节但删了全部 load-bearing sections。Structural check（H2 retention）才能抓"短 shrink 但 wholesale section loss"。
 3. **Sample size = 2 已构成 systematic problem 证据**。首次 P0 仅 trigger_phrases 被换、易被忽视；第二次 body overwrite 才暴露真实严重性。第一次发生时若立即介入，可避免第二次。今后类似单次"奇怪"observation 应当被认真追踪。
 4. **mutation API 的 guard 必须区分 op 语义**。同一个 `mergeUpdateMarkdown` 服务 update / archive / supersede / merge 四种 op，每种 op 的 invariant 不同（merge 允许 shrink；update 不允许；archive 不传 compiledTruth）。Guard 必须读 op 上下文或显式 opt-in flag 旁路，否则就会出现 opus 找到的"merge 被 update guard 误杀"现象。

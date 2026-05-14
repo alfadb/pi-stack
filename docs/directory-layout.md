@@ -62,8 +62,8 @@ alfadb/pi-astack/
 │       └── open-questions.md          # 适配新架构的待澄清问题
 │
 ├── extensions/                        # ✅ pi 行为扩展（alfadb own）
-│   ├── dispatch/                      # ✅ 已实现：dispatch_agent + dispatch_agents（子进程隔离）
-│   │   ├── index.ts                   # 注册 dispatch_agent / dispatch_agents（ADR 0009）；sub-pi env 强制注入 PI_ABRAIN_DISABLED=1
+│   ├── dispatch/                      # ✅ 已实现：dispatch_agent + dispatch_parallel（子进程隔离）
+│   │   ├── index.ts                   # 注册 dispatch_agent / dispatch_parallel（ADR 0009）；sub-pi env 强制注入 PI_ABRAIN_DISABLED=1
 │   │   └── input-compat.ts            # JSON 字符串 unwrap + 类型兑底（ADR 0009 §2.5）
 │   ├── vision/                        # ✅ 已实现：vision tool（自动选最佳 vision model）
 │   │   └── index.ts
@@ -85,6 +85,9 @@ alfadb/pi-astack/
 │   │   ├── doctor.ts                  # doctor-lite aggregate health report
 │   │   ├── migrate.ts                 # legacy migration dry-run planner (read-only inventory)
 │   │   ├── migrate-go.ts              # B4 per-repo 一次性迁移执行器 (.pensieve → ~/.abrain/projects/<id>/)
+│   │   ├── git-times.ts               # git log 时间戳 triangulation（created/updated 从 git/fs/frontmatter 三路交叉）
+│   │   ├── legacy-seeds.ts            # 5 条知识 maxim legacy seed（Linus/Ousterhout/Google taste review + derived）
+│   │   ├── rewrite-cross-scope.ts     # 跨 scope wikilink 显式 prefix rewriter（D-decision）
 │   │   ├── graph.ts                   # graph snapshot + check-backlinks + rebuild writer
 │   │   └── index-file.ts              # generated enhanced _index.md rebuild writer
 │   ├── sediment/                      # ✅ 实现：project-only writer + direct LLM auto-write + ADR 0016 curator/update substrate + B1 abrain workflows lane writer
@@ -170,16 +173,16 @@ Human-facing 命令：
 
 ### extensions/dispatch/
 
-子进程隔离的 `dispatch_agent` / `dispatch_agents`。每个子 agent = 独立 pi 进程，通过 JSON 事件流通信。
+子进程隔离的 `dispatch_agent` / `dispatch_parallel`。每个子 agent = 独立 pi 进程，通过 JSON 事件流通信。
 
 | 文件 | 说明 |
 |------|------|
-| `index.ts` | 注册 dispatch_agent + dispatch_agents；子进程 spawn + JSON 事件流解析 |
+| `index.ts` | 注册 dispatch_agent + dispatch_parallel；子进程 spawn + JSON 事件流解析 |
 | `input-compat.ts` | JSON 字符串 unwrap（最多 2 层）+ tools array→CSV + timeoutMs string→number |
 
 工具签名（与 ADR 0009 一致）：
 - `dispatch_agent(model, thinking, prompt, tools?, timeoutMs?)`
-- `dispatch_agents(tasks[{model, thinking, prompt, timeoutMs?}], timeoutMs?)`
+- `dispatch_parallel(tasks[{model, thinking, prompt, timeoutMs?}], timeoutMs?)`
 
 ### extensions/vision/
 

@@ -182,6 +182,10 @@ async function main() {
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
     const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow } = req("./sediment/writer.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
+    // P2 fix (2026-05-14): smoke tests don't use real git repos, so disable
+    // gitCommit by default. Tests that need git (migration tests) override
+    // with gitCommit: true explicitly.
+    DEFAULT_SEDIMENT_SETTINGS.gitCommit = false;
     const { buildRunWindow, saveCheckpoint, loadCheckpoint, loadSessionCheckpoint, saveSessionCheckpoint } = req("./sediment/checkpoint.js");
     const { detectProjectDuplicate } = req("./sediment/dedupe.js");
     const { parseExplicitMemoryBlocks } = req("./sediment/extractor.js");
@@ -1892,6 +1896,17 @@ This is a cross-project review pipeline body with enough content.
       );
       fs.unlinkSync(path.join(goAbrain, "dirty-file.txt"));
 
+      // P0 fix (2026-05-14): extract-disposition seeds require the canonical
+      // global copy to exist in abrain before the seed can be pruned. Create
+      // it and commit so the migration proceeds cleanly.
+      fs.mkdirSync(path.join(goAbrain, "knowledge"), { recursive: true });
+      fs.writeFileSync(
+        path.join(goAbrain, "knowledge", "taste-review-content.md"),
+        "---\nkind: fact\n---\n# Taste Review Content\n\nContent here.\n",
+      );
+      execFileSync("git", ["-C", goAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", goAbrain, "commit", "-q", "-m", "seed canonical copy"]);
+
       // 3) Happy path migration
       const result = await runMigrationGo(goOpts);
       assert(result.ok, `migration should succeed, got failures: ${JSON.stringify(result.preconditionFailures)}`);
@@ -1906,6 +1921,7 @@ This is a cross-project review pipeline body with enough content.
       // state.md is visible but unsupported, matching dry-run's skipped row.
       // Legacy Pensieve bootstrap seeds are counted as skipped too, but are
       // pruned from the project repo instead of copied into projects/<id>/.
+      // The canonical global copy was created above so the extract seed can be pruned.
       // 3 skips = state.md + 1 extract seed (taste-review) + 1 obsolete seed (run-when-committing).
       assert(result.skippedCount === 3, `support state.md + legacy seeds should be skipped, got ${result.skippedCount} skips: ${JSON.stringify(result.entries)}`);
       assert(result.seedPrunedCount === 2, `expected 2 legacy seeds pruned (1 extract + 1 obsolete), got ${result.seedPrunedCount}: ${JSON.stringify(result.entries)}`);
@@ -3760,7 +3776,7 @@ Body.
         // Seed an entry.
         const seedRes = await writeProjectEntry(
           { title: "RMW Race Probe", kind: "fact", status: "active", confidence: 5, compiledTruth: "# RMW Race Probe\n\noriginal body content for race test.", timelineNote: "smoke seed", sessionId: "smoke-rmw" },
-          { projectRoot: raceRoot, abrainHome: raceTarget.abrainHome, projectId: raceTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+          { projectRoot: raceRoot, abrainHome: raceTarget.abrainHome, projectId: raceTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, auditContext: { lane: "explicit" } },
         );
         assert(seedRes.status === "created", `seed write should create, got: ${seedRes.status} / ${seedRes.reason}`);
         const targetPath = seedRes.path;
@@ -3774,7 +3790,7 @@ Body.
         const updatePromise = updateProjectEntry(
           "rmw-race-probe",
           { compiledTruth: "# RMW Race Probe\n\nNEW BODY — should not resurrect a deleted entry.", sessionId: "smoke-rmw", timelineNote: "smoke update" },
-          { projectRoot: raceRoot, abrainHome: raceTarget.abrainHome, projectId: raceTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+          { projectRoot: raceRoot, abrainHome: raceTarget.abrainHome, projectId: raceTarget.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, auditContext: { lane: "explicit" } },
         );
         const deletePromise = deleteProjectEntry(
           "rmw-race-probe",

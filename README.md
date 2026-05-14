@@ -11,7 +11,7 @@
 > **v7.1 update (2026-05-09 起持续 v1.x 迭代，[ADR 0014](./docs/adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](./docs/brain-redesign-spec.md)):** `~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑——七区结构（identity / skills / habits / workflows / projects / knowledge / vault）。`.pensieve/` 已由 ADR 0014 废止（设计层面），当前 14 仓按需通过 `/memory migrate --go` 一次性迁移到 `~/.abrain/projects/<id>/`（B4 ✅ shipped 2026-05-12；B4.5 project binding strict mode ✅ shipped 2026-05-12，见 [ADR 0017](./docs/adr/0017-project-binding-strict-mode.md)：先 `/abrain bind --project=<id>`，再 `/memory migrate --dry-run` / `--go`；`/memory migrate --project=<id>` 已废弃并拒绝）。已 ship 节点：vault P0a-c 子集（`/secret` + `/vault`，age 加密 + portable identity backend）；B1 abrain workflows lane writer；B3+B7 per-file migration substrate 剥离；B4 per-repo `/memory migrate --go` 含 preflight + frontmatter 归一化 + pipeline routing + 索引重建 + pre-migration SHA rollback。待实施：B5 sediment writeProjectEntry cutover 到 abrain projects 路径、P0d vault TUI wizard、Lane G (about-me) + identity/skills/habits writer。
 >
 > 历史架构演进：v6.5（gbrain 唯一存储 + 三模型投票）→ v6.6（单 agent + lookup tools）→ v6.7（双轨 gbrain sources）
-> → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）→ v7.1（abrain 重定位为数字孪生）**。详见 [docs/adr/](./docs/adr/) 17 条 ADR（含 [ADR 0015](./docs/adr/0015-memory-search-llm-driven-retrieval.md) memory_search LLM-driven retrieval、[ADR 0016](./docs/adr/0016-sediment-as-llm-curator.md) sediment 从 gate-heavy extractor 转向 LLM curator，以及 [ADR 0017](./docs/adr/0017-project-binding-strict-mode.md) project binding strict mode）。
+> → v6.8（pensieve+gbrain 双 target）→ **v7（纯 markdown+git）→ v7.1（abrain 重定位为数字孪生）**。详见 [docs/adr/](./docs/adr/) 18 条 ADR（含 [ADR 0015](./docs/adr/0015-memory-search-llm-driven-retrieval.md) memory_search LLM-driven retrieval、[ADR 0016](./docs/adr/0016-sediment-as-llm-curator.md) sediment 从 gate-heavy extractor 转向 LLM curator，以及 [ADR 0017](./docs/adr/0017-project-binding-strict-mode.md) project binding strict mode、[ADR 0018](./docs/adr/0018-sediment-curator-defense-layers.md) curator 三层防御）。
 
 ## 是什么
 
@@ -34,11 +34,11 @@
 | Sediment 写入 | 单 sidecar 写入；LLM curator → sensitive sanitize → memory_search lookup → op∈{create,update,merge,archive,supersede,delete,skip} → lint → atomic write → audit → git（ADR 0016 curator 模型） |
 | 主会话角色 | 记忆只读（`memory_search` / `memory_get` / `memory_list` / `memory_neighbors`）；vault 走用户授权 `vault_release(key, scope?, reason?)`（sub-pi 不注册；bash 侧走 `$VAULT_*` / `$PVAULT_*` / `$GVAULT_*` 注入，默认 stdout 不回流 LLM） |
 | 条目格式 | frontmatter v1 + compiled truth + `## Timeline`（借鉴 gbrain 方法论） |
-| Multi-agent 能力 | `dispatch_agent`/`dispatch_agents` 基础能力；主会话自由组合；sediment 单 agent 不借用 |
+| Multi-agent 能力 | `dispatch_agent`/`dispatch_parallel` 基础能力；主会话自由组合；sediment 单 agent 不借用 |
 | 知识模型 | 7 种 kind（maxim/decision/anti-pattern/pattern/fact/preference/smell）+ confidence 0-10 + lifetime 正交 |
 | Facade 模式 | LLM 只看到统一的 `memory_*` 读接口，底层存储和索引拓扑变更不影响上层 |
 
-详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 17 条 ADR。
+详见 [docs/memory-architecture.md](./docs/memory-architecture.md)（权威设计规范，§4.1 物理拓扑部分被 ADR 0014 supersede）+ [docs/brain-redesign-spec.md](./docs/brain-redesign-spec.md)（abrain 七区拓扑权威）+ [docs/adr/](./docs/adr/) 18 条 ADR。
 
 > ADR 状态提示：ADR 0002 / 0005 / 0007 / 0008 / 0011 / 0012 被 memory-architecture.md superseded；ADR 0004 被 ADR 0010 superseded；memory-architecture.md §4.1（物理拓扑） + ADR 0013 Lane B/D 被 ADR 0014 §D3 supersede；ADR 0013 Lane C 的 G2-G13 / readiness / rolling / rate / sampling 机械 gate 被 ADR 0016 删除；ADR 0017 已实施 B4.5 Project Binding Strict Mode，并取代 ADR 0014 / brain-redesign-spec 中旧的 `_bindings.md` + remote/cwd 推断模型（详见各 ADR 顶部状态字段）。
 >
@@ -108,7 +108,7 @@ pi install git:github.com/alfadb/pi-astack
 ## 内容
 
 ### Extensions（pi 行为扩展）
-- `dispatch/` — subprocess-based `dispatch_agent` / `dispatch_agents`（主会话自由组合）；每个子 agent 是独立 pi 进程，OS 级隔离（ADR 0009）。子进程 env 强制注入 `PI_ABRAIN_DISABLED=1` 让 abrain extension 在 sub-pi 中 register nothing（brain-redesign-spec v1.3 P0-1）
+- `dispatch/` — subprocess-based `dispatch_agent` / `dispatch_parallel`（主会话自由组合）；每个子 agent 是独立 pi 进程，OS 级隔离（ADR 0009）。子进程 env 强制注入 `PI_ABRAIN_DISABLED=1` 让 abrain extension 在 sub-pi 中 register nothing（brain-redesign-spec v1.3 P0-1）
 - `memory/` — ✅ 主会话记忆 read tool（`memory_search/get/list/neighbors`），Facade 模式封装；`memory_search` 走 ADR 0015 双阶段 LLM retrieval（stage1候选 + stage2精排，默认 stage1 thinking=off + stage2 thinking=off（两阶段模型都默认 `deepseek/deepseek-v4-flash`，满足交互式延迟要求，可通过 `memory.search.stage1Thinking / stage2Thinking` 调高）），失败 hard error，不降级到 grep；结果带 created/updated/rank_reason/timeline_tail 新鲜度信号；只读扫描 `.pensieve/` + 可选 `~/.abrain/`；另含 human slash commands `/memory doctor-lite`、`/memory lint`、`/memory migrate --dry-run [--report]`、`/memory check-backlinks`、`/memory rebuild --graph`、`/memory rebuild --index`。B4.5 后 `/memory migrate` 必须先由 `/abrain bind --project=<id>` 建立 strict binding，迁移命令不再接收 `--project`。
 - `abrain/` — ✅ vault P0a-c 子集（ADR 0014 §D4）：`/vault status` / `/vault init [--backend=X]` + `/secret set/list/forget --global <key>=<value>`。Backend detection 优先级 ssh-key → gpg-file → macos → secret-service → pass → passphrase-only → disabled（[vault-bootstrap.md](./docs/migration/vault-bootstrap.md) v1.4 portable-identity 矩阵；容器场景头号 first-class）。Master key（`~/.abrain/.vault-master.age`）用 portable identity 加密；vault writer 不接触明文 master key，全部加密走 `~/.abrain/.vault-pubkey`。P0c.read core substrate、`vault_release` LLM tool 与 bash 注入已落地（unlock master + default-deny TUI 授权 + decrypt per-key secret + literal redaction / default-withheld bash output）。`/secret` 已默认 boot-time active project，`$VAULT_<key>` project→global fallback、`$GVAULT_<key>` global-only、`$PVAULT_<key>` project-only；`vault_release(key, scope?, reason?)` 可选 `'global'` / `'project'`；`/secret list --all-projects` 扫描全部 `projects/<id>/vault` 的 metadata，不解密。详 [brain-redesign-spec.md §6](./docs/brain-redesign-spec.md)
 - `imagine/` — ✅ `imagine(prompt, size?, quality?, style?, model?)` tool，OpenAI Responses API 生图（默认 `gpt-image-2`，可通过 `model?` 覆盖）；PNG 落 `.pi-astack/imagine/`，调用方支持图片输入则 inline 返回
@@ -171,7 +171,7 @@ pi install git:github.com/alfadb/pi-astack
 - model-facing tool 输入宽进严出，但保持 strict schema；兼容逻辑放 `n(args)` argument preparation hook
 - 主会话只读必须机制化：sediment 独享写工具注册
 
-详见 [docs/adr/0001-pi-astack-as-personal-pi-workflow.md](./docs/adr/0001-pi-astack-as-personal-pi-workflow.md) + 后续 ADR 0002-0012 + [docs/memory-architecture.md](./docs/memory-architecture.md)。
+详见 [docs/adr/0001-pi-astack-as-personal-pi-workflow.md](./docs/adr/0001-pi-astack-as-personal-pi-workflow.md) + 后续 ADR 0002-0018 + [docs/memory-architecture.md](./docs/memory-architecture.md)。
 
 ## License
 

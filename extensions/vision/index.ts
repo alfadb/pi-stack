@@ -248,7 +248,13 @@ async function analyzeImage(
     m.provider === deps.excludeMain.provider &&
     m.id === deps.excludeMain.id;
 
-  const available = await deps.modelRegistry.getAvailable();
+  // Defensive: getAvailable() is not guaranteed on all pi versions.
+  // model-curator already uses the same fallback pattern (getAvailable ?? getAll).
+  const reg = deps.modelRegistry as any;
+  const available: Array<{ provider: string; id: string; input?: string[]; cost?: { input?: number } }> =
+    typeof reg.getAvailable === "function"
+      ? await reg.getAvailable()
+      : await reg.getAll?.() ?? [];
   const candidates = available
     .filter((m) => m.input?.includes("image"))
     .filter((m) => !isExcluded(m))
@@ -393,7 +399,7 @@ export default function (pi: ExtensionAPI) {
       "want a dedicated vision model). Automatically selects the strongest " +
       "vision-capable model from available providers. Accepts base64-encoded " +
       "images or file paths confined to the project directory.",
-    promptSnippet: "vision(imageBase64?, path?, prompt) — analyze an image with the best vision model",
+    promptSnippet: "vision(imageBase64?, path?, prompt, mimeType?) — analyze an image with the best vision model",
     promptGuidelines: [
       "Use vision when the user provides an image (screenshot, photo, diagram) and your current model cannot process images.",
       "Prefer imageBase64 for images already in context. Use path for local image files within the project.",

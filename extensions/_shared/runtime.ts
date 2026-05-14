@@ -256,6 +256,9 @@ export function abrainProjectVaultDir(abrainHome: string, projectId: string): st
 export function abrainWorkflowsDir(abrainHome: string): string {
   return path.join(path.resolve(abrainHome), "workflows");
 }
+export function abrainKnowledgeDir(abrainHome: string): string {
+  return path.join(path.resolve(abrainHome), "knowledge");
+}
 export function abrainProjectWorkflowsDir(abrainHome: string, projectId: string): string {
   return path.join(abrainProjectDir(abrainHome, projectId), "workflows");
 }

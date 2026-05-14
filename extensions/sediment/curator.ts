@@ -12,12 +12,12 @@ interface ModelRegistryLike {
 }
 
 export type CuratorDecision =
-  | { op: "create"; rationale?: string }
-  | { op: "update"; slug: string; patch: ProjectEntryUpdateDraft; rationale?: string }
-  | { op: "merge"; target: string; sources: string[]; compiledTruth: string; timelineNote?: string; rationale?: string }
-  | { op: "archive"; slug: string; reason: string; rationale?: string }
-  | { op: "supersede"; oldSlug: string; newSlug?: string; reason: string; rationale?: string }
-  | { op: "delete"; slug: string; mode: DeleteMode; reason: string; rationale?: string }
+  | { op: "create"; scope?: "world"; rationale?: string }
+  | { op: "update"; slug: string; scope?: "world"; patch: ProjectEntryUpdateDraft; rationale?: string }
+  | { op: "merge"; target: string; sources: string[]; scope?: "world"; compiledTruth: string; timelineNote?: string; rationale?: string }
+  | { op: "archive"; slug: string; scope?: "world"; reason: string; rationale?: string }
+  | { op: "supersede"; oldSlug: string; newSlug?: string; scope?: "world"; reason: string; rationale?: string }
+  | { op: "delete"; slug: string; mode: DeleteMode; scope?: "world"; reason: string; rationale?: string }
   | { op: "skip"; reason: string; rationale?: string };
 
 export interface CuratorAudit {
@@ -87,6 +87,7 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
   const obj = payload as Record<string, unknown>;
   const op = asString(obj.op)?.toLowerCase();
   const rationale = asString(obj.rationale ?? obj.why);
+  const scope = asString(obj.scope) === "world" ? "world" as const : undefined;
 
   if (op === "skip") {
     return { op: "skip", reason: asString(obj.reason) ?? rationale ?? "curator decided to skip", ...(rationale ? { rationale } : {}) };
@@ -105,7 +106,7 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
       ...(Array.isArray(patchObj.trigger_phrases) ? { triggerPhrases: patchObj.trigger_phrases.map(String).filter(Boolean) } : {}),
       timelineNote: asString(obj.timeline_note ?? obj.timelineNote) ?? rationale ?? "updated by sediment curator",
     };
-    return { op: "update", slug, patch, ...(rationale ? { rationale } : {}) };
+    return { op: "update", slug, ...(scope ? { scope } : {}), patch, ...(rationale ? { rationale } : {}) };
   }
 
   if (op === "merge") {
@@ -117,13 +118,13 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
     if (invalidSource) throw new Error(`curator merge source is not an allowed neighbor: ${invalidSource}`);
     if (!sources.includes(target)) sources.unshift(target);
     if (!compiledTruth) throw new Error("curator merge requires compiled_truth");
-    return { op: "merge", target, sources: Array.from(new Set(sources)), compiledTruth, timelineNote: asString(obj.timeline_note ?? obj.timelineNote) ?? rationale, ...(rationale ? { rationale } : {}) };
+    return { op: "merge", target, sources: Array.from(new Set(sources)), ...(scope ? { scope } : {}), compiledTruth, timelineNote: asString(obj.timeline_note ?? obj.timelineNote) ?? rationale, ...(rationale ? { rationale } : {}) };
   }
 
   if (op === "archive") {
     const slug = asString(obj.slug);
     if (!slug || !allowedSlugs.has(slug)) throw new Error(`curator archive slug is not an allowed neighbor: ${slug || "<missing>"}`);
-    return { op: "archive", slug, reason: asString(obj.reason) ?? rationale ?? "archived by sediment curator", ...(rationale ? { rationale } : {}) };
+    return { op: "archive", slug, ...(scope ? { scope } : {}), reason: asString(obj.reason) ?? rationale ?? "archived by sediment curator", ...(rationale ? { rationale } : {}) };
   }
 
   if (op === "supersede") {
@@ -131,7 +132,7 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
     const newSlug = asString(obj.new_slug ?? obj.newSlug);
     if (!oldSlug || !allowedSlugs.has(oldSlug)) throw new Error(`curator supersede old_slug is not an allowed neighbor: ${oldSlug || "<missing>"}`);
     if (newSlug && !allowedSlugs.has(newSlug)) throw new Error(`curator supersede new_slug is not an allowed neighbor: ${newSlug}`);
-    return { op: "supersede", oldSlug, ...(newSlug ? { newSlug } : {}), reason: asString(obj.reason) ?? rationale ?? "superseded by sediment curator", ...(rationale ? { rationale } : {}) };
+    return { op: "supersede", oldSlug, ...(newSlug ? { newSlug } : {}), ...(scope ? { scope } : {}), reason: asString(obj.reason) ?? rationale ?? "superseded by sediment curator", ...(rationale ? { rationale } : {}) };
   }
 
   if (op === "delete") {
@@ -140,6 +141,7 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
     return {
       op: "delete",
       slug,
+      ...(scope ? { scope } : {}),
       mode: asDeleteMode(obj.mode),
       reason: asString(obj.reason) ?? rationale ?? "deleted by sediment curator",
       ...(rationale ? { rationale } : {}),
@@ -147,25 +149,26 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
   }
 
   if (op === "create") {
-    return { op: "create", ...(rationale ? { rationale } : {}) };
+    return { op: "create", ...(scope ? { scope } : {}), ...(rationale ? { rationale } : {}) };
   }
 
   throw new Error(`unsupported curator op: ${op || "<missing>"}`);
 }
 
-function projectEntriesOnly(entries: MemoryEntry[]): MemoryEntry[] {
-  // Post-2026-05-13 sediment cutover: project-scoped entries live in
-  // `<abrainHome>/projects/<projectId>/`, not in `<projectRoot>/.pensieve/`.
-  // The pre-cutover filter required sourcePath to be under .pensieve/; we
-  // now keep ANY project-scoped entry that the memory store returned.
-  // resolveStores() already constrains the project store list to the
-  // bound project (no cross-project leakage).
-  return entries.filter((entry) => entry.scope === "project");
+function relevantEntriesForCurator(entries: MemoryEntry[]): MemoryEntry[] {
+  // Include both project and world entries so the curator can:
+  //   1. dedupe world candidates against existing world maxims
+  //   2. run full lifecycle ops (update/merge/archive/supersede/delete) on world entries
+  //   3. detect cross-scope relationships (project specialization of world principle)
+  // Without world neighbors, world store is structurally append-only and
+  // ADR 0016 "knowledge is self-evolving" is violated for world scope.
+  return entries.filter((entry) => entry.scope === "project" || entry.scope === "world");
 }
 
 function entryForPrompt(entry: MemoryEntry): string {
   return [
     `## ${entry.slug}`,
+    `scope: ${entry.scope ?? "project"}`,
     `title: ${entry.title}`,
     `kind: ${entry.kind}`,
     `status: ${entry.status}`,
@@ -213,7 +216,13 @@ function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): 
     "Output JSON only, one object. No markdown wrapper.",
     "",
     "Allowed operations for this implementation batch:",
-    "- {\"op\":\"create\", \"rationale\": string}",
+    "- {\"op\":\"create\", \"scope\"?: \"world\", \"rationale\": string}  — scope omitted defaults to project",
+    "",
+    "Scope judgment (when to set scope: world on create):",
+    "- Use scope: world when the candidate is a durable cross-project engineering maxim, principle, or pattern that does NOT depend on any specific project's context, file paths, or module names.",
+    "- Use project scope (default, omit scope) when the candidate is a project-specific fact, decision, observation, or pattern tied to the current project's codebase, architecture, or workflow.",
+    "- Signal: if you could drop the candidate into any other project's knowledge base and it would still be true and useful, it's world scope. If it mentions or depends on this project's specifics, it's project scope.",
+    "- The same agent_end window can produce both project and world entries from different aspects of the same debugging session (e.g. 'pi-astack entry 4 runs slowest' is project fact; 'agent_end handlers must defer async' is world principle).",
     "- {\"op\":\"update\", \"slug\": one_of_neighbors, \"patch\": {\"title\"?: string, \"kind\"?: string, \"status\"?: string, \"confidence\"?: number, \"compiled_truth\"?: string, \"trigger_phrases\"?: string[]}, \"timeline_note\": string, \"rationale\": string}",
     "- {\"op\":\"merge\", \"target\": one_of_neighbors, \"sources\": [one_or_more_neighbors], \"compiled_truth\": string, \"timeline_note\": string, \"rationale\": string}",
     "- {\"op\":\"skip\", \"reason\": string, \"rationale\": string}",
@@ -243,6 +252,12 @@ function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): 
     "- timeline_note should be short and evidence-based.",
     "- Do not invent slugs. update/merge/archive/delete/supersede slugs must be one of the neighbor slugs.",
     "- Cross-scope wikilink hygiene (soft, prefer but not strict): if compiled_truth references entries outside this project, prefer the explicit scope prefix `[[world:slug]]` (for ~/.abrain/knowledge/ maxims and durable knowledge), `[[workflow:slug]]` (for ~/.abrain/workflows/ pipelines), or `[[project:<projectId>:slug]]` (for other projects). Bare `[[slug]]` resolves to the current project by default and to global as fallback during read, but explicit prefixes reduce future graph-rewrite work. Do not invent slugs you have not seen.",
+    "",
+    "Scope stickiness (CRITICAL — added 2026-05-14 after world-scope neighbor pool opened):",
+    "- Scope is immutable on update/merge/archive/supersede/delete. You MUST NOT change an entry's scope via these operations. The scope shown in the neighbor header is authoritative.",
+    "- If a project-scope candidate matches a world-scope neighbor by topic but adds project-specific evidence: output CREATE (scope: project), NOT update the world entry. The world entry is the general principle; the project entry is a specialization.",
+    "- If a world-scope candidate (a cross-project maxim/principle) matches an existing world entry: output UPDATE or MERGE or SKIP, NOT create. World store must self-evolve, not grow append-only duplicates.",
+    "- If a world-scope candidate matches a project entry by topic and the project entry's claim is fully subsumed by the candidate: output CREATE (scope: world) for the world entry. In a future pass the world entry may be linked to supersede the project entry; do not attempt to do both in one decision.",
     "- Wikilink target discipline: `[[...]]` MUST point to an existing abrain memory entry slug (one of the neighbor slugs shown below, or a global maxim/workflow slug you have memory_search'd for). ADR files (`docs/adr/00XX-name.md`), source code paths, file basenames, section anchors, and external URLs MUST be referenced in PROSE — NEVER as `[[...]]`. Forms like `[[project:foo:0018-some-adr]]` are bugs: that target is not an abrain entry, doctor-lite will report it as a dead link, and `memory_search` won't find it. Write `documented in ADR 0018 (docs/adr/0018-some-adr.md)` or `see the brain-redesign-spec` instead.",
     "- Preserve existing wikilinks verbatim when merging. Only change a `[[...]]` form if you are deliberately re-pointing it; never silently drop or rewrite an existing link's slug.",
     "- Example update line: `This refines [[world:reduce-complexity-before-adding-branches]] in the writer-substrate context.`",
@@ -318,7 +333,7 @@ export async function curateProjectDraft(
   let entries: MemoryEntry[];
   let cards: any[];
   try {
-    entries = projectEntriesOnly(await loadEntries(deps.projectRoot, deps.memorySettings, deps.signal));
+    entries = relevantEntriesForCurator(await loadEntries(deps.projectRoot, deps.memorySettings, deps.signal));
     cards = await llmSearchEntries(
       entries,
       { query: makeSearchPrompt(draft), filters: { limit: 5, status: ["all"] } },
@@ -347,9 +362,12 @@ export async function curateProjectDraft(
     ...(typeof card.rank_reason === "string" ? { rank_reason: card.rank_reason } : {}),
   }));
 
+  // Even with zero neighbors, run the curator model: it can still classify
+  // scope (project vs world) and produce a richer rationale. Skipping the
+  // curator on empty neighbors used to force-create project-scope entries
+  // for all candidates that happened to have no memory_search hits.
   if (neighbors.length === 0) {
-    const decision: CuratorDecision = { op: "create", rationale: "no relevant existing project memory found" };
-    return { decision, audit: { decision, neighbors: neighborAudit, stage_ms: { search: searchMs, decide: 0, total: Date.now() - totalStart } } };
+    // fall through to curator call below
   }
 
   const decideStart = Date.now();

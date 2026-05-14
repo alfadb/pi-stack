@@ -5,9 +5,10 @@
 - **决策者**: alfadb
 - **依赖**: ADR 0001(pi-astack 定位)/ ADR 0006(组件合并)
 - **补充说明（2026-05-07）**：本 ADR 中的 "sediment voter 借 dispatch_agents 跑 3 个 model" 例子已被 ADR 0010 证伪。sediment 已转为单 agent + lookup tools（memory-architecture.md §8.2），不再是 dispatch_agents 的消费者。dispatch_agent/agents 作为主会话基础能力的设计初衷不变。
+- **补充说明（2026-05-13，`dispatch_agents` → `dispatch_parallel` 重命名）**：`dispatch_agents` 因与 `dispatch_agent` 仅差一个 `s` 字符导致 LLM 频繁误判（该用复数的用单数串行跑，该用单数的用复数浪费并行设施），已于 2026-05-13 重命名为 `dispatch_parallel`。新名在语义空间完全分离（agent vs parallel），避免拼写混淆。下文出现的 `dispatch_agents` 请读为 `dispatch_parallel`；所有 `promptSnippet`、`promptGuidelines`、schema、error message 已同步更新。
 - **补充说明（2026-05-11，实现差异 reconciliation）**：本 ADR 原文描述的组件路径与实际 v0.1 ship 状态有出入，设计原则（"基础能力 > 固定 strategy"）不变：
   - 目录从 `extensions/multi-agent/` 重命名为 `extensions/dispatch/`；vision/imagine 同期拆出为独立扩展。下文出现的 `extensions/multi-agent/...` 请读为 `extensions/dispatch/...`。
-  - `multi_dispatch(strategy, tasks)` 始终未成 registered tool 发出。`extensions/dispatch/index.ts` 只注册 `dispatch_agent` + `dispatch_agents`。下文提到的 "`multi_dispatch` 保留作为兼容 / v0.2 下架" 一入场就省了。
+  - `multi_dispatch(strategy, tasks)` 始终未成 registered tool 发出。`extensions/dispatch/index.ts` 只注册 `dispatch_agent` + `dispatch_parallel`（原名 `dispatch_agents`，2026-05-13 重命名为 `dispatch_parallel`）。下文提到的 "`multi_dispatch` 保留作为兼容 / v0.2 下架" 一入场就省了。
   - `extensions/multi-agent/templates/{parallel,debate,chain,ensemble}.md` 未建。代替是 `promptSnippet` + LLM 自主组合；cookbook 未来要加会作为主会话 skills (`~/.pi/agent/skills/...`) 下发。
   - `vision` / `imagine` 由独立扩展 `extensions/vision/` `extensions/imagine/` 提供。
 
