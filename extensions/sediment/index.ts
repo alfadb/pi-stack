@@ -176,6 +176,89 @@ function applySedimentStatus(
   }
 }
 
+/**
+ * Derive the abrain scope label from a write result path.
+ *
+ * Used by the bg auto-write notify so users see "world" / "project:<id>" /
+ * "workflow" / etc. instead of having to mentally parse paths. ADR 0014 §B5
+ * 7-zone layout: `~/.abrain/{identity,skills,habits,workflows,projects/<id>,
+ * knowledge,vault}/`. The sediment auto-write lane today writes only to
+ * `projects/<id>/` and `knowledge/`; the others are recorded for future-
+ * proofing when Lane G writers ship.
+ *
+ * Returns "?" if `filePath` is undefined (status=rejected before path was
+ * resolved) or the path doesn't sit under abrainHome (defensive — should
+ * not happen in production).
+ */
+function deriveAutoWriteScope(filePath: string | undefined, abrainHome: string): string {
+  if (!filePath) return "?";
+  const rel = path.relative(abrainHome, filePath);
+  if (rel.startsWith("..")) return "?";
+  const parts = rel.split(path.sep);
+  if (parts[0] === "projects" && parts[1]) return `project:${parts[1]}`;
+  if (parts[0] === "knowledge") return "world";
+  if (parts[0] === "workflows") return "workflow";
+  if (parts[0] === "identity") return "identity";
+  if (parts[0] === "skills") return "skill";
+  if (parts[0] === "habits") return "habit";
+  if (parts[0]) return parts[0];
+  return "?";
+}
+
+/**
+ * One-char glyph per status so users can scan the auto-write notify
+ * vertically. Status taxonomy follows WriteProjectEntryResult.status.
+ */
+function statusGlyph(status: string): string {
+  switch (status) {
+    case "created":    return "+";
+    case "updated":    return "~";
+    case "merged":     return "↻";
+    case "superseded": return "→";
+    case "archived":   return "↓";
+    case "deleted":    return "−";
+    case "skipped":    return "·";
+    case "rejected":   return "✗";
+    case "dry_run":    return "?";
+    default:           return " ";
+  }
+}
+
+/**
+ * Format sediment write results as one entry per line with scope + glyph +
+ * slug. Used for the user-facing `notify()` on both auto-write (bg) and
+ * explicit (MEMORY marker) lanes.
+ *
+ * 2026-05-15 UX fix: previous format joined all results with ", " so a
+ * multi-result outcome rendered as one long unreadable line and didn't
+ * surface scope (users couldn't tell at a glance whether a sediment write
+ * landed under world knowledge or some project's substrate).
+ *
+ * New format:
+ *   Sediment auto-write (bg): 2 entries
+ *     + [project:pi-global] created    adr-0020-round-2-...
+ *     ~ [project:pi-global] updated    adr-0020-round-2-...
+ *
+ * `lane` is the label after "Sediment " in the header (e.g. "auto-write
+ * (bg)" or "explicit marker extraction"); keep both lanes consistent.
+ */
+function formatSedimentNotify(
+  lane: string,
+  results: WriteProjectEntryResult[],
+  abrainHome: string,
+): string {
+  const header = `Sediment ${lane}: ${results.length} entr${results.length === 1 ? "y" : "ies"}`;
+  if (results.length === 0) return header;
+  const lines: string[] = [header];
+  for (const r of results) {
+    const scope = deriveAutoWriteScope(r.path, abrainHome);
+    const glyph = statusGlyph(r.status);
+    const reason = r.reason ? ` (${r.reason})` : "";
+    lines.push(`  ${glyph} [${scope}] ${r.status.padEnd(10)} ${r.slug}${reason}`);
+  }
+  return lines.join("\n");
+}
+
 /** Format write results: only non-zero counts, e.g. "3 created, 1 updated, 2 skipped". */
 function compactResultSummary(results: WriteProjectEntryResult[]): string {
   const c: Record<string, number> = {};
@@ -963,8 +1046,12 @@ export default function (pi: ExtensionAPI) {
               });
               if (notify) {
                 try {
+                  // 2026-05-15 UX fix: per-result lines + scope label
+                  // (world / project:<id> / workflow / etc.) instead of
+                  // a single comma-joined line. Format helper lives at
+                  // top of file alongside compactResultSummary.
                   notify(
-                    `Sediment auto-write (bg): ${auto.results.map((r) => `${r.slug}:${r.status}${r.reason ? `(${r.reason})` : ""}`).join(", ")}`,
+                    formatSedimentNotify("auto-write (bg)", auto.results, abrainHome),
                     "info",
                   );
                 } catch {}
@@ -1216,8 +1303,11 @@ export default function (pi: ExtensionAPI) {
       // directly, so a late ctx invalidation does not throw here.
       if (notify) {
         try {
+          // 2026-05-15 UX fix: same multi-line + scope formatter as the
+          // auto-write lane. Consistency across lanes; users see the
+          // same vertical layout regardless of which lane wrote.
           notify(
-            `Sediment explicit marker extraction: ${results.map((r) => `${r.slug}:${r.status}${r.reason ? `(${r.reason})` : ""}`).join(", ")}`,
+            formatSedimentNotify("explicit marker extraction", results, abrainHome),
             shouldAdvance ? "info" : "warning",
           );
         } catch {
