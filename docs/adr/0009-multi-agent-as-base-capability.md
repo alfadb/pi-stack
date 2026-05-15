@@ -212,17 +212,19 @@ Hint: pass tasks as actual JSON array. Example:
 
 ### 子代理工具安全边界
 
-`dispatch_agent(s)` 是 capability boundary。默认必须是 deny-all:
+> **2026-05-15 修订**：本节原表第一行写「主会话普通 `dispatch_agent(s)` | `[]` | 纯推理,无工具」与实际实现不符。`extensions/dispatch/index.ts:273` 实际默认 allowlist 是 `read,grep,find,ls`（read-only tools），不是 `[]`。下表已更正。安全边界仍然成立：mutating tools 默认拒绝、嵌套 dispatch 始终拒绝；只是 "默认" 那一档是 read-only 而不是 deny-all。
+
+`dispatch_agent(s)` 是 capability boundary。默认必须是 deny-all 写权：
 
 | 场景 | tools 默认 | 允许 |
 |---|---|---|
-| 主会话普通 `dispatch_agent(s)` | `[]` | 纯推理,无工具 |
-| 显式 readonly | `read,grep,find,ls,memory_search,memory_get,memory_list,memory_neighbors` | 只读;路径与输出仍受工具自身限制 |
+| 主会话普通 `dispatch_agent(s)`（不传 tools） | `read,grep,find,ls` | 只读文件 / 搜索 / 列目录;LLM 推理 + 简单 ground-truth 验证 |
+| 显式 readonly + memory | 显式传 `read,grep,find,ls,memory_search,memory_get,memory_list,memory_neighbors` | 加上 markdown memory facade |
 | vision / imagine | 单独 allow | 需要模型/图像场景时显式列出 |
-| mutating tools | 默认拒绝 | `edit/write/bash` 不委托给子代理;若未来要开必须用户 confirm + env gate + audit |
-| sediment voter | **永远 `[]`** | voter 是 pure reasoning;audit 记录 `voter_tools: []` |
+| mutating tools (`bash`/`edit`/`write`) | 默认拒绝 | 必须 `PI_MULTI_AGENT_ALLOW_MUTATING=1` env gate 才能进入 allowlist；嵌套 `dispatch_agent`/`dispatch_parallel` 任何时候都拒绝 |
+| sediment voter（设计假设，sediment 已不走 dispatch） | **永远 `[]`** | voter 是 pure reasoning;audit 记录 `voter_tools: []` |
 
-`tools` 字段在 normalize 后必须经过 allowlist 校验;未知工具、mutating tools、`bash`、`edit`、`write` 默认报错,不静默忽略。
+`tools` 字段在 normalize 后必须经过 allowlist 校验:嵌套 dispatch 始终拒绝；mutating tools 在 env gate 缺失时拒绝并报错，不静默忽略（`extensions/dispatch/index.ts` `validateTools()`)。
 
 ### vision / imagine 工具不变
 

@@ -22,16 +22,22 @@ Project vault scope uses ADR 0017 active project binding. Other projects' vaults
 
 `/vault init` chooses a portable identity backend. Priority:
 
-1. `SECRETS_BACKEND` override
+1. `SECRETS_BACKEND` env override (invalid values are silently ignored and detection continues; see `extensions/abrain/backend-detect.ts:161-174`).
 2. `ssh-key`
 3. `gpg-file`
 4. `macos`
 5. `secret-service`
 6. `pass`
-7. `passphrase-only`
-8. `disabled`
+7. `passphrase-only` — **final fallback** of automatic detection. `disabled` is no longer reached via auto-detection: in v1.4 `passphrase-only` catches everyone, even bare environments.
+
+`disabled` only becomes the active backend through one of two **explicit** opt-outs:
+
+- `SECRETS_BACKEND=disabled` env override, or
+- `~/.abrain/.state/vault-disabled` flag file present.
 
 The current design intentionally treats container/devbox environments as first-class: ssh-key / gpg-file / passphrase are primary, desktop keychains are optimizations.
+
+> **Reader-side gap** (tracked in roadmap): `extensions/abrain/vault-reader.ts:113-118` invokes `age -d` with `stdin: "ignore"`, so `passphrase-only` backend cannot prompt for a passphrase at unlock time and `loadMasterKey()` silently returns `null` (caught at `vault-reader.ts:142-148`). Today `passphrase-only` is effectively **init-only**; reader-side unlock requires either a tty pass-through implementation or a decision to demote `passphrase-only` from "Tier 1 fallback" to "init-only stub backend". See [../migration/vault-bootstrap.md §5](../migration/vault-bootstrap.md) for the runbook context.
 
 ## 4. Commands and tools
 
@@ -74,8 +80,20 @@ Current policy:
 
 - Injected run output is default-withheld when needed.
 - User authorization is required before releasing potentially secret-bearing output.
-- Released output undergoes literal redaction of known plaintext values.
-- On failure to safely authorize/redact, the desired direction is fail-closed; audit findings should treat fail-open as security bugs.
+- Released output undergoes literal redaction of known plaintext values **in text parts only**. `extensions/abrain/vault-bash.ts:217-225` `redactVaultBashContent` iterates `Array<{type: "text", text: string}>` entries; non-text parts (e.g. future inline `image` blobs) pass through unredacted. The bash tool currently only emits text parts, so this is a known shape constraint, not an active leak. If future tool output schemas add non-text parts, the redaction loop must be extended.
+- Per-row audit `command_preview` captures the **LLM-original** command text (before vault env injection is prepended). It is guaranteed not to contain vault-decrypted plaintext (rewrite runs after preview is captured), but it can still contain any secret-shaped string the LLM itself hard-coded into argv. This is a documented hygiene limit, not a vault leak.
+- On failure to safely authorize/redact, the desired direction is fail-closed; tool_call inject errors return `block:true`, tool_result authorization/redaction throws withhold output and audit `bash_inject_block` / `bash_output_withhold` (2026-05-14 R6 audit fix).
+
+### `$VAULT_<key>` suffix matching
+
+`extensions/abrain/vault-bash.ts:97-104` `keyCandidatesFromVaultVar` expands a single `$VAULT_<suffix>` reference to up to four lookup candidates and picks the first present `.md.age`:
+
+1. raw suffix as written
+2. underscores `_` → dashes `-`
+3. lower-cased raw suffix
+4. lower-cased + underscores → dashes
+
+So `$VAULT_GitHub_Token` resolves against `GitHub_Token`, `GitHub-Token`, `github_token`, `github-token` in order. Behavior is deterministic but **not configurable**; storing both `GitHub-Token.md.age` and `github-token.md.age` will always pick the first per the order above. Prefer one canonical casing per key.
 
 ## 6. Sub-pi isolation
 

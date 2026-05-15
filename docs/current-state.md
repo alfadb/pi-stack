@@ -73,11 +73,12 @@ LLM 只使用：
 
 `memory_search` 当前语义：
 
-- 查询 active project abrain store、legacy `.pensieve/`（未迁仓只读）和 world knowledge。
+- 查询 active project abrain store、legacy `<cwd>/.pensieve/`（仅在存在时只读接入，不再写入）和 world store。
+- World store 扫描范围是整个 `~/.abrain/`，只排除 `projects/**` 与 `vault/**`；因此 `knowledge/`、`workflows/` 下有 frontmatter 的 md 都可检索（`extensions/memory/parser.ts:72-74,526-538`）。
 - 两阶段 LLM rerank：候选选择 + full-content rerank。
-- 默认排除 `status=archived`，除非 filters 显式要求。
-- 返回 normalized cards，不暴露 backend/source_path/scope；exact lookup/debug 工具可暴露 provenance。
-- LLM search model 不可用时 hard error；没有 grep/BM25 fallback。
+- 默认排除 `status=archived`（`search.ts:12-16`）；**`superseded`/`deprecated` 仍然会进入默认结果**，需要 active-only 可显式 `filters.status=active`。
+- 返回 normalized cards，字段：`slug/title/summary/score/kind/status/confidence/created/updated/rank_reason/timeline_tail/related_slugs`；不暴露 backend/source_path/scope（`memory_get` exact lookup 作为 debug 接口可暴露）。
+- LLM search model 不可用时 hard error（包装为 `isError` tool result）；没有 grep/BM25 fallback。
 
 ## 6. Sediment write path
 
@@ -88,7 +89,8 @@ sediment 是唯一 dedicated writer：
 3. 在进入 LLM / audit / writer 前运行 sanitizer：credential/secret-like strings 被替换为 `[SECRET:<type>]`，不再因 pattern 命中阻断整轮。
 4. 没有显式 block 且 `autoLlmWriteEnabled=true` 时，LLM extractor 只接收 redacted transcript，并在 prompt 中被要求保留 typed placeholders、不得还原 raw secret。
 5. curator 通过已 redacted 的 `memory_search` query 找邻居并决定 `create/update/merge/archive/supersede/delete/skip`。
-6. writer 上锁、lint、atomic write、append audit、best-effort git commit；audit raw text / error fields 也存 redacted form。
+6. writer 上锁、lint、atomic write、append audit、best-effort git commit；audit raw text / error / candidates[].title 均存 redacted form（candidates.title 的 sanitizer 覆盖于 2026-05-15 补，之前 explicit/auto-write 两条 lane 的 audit candidates 数组中 title 未走 sanitizer）。
+7. git commit 失败时 writer 会 `git reset HEAD -- <rel>` 并 `unlink` 刚刚写入的文件，避免孤儿 staged changes（2026-05-14 R5/R6 audit 落实）。
 
 当前路径：
 
@@ -106,17 +108,19 @@ Entry 写锁统一在 `~/.abrain/.state/sediment/locks/`，因为多个项目会
 
 - `/vault status`
 - `/vault init [--backend=<backend>]`
-- `/secret set/list/forget`（global/project scope）
-- `vault_release(key, scope?, reason?)`（plaintext 进入 LLM 前要求用户授权）
+- `/secret set/list/forget`（global/project scope，默认 active project）
+- `vault_release(key, scope?, reason?)`（plaintext 进入 LLM 前要求用户授权；prompt 经当前 session model 翻译为用户语言）
 - `$VAULT_<key>`：project → global fallback
 - `$PVAULT_<key>`：project-only
 - `$GVAULT_<key>`：global-only
-- bash 输出默认 withheld，授权后 release，并对 plaintext 做 literal redaction
-- sub-pi 默认无 vault 工具/权限
+- bash 输出默认 withheld，授权后 release，并对 plaintext 做 literal redaction（仅覆盖 text part）
+- tool_call inject 错误 `block:true`；tool_result authorization/redaction throw 全 withhold + audit `bash_inject_block`/`bash_output_withhold`（2026-05-14 R6 audit fix）
+- sub-pi 默认无 vault 工具/权限（三层：dispatch spawn env override + abrain extension activate guard + vault-reader 二次 guard）
 
 未实现/roadmap：
 
-- P0d：vault TUI wizard、masked input、`.env` import/migrate-backend
+- P0d：masked input、`.env` import、`/vault migrate-backend` wizard（P1 的 active project resolver + `/secret` scope 路由 + `$PVAULT_/$GVAULT_` 已 ship）
+- Passphrase-only backend reader 路径无 tty channel：当前 `age -d` 调用 `stdin: "ignore"`，`loadMasterKey()` 会 silent 返回 null。待决：加 tty pass-through 或降为 init-only stub backend。
 - Lane G：`/about-me` 与 identity/skills/habits writer
 
 ## 8. 当前测试入口

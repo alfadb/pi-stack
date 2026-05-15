@@ -6,8 +6,8 @@ These tools may be visible to the assistant depending on pi settings and sub-pi 
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| `dispatch_agent(model, thinking, prompt, tools?, timeoutMs?)` | Spawn one independent pi subprocess. | Use only for a single task. |
-| `dispatch_parallel({tasks}, timeoutMs?)` | Spawn multiple independent pi subprocesses in parallel. | Use for 2+ independent tasks; per-task tools allowlist supported. |
+| `dispatch_agent({model, thinking, prompt, tools?, timeoutMs?})` | Spawn one independent pi subprocess. | Use only for a single task. |
+| `dispatch_parallel({tasks, timeoutMs?})` | Spawn multiple independent pi subprocesses in parallel. | Both fields live inside the same top-level object; per-task `tools` allowlist supported. Use for 2+ independent tasks. |
 | `memory_search(query, filters?)` | Semantic retrieval over project + world memory. | ADR 0015 LLM retrieval; hard error if model unavailable. |
 | `memory_get(slug, options?)` | Exact entry lookup. | May expose scope/source_path for debug/provenance. |
 | `memory_list(filters?)` | Metadata browsing. | Not relevance-ranked. |
@@ -85,7 +85,22 @@ $GVAULT_<key>  # global only
 
 Use this instead of `vault_release` when plaintext only needs to reach a subprocess.
 
-## 4. Pending / not current commands
+Suffix matching (`extensions/abrain/vault-bash.ts:97-104`) expands `$VAULT_<suffix>` to up to four candidates (raw / `_`→`-` / lower / lower+`_`→`-`) and picks the first present `.md.age`. Prefer one canonical casing per key.
+
+## 4. Sub-agent tool allowlist and env gates
+
+These govern what `dispatch_agent` / `dispatch_parallel` sub-pi processes can do. Authoritative implementation: `extensions/dispatch/index.ts`.
+
+| Scenario | Effective `tools` |
+|---|---|
+| Main session calls `dispatch_agent` / `dispatch_parallel` without `tools` | **Default `read,grep,find,ls`** (read-only file/search tools). Not `[]`. |
+| `tools: "read,grep,find,ls,memory_search,memory_get,memory_list,memory_neighbors"` | Read-only + memory facade. |
+| `tools` includes any of `bash` / `edit` / `write` | Rejected unless `PI_MULTI_AGENT_ALLOW_MUTATING=1` is set in the **parent** process env. Without the env gate, `validateTools()` throws and the dispatch call fails. |
+| Sub-agent tries to call `dispatch_agent` / `dispatch_parallel` | **Always rejected.** Nested dispatch is unconditionally blocked. |
+
+Sub-pi processes also inherit `PI_ABRAIN_DISABLED=1` (forced override after `...process.env`, so `export PI_ABRAIN_DISABLED=0` cannot defeat it). Inside a sub-pi the `abrain` extension's `activate()` early-returns without registering `vault_release`, `/vault`, `/secret`, or any vault hooks.
+
+## 5. Pending / not current commands
 
 The following names may appear in archived docs but are not current command surface:
 

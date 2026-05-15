@@ -41,14 +41,15 @@
 
 pi 启动时按以下顺序探测，第一个成功的为该 host 的 backend：
 
-1. `$SECRETS_BACKEND` env override（用户强制；invalid 值 fall through 不静默接受）
+1. `$SECRETS_BACKEND` env override（用户强制；invalid 值被静默忽略后继续走探测链，参见 `extensions/abrain/backend-detect.ts:161-174`）
 2. **`ssh-key`**：`~/.ssh/id_ed25519`(`.pub`) 或 `~/.ssh/id_rsa`(`.pub`) 同时存在
 3. **`gpg-file`**：`gpg` 在 PATH + `gpg --list-secret-keys --with-colons` 至少一行 `sec:` 开头
 4. `macos`：`uname -s = Darwin` + `security` CLI
 5. `secret-service`：Linux + (`$DISPLAY` 或 `$WAYLAND_DISPLAY`) + `secret-tool` 在 PATH
 6. `pass`：`pass` CLI + `~/.password-store/abrain/` 存在
-7. **`passphrase-only`**：abrain extension 已激活（兜底；要求 main pi 进程有 tty——sub-pi 无 tty 也无 master key 访问需求）
-8. `disabled`：以上全部 fail（极少见——passphrase-only 几乎总能 fall back 命中）
+7. **`passphrase-only`**：abrain extension 已激活（兜底；auto-detect 走到这步就兜底完成）。
+   ⚠️ **reader-side gap**（2026-05-15 dogfood）：实际 unlock 路径 `vault-reader.ts:113-118` 调 `age -d` 时 `defaultExec` 为 `stdin: "ignore"`，age scrypt 拿不到 tty，`loadMasterKey()` 的 try/catch 吞 stderr 返 null（`:142-148`）。passphrase-only 当前仅 init-only，下次启动 unlock 会 silent 失败。待 tty pass-through 或 doc 上明示降为 init-only stub，跟踪于 [../roadmap.md](../roadmap.md) Vault passphrase-only reader tty channel 项。
+8. `disabled`：**不再**通过 auto-detection 走到这一档（`backend-detect.ts:174-218` 末档总是 passphrase-only）。只有两种明示方式才能进 `disabled`：`SECRETS_BACKEND=disabled` env、或 `~/.abrain/.state/vault-disabled` flag 文件存在。
 
 **关键变化对比 v1.3**：
 - ssh-key 是新加的 Tier 1，**容器场景头号选择**
@@ -69,7 +70,6 @@ pi 启动时按以下顺序探测，第一个成功的为该 host 的 backend：
 | bash 注入 `$VAULT_<key>` | **拒绝执行**，返回错误："vault locked; restart pi or check `~/.abrain/.vault-master.age`"（注：`/vault unlock` 命令尚未实现，当前 unlock 路径走启动时 backend auto-detect → master decrypt）|
 | `vault_release` 工具调用 | **拒绝**，返回错误 |
 | `/secret <key>` 写入 | **拒绝**（因为加密需要 master key） |
-| memory_search 命中 vault `_meta.md` | 正常返回元数据，但 LLM 看到的内容会标记 `🔒 vault locked` |
 
 启动时 vault disabled 状态在 TUI footer 持续可见（"vault: locked"），用户能立刻看到。
 
@@ -144,7 +144,7 @@ rm -rf "$INSTALL_TMP"
 **v1.4 设计决定**：
 - **写 `~/.abrain/.vault-backend`**（v1.4 新）：记录 init 时选的 backend，未来启动时不重新探测——避免用户后加入 GPG key 导致检测跳到不同 backend。主动切 backend 需 `/vault migrate-backend <new>`（P0d 待实施；当前手动迁移：mv `~/.abrain/.vault-master.age` 备份后重跑 `/vault init`）。
 - **ssh-key 与 gpg-file 共用 `~/.abrain/.vault-master.age`**：两者都是加密文件路径，区别仅在 recipient。这让子系统代码卷一样，unlock helper 读 `.vault-backend` 选解密工具。
-- **passphrase-only 不能 sub-pi**：age scrypt 要 /dev/tty，sub-pi 无 tty。但 sub-pi 本就 PI_ABRAIN_DISABLED=1 看不到 vault，没事。
+- **passphrase-only 当前 reader 路径不可用**（2026-05-15 dogfood gap）：age scrypt 要 /dev/tty，但 `vault-reader.ts` `defaultExec` `stdin: "ignore"` 拿不到 tty，`loadMasterKey()` silent 返 null。表现与 "vault locked" 一样。sub-pi 本就 PI_ABRAIN_DISABLED=1 看不到 vault不受影响；main pi 上的 passphrase-only 则需 tty pass-through 或明示降为 init-only stub。
 
 **安全声明**：
 - master key 在生成与加密期间临时落 `~/.abrain/.state/install/`（与 abrain 同文件系统，shred 有效）。不使用 `/tmp`（可能是 tmpfs / NFS，shred 不生效）

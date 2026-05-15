@@ -77,8 +77,10 @@ const EXT_MIME: Record<string, string> = {
  */
 const DEFAULT_VISION_PREFS = [
   "openai/gpt-5.5",
+  "anthropic/claude-sonnet-4-6",
+  "anthropic/claude-opus-4-7",
   "anthropic/claude-sonnet-4-5",
-  "anthropic/claude-opus-4-5",
+  "anthropic/claude-opus-4-6",
   "google/gemini-3-pro",
   "openai/gpt-5",
   "anthropic/claude-sonnet-4",

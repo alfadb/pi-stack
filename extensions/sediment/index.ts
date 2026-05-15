@@ -931,7 +931,13 @@ export default function (pi: ExtensionAPI) {
                 candidate_count: auto.drafts.length,
                 candidates: auto.drafts.map((d, i) => ({
                   candidate_id: candidateIdFor(autoCorrelationId, i),
-                  title: d.title,
+                  // 2026-05-15: route candidate title through the same audit
+                  // sanitizer used for raw_text/error fields. A malicious or
+                  // careless transcript could put secret-shaped strings into a
+                  // MEMORY block title; we don't want them landing verbatim in
+                  // audit.jsonl just because the rest of the redaction chain
+                  // only protects body/raw_text.
+                  title: sanitizeAuditText(d.title, 500),
                   kind: d.kind,
                   confidence: d.confidence,
                   status: d.status,
@@ -1186,7 +1192,11 @@ export default function (pi: ExtensionAPI) {
         candidate_count: drafts.length,
         candidates: drafts.map((d, i) => ({
           candidate_id: candidateIdFor(explicitCorrelationId, i),
-          title: d.title,
+          // 2026-05-15: see auto_write lane above. Explicit MEMORY blocks are
+          // user-authored; usually clean, but a stray `password=hunter2`-style
+          // title is exactly the kind of thing the sanitizer was built to
+          // catch before it reaches audit.jsonl.
+          title: sanitizeAuditText(d.title, 500),
           kind: d.kind,
           confidence: d.confidence,
           status: d.status,
