@@ -1,7 +1,7 @@
 import * as crypto from "node:crypto";
 import type { SedimentSettings } from "./settings";
-import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 import { sanitizeForMemory } from "./sanitizer";
+import { parseExplicitMemoryBlocks, previewExtraction } from "./extractor";
 
 interface ModelRegistryLike {
   find(provider: string, modelId: string): unknown;
@@ -264,7 +264,7 @@ export async function runLlmExtractor(
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai");
 
-  const prompt = buildLlmExtractorPrompt(windowText);
+  const prompt = buildLlmExtractorPrompt(windowSanitize.text ?? windowText);
   const stream = piAi.streamSimple(
     model,
     {

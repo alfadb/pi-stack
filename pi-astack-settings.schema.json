@@ -96,7 +96,7 @@
         "enabled": {
           "type": "boolean",
           "default": false,
-          "description": "Enable agent_end sediment hook. Default false until automatic extraction is implemented."
+          "description": "Enable agent_end sediment hook (explicit MEMORY: block extractor + LLM auto-write curator lane). Both extraction paths are fully implemented (Phase 1.4 + ADR 0016). Default false — must be explicitly opted in."
         },
 
         "gitCommit": {

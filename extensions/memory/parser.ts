@@ -34,7 +34,9 @@ export function resolveStores(cwdRaw: string | undefined, settings: MemorySettin
   const cwd = path.resolve(cwdRaw || process.cwd());
   const stores: StoreRef[] = [];
 
-  // 1. Primary project store: <cwd>/.pensieve/ (Phase 1.4 SOT)
+  // 1. Primary project store: ~/.abrain/projects/<id>/ (B5 cutover 2026-05-13).
+  //    This is the canonical write target for sediment; migrated repos
+  //    have all their markdown entries here.
   const projectRoot = path.join(cwd, ".pensieve");
   if (fsSync.existsSync(projectRoot) && fsSync.statSync(projectRoot).isDirectory()) {
     stores.push({ scope: "project", root: projectRoot, label: "project" });
@@ -48,12 +50,11 @@ export function resolveStores(cwdRaw: string | undefined, settings: MemorySettin
   );
   const abrainExists = fsSync.existsSync(abrainHome) && fsSync.statSync(abrainHome).isDirectory();
 
-  // 2. Abrain project store (dual-read, migration plan P2):
-  //    ~/.abrain/projects/<id>/ — read alongside .pensieve/ when
-  //    the active project has a binding. Currently this directory
-  //    is empty (migration P5-P6 not yet executed), so this store
-  //    is a future-proof no-op. When migration happens, entries
-  //    found here will be deduped against .pensieve/ in loadEntries().
+  // 2. Abrain project store — now the PRIMARY store post-B5 cutover
+  //    (2026-05-13). All sediment writes target this path. Migrated repos
+  //    have their entries here; unmigrated repos still have entries in
+  //    .pensieve/ (see legacy fallback below). loadEntries() deduplicates
+  //    across both stores, preferring abrain when the same slug exists.
   if (abrainExists) {
     try {
       const resolved = resolveActiveProject(cwd, { abrainHome });
@@ -513,12 +514,17 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
   };
 }
 
-export async function listFilesWithRg(root: string, signal?: AbortSignal): Promise<string[] | null> {
+export async function listFilesWithRg(
+  root: string,
+  signal?: AbortSignal,
+  opts: { includeIgnored?: boolean } = {},
+): Promise<string[] | null> {
   try {
     const { stdout } = await execFileAsync(
       "rg",
       [
         "--files",
+        ...(opts.includeIgnored ? ["--no-ignore"] : []),
         "--glob", "*.md",
         "--glob", "!**/.state/**",
         "--glob", "!**/.index/**",

@@ -8,8 +8,9 @@
  *
  * Boundary:
  * - `.pi-astack/<module>/`  — runtime state, audit logs, locks
- * - `.pensieve/`            — canonical markdown knowledge + browsable
- *                             derived views (_index.md, .index/graph.json)
+ * - `.pensieve/`            — legacy read-only migration source (B5 cutover:
+ *                             2026-05-13 — sediment no longer writes here;
+ *                             entries migrate to ~/.abrain/projects/<id>/)
  *
  * This file deliberately has zero imports from sibling extensions.
  */

@@ -14,7 +14,7 @@ alfadb/pi-astack/
 ├── UPSTREAM.md                        # 上游跟踪（B 类 vendor）+ 三分类说明
 ├── LICENSE                            # MIT
 ├── .gitignore
-├── scripts/                            # ✅ 13 个 smoke 脚本（全部在 package.json scripts 中声明）
+├── scripts/                            # ✅ 15 个 smoke 脚本（全部在 package.json scripts 中声明）
 │   ├── smoke-memory-sediment.mjs       # memory + sediment smoke 回归（`npm run smoke:memory`）
 │   ├── smoke-dispatch-input-compat.mjs # dispatch input 兼容层
 │   ├── smoke-model-fallback-mutation-timing.mjs  # fallback mutation 时序
@@ -27,7 +27,9 @@ alfadb/pi-astack/
 │   ├── smoke-abrain-vault-bash.mjs     # `$VAULT_` / `$PVAULT_` / `$GVAULT_` 注入 helper
 │   ├── smoke-abrain-active-project.mjs # boot-time active project resolver
 │   ├── smoke-abrain-secret-scope.mjs   # `--global` / `--project=<id>` / `--all-projects` flag parser
-│   └── smoke-abrain-i18n.mjs           # 授权 prompt 本地化与 fallback
+│   ├── smoke-abrain-i18n.mjs           # 授权 prompt 本地化与 fallback
+│   ├── smoke-vision.mjs               # vision 模型选择与端到端分析
+│   └── smoke-imagine.mjs              # imagine 图像生成与保存
 │                                       # （无 .gitmodules — vendor/gstack 尚未挂载）
 │
 ├── docs/                              # ✅ 已实现
@@ -216,9 +218,29 @@ OpenAI Responses API 生图。复用用户已有的 openai provider 配置（key
 
 旧名：`retry-stream-eof` → `retry-all-errors` → `model-fallback`
 
-## 运行态产出布局（`.pi-astack/`）
+## 运行态产出布局（`.pi-astack/` + `~/.abrain/.state/`）
 
-所有运行态状态、审计日志、锁、迁移备份统一归集到 `<projectRoot>/.pi-astack/<module>/`。`.pensieve/` 只装 canonical markdown 知识库 + 可浏览的 derived view（`_index.md`、`.index/graph.json`）。
+> **B5 cutover (2026-05-13)：** sediment 的 audit、locks 已迁移到 `~/.abrain/.state/sediment/`（`audit.jsonl` + `locks/sediment.lock`）。只有 session-local 状态（checkpoint.json）和 module-specific 产出（imagine/compaction-tuner/model-fallback）保留在 `<projectRoot>/.pi-astack/<module>/` 下。
+
+**B5 后实际布局：**
+
+```
+项目侧 (<projectRoot>):                      Abrain 全局侧 (~/.abrain):
+─────────────────────────                  ────────────────────────
+.pi-astack/                                .state/
+├── imagine/            (PNG 生成品)        └── sediment/
+├── compaction-tuner/   (触达审计)              ├── audit.jsonl       ★ B5 迁移
+│   └── audit.jsonl                          └── locks/
+├── model-fallback/     (canary 日志)             └── sediment.lock   ★ B5 迁移
+│   └── canary.log
+└── sediment/
+    └── checkpoint.json  (单 session state)
+
+(旧路径不再写入，仅 legacy rename):
+.pensieve/.state/sediment-events.jsonl   → rename → ~/.abrain/.state/sediment/audit.jsonl (一次性)
+```
+
+**B5 前（已过时，仅供参考）：**
 
 ```
 <projectRoot>/

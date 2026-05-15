@@ -1,6 +1,6 @@
 # Migration — memory_search 升级为 LLM-driven retrieval
 
-> **状态**：In progress（2026-05-10；Phase 0/1 implemented；Phase 2 curator create/update/merge/archive/supersede/delete/skip implemented by ADR 0016）
+> **状态**：Completed（2026-05-14；Phase 0/1/2/3 all implemented）
 > **依赖**：[ADR 0015](../adr/0015-memory-search-llm-driven-retrieval.md)（决策本身）
 > **关联**：[ADR 0010](../adr/0010-sediment-single-agent-with-lookup-tools.md)（lookup-tools loop 设计）/ [ADR 0016](../adr/0016-sediment-as-llm-curator.md)（curator + update/delete 方向）
 > **触发**：见 ADR 0015 背景
@@ -273,12 +273,12 @@ LLM 在 stage 2 精排时已经做过语义相似和 timeline 判断；sediment 
 
 ### 文档更新清单
 
-- [ ] [memory-architecture.md](../memory-architecture.md) §6.1：memory_search 签名注释更新（query 语义扩展），§3 第 8 条 graceful degradation 加 search 例外
-- [ ] [brain-redesign-spec.md](../brain-redesign-spec.md) §4.1：ranking 实现说明从"text score × boost"更新为"LLM rerank, stage 1 用 boost 系数作 prompt 提示"
-- [ ] [docs/migration/steps.md](./steps.md) Phase 1.3：补 banner 指向本文件，说明 grep+tf-idf 已退出 `memory_search` runtime 路径
-- [ ] [docs/directory-layout.md](../directory-layout.md)：extensions/memory/ 子目录加 llm-search.ts；migration 列表加本文件；ADR 列表加 0015
-- [ ] [README.md](../../README.md)：v7.x update banner 加一段 LLM-driven search；ADR 计数 14 → 15
-- [ ] [ADR 0010](../adr/0010-sediment-single-agent-with-lookup-tools.md)：状态从"核心思想保留 / tools 过时"升级为"核心思想保留 / tools 实现"
+- [x] [memory-architecture.md](../memory-architecture.md) §6.1：memory_search 签名注释更新（query 语义扩展），§3 第 8 条 graceful degradation 加 search 例外
+- [x] [brain-redesign-spec.md](../brain-redesign-spec.md) §4.1：ranking 实现说明从"text score × boost"更新为"LLM rerank, stage 1 用 boost 系数作 prompt 提示"
+- [x] [docs/migration/steps.md](./steps.md) Phase 1.3：补 banner 指向本文件，说明 grep+tf-idf 已退出 `memory_search` runtime 路径
+- [x] [docs/directory-layout.md](../directory-layout.md)：extensions/memory/ 子目录加 llm-search.ts；migration 列表加本文件；ADR 列表加 0015
+- [x] [README.md](../../README.md)：v7.x update banner 加一段 LLM-driven search；ADR 计数 14 → 15
+- [x] [ADR 0010](../adr/0010-sediment-single-agent-with-lookup-tools.md)：状态从"核心思想保留 / tools 过时"升级为"核心思想保留 / tools 实现"
 - [x] [ADR 0015](../adr/0015-memory-search-llm-driven-retrieval.md)：状态 Proposed → Accepted（Phase 0/1 implemented；Phase 2 pending）
 
 ### Phase 3 验收
@@ -306,5 +306,5 @@ LLM 在 stage 2 精排时已经做过语义相似和 timeline 判断；sediment 
 [x] Phase 2.4: audit log 扩展 curator neighbors / decision / operation rationale
 [x] Phase 2.5: smoke 覆盖 lifecycle ops；live burn-in 观察 update/merge/skip，避免 append-only create
 [x] Phase 2.6: commit + push（ADR 0016 curator loop + lifecycle ops landed）
-[ ] Phase 3: 文档收敛 + stale memory entries 修正 + writer-level correlation id 增强
+[x] Phase 3: 文档收敛 + stale memory entries 修正 + writer-level correlation id 增强
 ```

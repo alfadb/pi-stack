@@ -107,13 +107,24 @@ export interface MigrationGoResult {
   skippedCount: number;
   seedPrunedCount: number;
   failedCount: number;
+  /** Number of successfully removed legacy source files that were not tracked
+   *  by the parent git repo (including files hidden by .gitignore). These
+   *  cannot be restored by parent reset/revert; abrain is the full copy. */
+  untrackedSourceCount: number;
   parentCommitSha?: string | null;
   abrainCommitSha?: string | null;
+  /** Git commit failures after entry-level migration work finished. Empty
+   *  for clean success and for legitimate "nothing to commit" cases (e.g.
+   *  untracked-only source cleanup). Non-empty makes `ok` false. */
+  commitErrors: string[];
   /** HEAD sha of parent repo *before* migration started. Use for safe
-   *  rollback even if other commits land in either repo after the migration
-   *  (e.g. concurrent sediment auto-commit, or N workflow commits + 1
-   *  migrate(in) commit on the abrain side). */
+   *  rollback when the parent repo was clean at migration start; if the
+   *  parent was dirty, summary avoids suggesting `git reset --hard` because
+   *  it would destroy unrelated work. */
   parentPreSha?: string | null;
+  /** Whether parent `git status --porcelain` was empty at migration start.
+   *  Informational only: dirty source repos are allowed post-B5. */
+  parentRepoWasClean: boolean;
   /** HEAD sha of abrain repo *before* migration started. */
   abrainPreSha?: string | null;
   /** Reports from B4 step 6 (spec §3 step 6): rebuilt graph + markdown index
@@ -134,6 +145,9 @@ interface PreflightOutcome {
    *  than `HEAD~1` (which is wrong when sediment commits concurrently or
    *  the migration produces N+1 abrain commits). */
   parentPreSha?: string | null;
+  /** Whether parent `git status --porcelain` was empty at preflight time.
+   *  Dirty is allowed; this only controls rollback wording. */
+  parentRepoWasClean: boolean;
   /** HEAD sha of abrain repo at preflight time. Same rationale. */
   abrainPreSha?: string | null;
   failures: string[];
@@ -164,11 +178,29 @@ async function gitIsClean(cwd: string): Promise<boolean> {
   } catch { return false; }
 }
 
-async function gitTrackedCount(cwd: string, subpath: string): Promise<number> {
+function parsePorcelainPath(line: string): string | null {
+  if (line.length < 4) return null;
+  let p = line.slice(3);
+  const arrow = p.lastIndexOf(" -> ");
+  if (arrow >= 0) p = p.slice(arrow + 4);
+  if (p.startsWith('"') && p.endsWith('"')) {
+    try { p = JSON.parse(p); }
+    catch { p = p.slice(1, -1); }
+  }
+  return p || null;
+}
+
+async function gitDirtyPathSet(cwd: string, scopeAbs: string): Promise<Set<string>> {
   try {
-    const { stdout } = await execFileAsync("git", ["-C", cwd, "ls-files", "--", subpath], { timeout: 5000, maxBuffer: 16 * 1024 * 1024 });
-    return stdout.split("\n").filter((line) => line.trim().length > 0).length;
-  } catch { return 0; }
+    const relScope = path.relative(cwd, scopeAbs) || ".";
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "status", "--porcelain", "--", relScope], { timeout: 5000, maxBuffer: 4 * 1024 * 1024 });
+    const out = new Set<string>();
+    for (const line of stdout.split("\n")) {
+      const p = parsePorcelainPath(line.trimEnd());
+      if (p) out.add(path.resolve(cwd, p));
+    }
+    return out;
+  } catch { return new Set(); }
 }
 
 async function gitIsTracked(cwd: string, file: string): Promise<boolean> {
@@ -178,62 +210,92 @@ async function gitIsTracked(cwd: string, file: string): Promise<boolean> {
   } catch { return false; }
 }
 
-async function gitRmOrUnlink(cwd: string, file: string): Promise<void> {
-  if (await gitIsTracked(cwd, file)) {
+function errorText(err: unknown): string {
+  const anyErr = err as { stderr?: Buffer | string; stdout?: Buffer | string; message?: string; code?: unknown };
+  const stderr = typeof anyErr?.stderr === "string" ? anyErr.stderr : Buffer.isBuffer(anyErr?.stderr) ? anyErr.stderr.toString("utf-8") : "";
+  const stdout = typeof anyErr?.stdout === "string" ? anyErr.stdout : Buffer.isBuffer(anyErr?.stdout) ? anyErr.stdout.toString("utf-8") : "";
+  return (stderr || stdout || anyErr?.message || String(err)).trim().replace(/\s+/g, " ").slice(0, 500);
+}
+
+interface SourceRemoval {
+  rel: string;
+  tracked: boolean;
+}
+
+async function gitRmOrUnlink(cwd: string, file: string): Promise<SourceRemoval> {
+  const rel = path.relative(cwd, file);
+  const tracked = await gitIsTracked(cwd, file);
+  if (tracked) {
     try {
-      await execFileAsync("git", ["-C", cwd, "rm", "-q", "--", file], { timeout: 5000, maxBuffer: 64 * 1024 });
-      return;
-    } catch {
-      // fall through to unlink
+      await execFileAsync("git", ["-C", cwd, "rm", "-q", "-f", "--", file], { timeout: 5000, maxBuffer: 64 * 1024 });
+    } catch (gitRmErr) {
+      try {
+        await fs.unlink(file);
+      } catch (unlinkErr: any) {
+        if (unlinkErr?.code !== "ENOENT") {
+          throw new Error(`failed to remove migrated source ${rel}: git rm failed (${errorText(gitRmErr)}); unlink failed (${errorText(unlinkErr)})`);
+        }
+      }
+      try {
+        await execFileAsync("git", ["-C", cwd, "rm", "-q", "-f", "--cached", "--", file], { timeout: 5000, maxBuffer: 64 * 1024 });
+      } catch (cachedErr) {
+        throw new Error(`failed to stage migrated source removal ${rel}: git rm failed (${errorText(gitRmErr)}); git rm --cached failed (${errorText(cachedErr)})`);
+      }
+    }
+  } else {
+    try {
+      await fs.unlink(file);
+    } catch (unlinkErr: any) {
+      if (unlinkErr?.code !== "ENOENT") {
+        throw new Error(`failed to remove untracked migrated source ${rel}: ${errorText(unlinkErr)}`);
+      }
     }
   }
-  try { await fs.unlink(file); } catch {}
+  if (fsSync.existsSync(file)) {
+    throw new Error(`failed to remove migrated source ${rel}: source still exists after removal`);
+  }
+  return { rel, tracked };
+}
+
+interface GitCommitOutcome {
+  sha: string | null;
+  error?: string;
+  nothingToCommit?: boolean;
 }
 
 /**
  * Stage and commit changes in `cwd`.
  *
- * `pathspec` narrows `git add` to a specific path (e.g. ".pensieve" on the
- * parent side) so concurrent sediment auto-commits or unrelated working-
- * tree changes can't accidentally piggyback into the migration commit.
- * Pass `null` to `git add -A` (used on the abrain side where the whole
- * repo is the migration's domain).
- *
- * Returns the new HEAD SHA on success, or `null` on any git failure
- * (caller decides whether that's fatal).
+ * `pathspecs` switches parent-side commits into "commit only these exact
+ * migrated source files" mode. This matters because B5+ migration no longer
+ * requires the source repo or `.pensieve/` to be clean/tracked: pre-existing
+ * staged changes (including `.pensieve/state.md` support files) MUST NOT
+ * piggyback into the migration commit. Parent-side deletions are staged by
+ * `git rm -f`; untracked source files are removed from disk and produce no
+ * parent git commit entry. Pass `null` for the abrain side, where the whole
+ * repo is the migration domain and `git add -A` is correct.
  */
 async function gitCommitAll(
   cwd: string,
   message: string,
-  pathspec: string | null = null,
-): Promise<string | null> {
+  pathspecs: string[] | null = null,
+): Promise<GitCommitOutcome> {
   try {
-    // Stage with `git add -A` (so deletes are included). When pathspec is
-    // given, narrow to that path — but it's OK if pathspec doesn't match
-    // any working-tree files (common case: migration cleared .pensieve/
-    // entirely so the dir was rmdir'd; the deletions are already staged
-    // via prior `git rm` calls). Silently swallow that one specific error
-    // and proceed to commit.
-    const addArgs = pathspec
-      ? ["-C", cwd, "add", "-A", "--", pathspec]
-      : ["-C", cwd, "add", "-A"];
-    try {
-      await execFileAsync("git", addArgs, { timeout: 10_000, maxBuffer: 1024 * 1024 });
-    } catch (err) {
-      // "pathspec did not match any files" — expected when target was
-      // emptied. Rely on already-staged content (`git rm` outputs); if
-      // there is nothing staged either, the next `commit` will fail with
-      // "nothing to commit" and the outer catch returns null.
-      const msg = (err as { stderr?: string; message?: string })?.stderr
-        || (err as { message?: string })?.message
-        || "";
-      if (!/did not match any files/i.test(msg)) throw err;
+    if (pathspecs && pathspecs.length === 0) return { sha: null, nothingToCommit: true };
+    if (!pathspecs) {
+      await execFileAsync("git", ["-C", cwd, "add", "-A"], { timeout: 10_000, maxBuffer: 1024 * 1024 });
     }
-    await execFileAsync("git", ["-C", cwd, "commit", "-m", message], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+    const uniquePathspecs = pathspecs ? Array.from(new Set(pathspecs)) : null;
+    const commitArgs = uniquePathspecs
+      ? ["-C", cwd, "commit", "-m", message, "--", ...uniquePathspecs]
+      : ["-C", cwd, "commit", "-m", message];
+    await execFileAsync("git", commitArgs, { timeout: 20_000, maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "HEAD"], { timeout: 3000, maxBuffer: 64 * 1024 });
-    return stdout.trim() || null;
-  } catch {
-    return null;
+    return { sha: stdout.trim() || null };
+  } catch (err) {
+    const msg = errorText(err);
+    if (/nothing to commit|no changes added|no changes/i.test(msg)) return { sha: null, nothingToCommit: true };
+    return { sha: null, error: msg || "git commit failed" };
   }
 }
 
@@ -248,6 +310,7 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
   const parentRepoRoot = (await gitToplevel(inferredParent)) ?? inferredParent;
 
   let pensieveTargetUsable = true;
+  let parentRepoWasClean = false;
   if (path.basename(pensieveAbs) !== ".pensieve") {
     failures.push(`pensieve target must be the project .pensieve directory: ${pensieveAbs}`);
     pensieveTargetUsable = false;
@@ -295,23 +358,19 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
     catch (e) { failures.push(`invalid project id "${projectId}": ${(e as Error).message}`); }
   }
 
-  // Parent repo must be clean (so the migration commit is the only change)
+  // Source repo sanity: after B5 cutover, `.pensieve/` is a legacy input
+  // snapshot, not the canonical store. Do NOT require the parent repo to be
+  // clean and do NOT require `.pensieve/` files to be git-tracked: untracked
+  // or dirty memory is precisely what the user may want to migrate away
+  // from. Parent-side cleanup commits use an exact pathspec and never sweep
+  // unrelated staged changes.
   if (fsSync.existsSync(parentRepoRoot)) {
-    const parentClean = await gitIsClean(parentRepoRoot);
-    if (!parentClean) {
-      failures.push(`parent repo not clean: ${parentRepoRoot} (commit or stash before migrating)`);
-    }
+    parentRepoWasClean = await gitIsClean(parentRepoRoot);
     if (pensieveTargetUsable) {
-      // .pensieve must have tracked files; untracked .pensieve has no git
-      // undo trail and would lose history if migrated.
-      const tracked = await gitTrackedCount(parentRepoRoot, path.relative(parentRepoRoot, pensieveAbs));
-      if (tracked === 0) {
-        failures.push(`pensieve has no git-tracked files in ${parentRepoRoot}; run \`git add .pensieve && git commit\` first to preserve undo`);
-      }
       // .pensieve must contain at least one user-facing .md entry (derived
       // .state/.index files don't count). Without this, --go would commit
       // an empty migration and confuse the operator into thinking it ran.
-      const userEntries = (await markdownFilesForTarget(pensieveAbs, opts.settings, opts.signal))
+      const userEntries = (await markdownFilesForTarget(pensieveAbs, opts.settings, opts.signal, { includeIgnored: true }))
         .filter((file) => isMigratableSource(file, pensieveAbs));
       if (userEntries.length === 0) {
         failures.push(`pensieve has no user entries to migrate at ${pensieveAbs} (only derived/support .state/.index/state.md files remain; migration is likely already complete)`);
@@ -347,6 +406,7 @@ export async function preflightMigrationGo(opts: MigrationGoOptions): Promise<Pr
     projectIdSource,
     parentRepoRoot,
     parentPreSha,
+    parentRepoWasClean,
     abrainPreSha,
     failures,
   };
@@ -498,21 +558,22 @@ async function resolveCreated(
 
 /**
  * Resolve `updated` to the LATEST credible signal — but asymmetric
- * vs `resolveCreated`: fs.mtime is NOT included when git tracks the
- * file. Reason: clone / checkout / git restore rewrite mtime to the
- * filesystem-write moment, producing a false "recently modified"
- * signal for files that haven't actually been touched by the author
- * since the last `git pull`. Trusting git-last-touch over fs.mtime
- * for tracked files keeps `updated` honest.
+ * vs `resolveCreated`: fs.mtime is NOT included for clean tracked files.
+ * Reason: clone / checkout / git restore rewrite mtime to the filesystem-
+ * write moment, producing a false "recently modified" signal for files
+ * untouched since the last `git pull`. Trusting git-last-touch over fs.mtime
+ * keeps clean tracked files honest.
  *
- * For untracked files (`git log` returns nothing), fs.mtime is the
- * only available signal and falls through.
+ * For untracked files (`git log` returns nothing), fs.mtime is the only
+ * modification signal. For dirty tracked files (allowed post-B5), fs.mtime
+ * is included because the working-tree edit is exactly what we migrate.
  */
 async function resolveUpdated(
   fileAbs: string,
   frontmatter: Record<string, unknown>,
   gitTimes: GitAuthorTimes,
   migrationTimestamp: string,
+  sourceDirty: boolean,
 ): Promise<string> {
   const candidates: string[] = [];
   const gitLast = gitTimes.lastByPath.get(fileAbs);
@@ -522,8 +583,9 @@ async function resolveUpdated(
     const iso = normalizeFmDate(fmUpdated);
     if (iso) candidates.push(iso);
   }
-  if (!gitLast) {
+  if (!gitLast || sourceDirty) {
     // Untracked file: fs.mtime is the only modification signal.
+    // Dirty tracked file: working-tree mtime is the current migrated edit.
     const fsTimes = await readFsTimes(fileAbs);
     if (fsTimes.mtime) candidates.push(fsTimes.mtime);
   }
@@ -680,6 +742,7 @@ async function analyzeEntry(
   abrainHome: string,
   migrationTimestamp: string,
   gitTimes: GitAuthorTimes,
+  dirtySourcePaths: Set<string>,
   _settings: MemorySettings,
 ): Promise<AnalyzedEntry> {
   // markdownFilesForTarget already filters .index/, .state/, .git/, and
@@ -754,7 +817,7 @@ async function analyzeEntry(
   // there is no reliable byte-accurate "created" signal in legacy
   // .pensieve/ entries that didn't carry one in frontmatter.
   const created = await resolveCreated(file, frontmatter, gitTimes, migrationTimestamp);
-  const updated = await resolveUpdated(file, frontmatter, gitTimes, migrationTimestamp);
+  const updated = await resolveUpdated(file, frontmatter, gitTimes, migrationTimestamp, dirtySourcePaths.has(path.resolve(file)));
 
   const notes: string[] = [];
   if (!frontmatterText) {
@@ -896,7 +959,10 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       skippedCount: 0,
       seedPrunedCount: 0,
       failedCount: 0,
+      untrackedSourceCount: 0,
+      commitErrors: [],
       parentPreSha: pre.parentPreSha ?? null,
+      parentRepoWasClean: pre.parentRepoWasClean,
       abrainPreSha: pre.abrainPreSha ?? null,
       preconditionFailures: pre.failures,
     };
@@ -911,7 +977,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   const { writeAbrainWorkflow } = await import("../sediment/writer");
   const { DEFAULT_SEDIMENT_SETTINGS } = await import("../sediment/settings");
 
-  const files = await markdownFilesForTarget(pensieveAbs, opts.settings, opts.signal);
+  const files = await markdownFilesForTarget(pensieveAbs, opts.settings, opts.signal, { includeIgnored: true });
   // Batch git author-date lookup for the whole .pensieve scope. One
   // subprocess pair (first-add + last-touch) replaces O(N) per-file
   // git log calls and keeps the 364-file ~/.pi migration well under a
@@ -919,12 +985,15 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   // maps are a safe degenerate (resolveCreated/Updated fall back to
   // fs.birthtime/mtime and frontmatter).
   const gitTimes = await collectGitAuthorTimes(parentRepoRoot, pensieveAbs, opts.signal);
+  const dirtySourcePaths = await gitDirtyPathSet(parentRepoRoot, pensieveAbs);
   const entries: MigrationGoEntryReport[] = [];
   let movedCount = 0;
   let workflowCount = 0;
   let skippedCount = 0;
   let seedPrunedCount = 0;
   let failedCount = 0;
+  let untrackedSourceCount = 0;
+  const parentRemovedPaths: string[] = [];
 
   for (const file of files) {
     throwIfAborted(opts.signal);
@@ -975,7 +1044,9 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
             continue;
           }
         }
-        await gitRmOrUnlink(parentRepoRoot, file);
+        const removal = await gitRmOrUnlink(parentRepoRoot, file);
+        if (removal.tracked) parentRemovedPaths.push(removal.rel);
+        else untrackedSourceCount += 1;
         skippedCount += 1;
         seedPrunedCount += 1;
         entries.push({
@@ -993,7 +1064,7 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
         continue;
       }
 
-      const analyzed = await analyzeEntry(file, pensieveAbs, projectId, abrainHome, migrationTimestamp, gitTimes, opts.settings);
+      const analyzed = await analyzeEntry(file, pensieveAbs, projectId, abrainHome, migrationTimestamp, gitTimes, dirtySourcePaths, opts.settings);
 
       if (analyzed.isPipeline) {
         const raw = await fs.readFile(file, "utf-8");
@@ -1030,11 +1101,23 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
             slug: analyzed.slug,
             timelineNote: "migrated from legacy .pensieve/pipelines/",
           },
-          { abrainHome, settings: DEFAULT_SEDIMENT_SETTINGS },
+          { abrainHome, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: true } },
         );
         const notes = analyzed.normalizationNotes.length > 0 ? analyzed.normalizationNotes : undefined;
         if (result.status === "created") {
-          await gitRmOrUnlink(parentRepoRoot, file);
+          let removal: SourceRemoval;
+          try {
+            removal = await gitRmOrUnlink(parentRepoRoot, file);
+          } catch (removeErr) {
+            // Avoid leaving a workflow target that will collide on retry if
+            // the legacy source could not be removed. If the workflow writer
+            // already committed the create, the final abrain commit below will
+            // record this cleanup deletion; either way result.ok becomes false.
+            await fs.unlink(result.path).catch(() => {});
+            throw removeErr;
+          }
+          if (removal.tracked) parentRemovedPaths.push(removal.rel);
+          else untrackedSourceCount += 1;
           workflowCount += 1;
           entries.push({
             source: relSource,
@@ -1081,7 +1164,19 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
         continue;
       }
       await atomicWrite(analyzed.targetAbs, analyzed.normalizedMarkdown);
-      await gitRmOrUnlink(parentRepoRoot, file);
+      let removal: SourceRemoval;
+      try {
+        removal = await gitRmOrUnlink(parentRepoRoot, file);
+      } catch (removeErr) {
+        // If we cannot remove the legacy source, do not leave an orphaned
+        // abrain copy that will collide on retry. Workflows are harder to
+        // roll back because writeAbrainWorkflow may have committed already;
+        // knowledge writes are local atomic files and can be cleaned here.
+        await fs.unlink(analyzed.targetAbs).catch(() => {});
+        throw removeErr;
+      }
+      if (removal.tracked) parentRemovedPaths.push(removal.rel);
+      else untrackedSourceCount += 1;
       movedCount += 1;
       entries.push({
         source: relSource,
@@ -1136,11 +1231,9 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
   // writeAbrainWorkflow's gitCommit hit a soft failure we don't want to
   // leave orphans).
   const parentBasename = path.basename(parentRepoRoot);
-  // Parent side: narrow `git add` to `.pensieve` so we don't sweep in
-  // unrelated working-tree noise (e.g. concurrent sediment auto-commit
-  // staging files in `.pi-astack/`). pensieveAbs may be the canonical
-  // `.pensieve` or a custom path; relativize against parentRepoRoot.
-  const parentPensieveRel = path.relative(parentRepoRoot, pensieveAbs) || ".pensieve";
+  // Parent side: commit only exact tracked legacy source paths that were
+  // successfully removed by this run. This isolates unrelated staged changes
+  // both outside `.pensieve/` and inside support files such as state.md.
   // Round 7 P0-D legacy `.pensieve/MIGRATED_TO_ABRAIN` guard removed in
   // the 2026-05-13 sediment cutover. The guard's only job was to reject
   // post-migration `.pensieve/` sediment writes during the B5 transition
@@ -1178,7 +1271,9 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
       skippedCount,
       seedPrunedCount,
       failedCount,
+      untrackedSourceCount,
       parentPreSha: pre.parentPreSha ?? null,
+      parentRepoWasClean: pre.parentRepoWasClean,
       abrainPreSha: pre.abrainPreSha ?? null,
       // Per-entry mapping. Limit to avoid huge audit lines on giant
       // migrations — first 200 entries inline, rest summarized by count.
@@ -1199,20 +1294,26 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
     // best-effort — audit failure does not abort migration
   }
   const seedPrunedSuffix = seedPrunedCount > 0 ? ` + ${seedPrunedCount} seed pruned` : "";
-  const parentCommitSha = await gitCommitAll(
+  const parentCommit = await gitCommitAll(
     parentRepoRoot,
     `chore: migrate .pensieve → ~/.abrain/projects/${projectId} (${movedCount + workflowCount} entries${seedPrunedSuffix})`,
-    parentPensieveRel,
+    parentRemovedPaths,
   );
   // Abrain side: whole repo IS the migration target (knowledge entries +
   // rebuilt index files + workflow commits' staging), so add -A is correct.
-  const abrainCommitSha = await gitCommitAll(
+  const abrainCommit = await gitCommitAll(
     abrainHome,
     `migrate(in): ${projectId} (${movedCount} knowledge + ${workflowCount} workflow entries from ${parentBasename})`,
   );
+  const parentCommitSha = parentCommit.sha;
+  const abrainCommitSha = abrainCommit.sha;
+  const commitErrors = [
+    ...(parentCommit.error ? [`parent git commit failed: ${parentCommit.error}`] : []),
+    ...(abrainCommit.error ? [`abrain git commit failed: ${abrainCommit.error}`] : []),
+  ];
 
   return {
-    ok: failedCount === 0,
+    ok: failedCount === 0 && commitErrors.length === 0,
     projectId,
     projectIdSource: pre.projectIdSource,
     parentRepoRoot,
@@ -1223,9 +1324,12 @@ export async function runMigrationGo(opts: MigrationGoOptions): Promise<Migratio
     skippedCount,
     seedPrunedCount,
     failedCount,
+    untrackedSourceCount,
     parentCommitSha,
     abrainCommitSha,
+    commitErrors,
     parentPreSha: pre.parentPreSha ?? null,
+    parentRepoWasClean: pre.parentRepoWasClean,
     abrainPreSha: pre.abrainPreSha ?? null,
     graphRebuilt,
     markdownIndexRebuilt,
@@ -1248,6 +1352,7 @@ export function formatMigrationGoSummary(result: MigrationGoResult, cwd: string 
     `  moved (knowledge): ${result.movedCount}`,
     `  routed (workflow): ${result.workflowCount}`,
     ...(result.seedPrunedCount > 0 ? [`  pruned (legacy seed): ${result.seedPrunedCount}`] : []),
+    ...(result.untrackedSourceCount > 0 ? [`  untracked/ignored sources migrated: ${result.untrackedSourceCount}`] : []),
     `  skipped: ${result.skippedCount}`,
     `  failed: ${result.failedCount}`,
     `  parent commit: ${result.parentCommitSha ?? "(none — no changes staged)"}`,
@@ -1255,6 +1360,10 @@ export function formatMigrationGoSummary(result: MigrationGoResult, cwd: string 
   );
   if (partial) {
     lines.push(`  ⚠️  partial migration: failed entries remain in .pensieve for retry. Re-run /memory migrate --go after fixing the failures.`);
+  }
+  if (result.commitErrors?.length) {
+    lines.push("", "Git commit errors:");
+    for (const err of result.commitErrors) lines.push(`  - ${err}`);
   }
   if (result.failedCount > 0) {
     lines.push("", "Failures:");
@@ -1280,15 +1389,25 @@ export function formatMigrationGoSummary(result: MigrationGoResult, cwd: string 
     lines.push(`  ⚠️  index rebuild failed; run \`/memory rebuild --graph\` + \`/memory rebuild --index\` on ${result.abrainProjectDir}`);
   }
 
-  // Rollback hint: use pre-migration SHAs (captured at preflight) rather
-  // than HEAD~1, which is wrong because (a) abrain has N workflow commits +
-  // 1 migrate(in) commit = N+1 commits to undo, and (b) sediment auto-commit
-  // may land concurrently and push HEAD~1 to the wrong commit.
+  // Rollback hint: abrain side is still required clean, so pre-migration SHA
+  // reset is safe there. Parent side is different after B5: dirty/untracked
+  // source repos are allowed, so a blanket `git reset --hard <parentPreSha>`
+  // would destroy unrelated work. Only print it when parent was clean.
   lines.push("", `Rollback (if needed):`);
-  if (result.parentPreSha) {
+  const hasUntrackedSources = result.untrackedSourceCount > 0;
+  if (result.parentPreSha && result.parentRepoWasClean !== false && !hasUntrackedSources) {
     lines.push(`  cd ${prettyPath(result.parentRepoRoot, cwd)} && git reset --hard ${result.parentPreSha}`);
+  } else if (result.parentCommitSha) {
+    lines.push(
+      `  # Parent repo was dirty or ignored/untracked sources were migrated; do NOT reset --hard unless unrelated work is saved.`,
+      `  # If migrated .pensieve entries had uncommitted or ignored/untracked content, abrain is the only full copy; copy them back before resetting abrain.`,
+      `  cd ${prettyPath(result.parentRepoRoot, cwd)} && git revert -n ${result.parentCommitSha}  # optional; review before commit`,
+    );
   } else {
-    lines.push(`  cd ${prettyPath(result.parentRepoRoot, cwd)} && git reset --hard HEAD~1  # ⚠️  pre-migration SHA not captured; verify HEAD~1 manually`);
+    lines.push(
+      `  # Parent source repo had no migration commit to undo (likely ignored/untracked-only .pensieve entries).`,
+      `  # If you need the legacy files back, recover them from the abrain migrated copies before resetting abrain.`,
+    );
   }
   if (result.abrainPreSha) {
     lines.push(`  cd ~/.abrain && git reset --hard ${result.abrainPreSha}`);
@@ -1297,7 +1416,7 @@ export function formatMigrationGoSummary(result: MigrationGoResult, cwd: string 
   }
   lines.push(
     `  # Note: abrain may have multiple commits from this migration (N workflows + 1 migrate-in).`,
-    `  # The reset above targets the SHA captured before *any* of them landed.`,
+    `  # The abrain reset above targets the SHA captured before *any* of them landed.`,
   );
   return lines.join("\n");
 }

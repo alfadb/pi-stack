@@ -218,11 +218,82 @@ function parseEntry(entry: string): { provider: string; id: string } | undefined
 // ── Extension entry ───────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+	// ═══════════════════════════════════════════════════════════════════
+	// Sub-pi retry prefix injection (message_end — runs in BOTH main pi
+	// AND sub-pi / dispatch_agent / dispatch_parallel).
+	// ═══════════════════════════════════════════════════════════════════
+	//
+	// In sub-pi, this is the ONLY model-fallback behavior: it adds the
+	// "connection lost — " prefix so pi's built-in retry regex can match
+	// provider-specific error messages that would otherwise be missed
+	// (e.g., anthropic "stream ended before message_stop" vs pi's regex
+	// expecting "ended without"). Pi's built-in retry is always active
+	// in sub-pi (reads settings.json#retry.maxRetries), but without this
+	// prefix injection some errors fail the regex check and skip retry
+	// entirely — making dispatch sub-agents less resilient than main
+	// session turns.
+	//
+	// Model switching is explicitly NOT done in sub-pi — the guard
+	// below blocks agent_end registration. The parent process handles
+	// fallback at its level.
+	//
+	// In main pi, this handler fires first (idempotent — the full
+	// message_end handler below adds the same prefix). The main-pi
+	// handler also manages resetState / canaryLog / isOnFallback gating
+	// which this lightweight handler intentionally does not touch.
+	pi.on("message_end", (event) => {
+		if (process.env.PI_ABRAIN_DISABLED !== "1") return; // skip in main pi — full handler below
+		if (event.message.role !== "assistant") return;
+		const msg = event.message as { stopReason?: string; errorMessage?: string };
+		if (msg.stopReason !== "error" || !msg.errorMessage) return;
+		if (!msg.errorMessage.startsWith(RETRYABLE_PREFIX)) {
+			msg.errorMessage = RETRYABLE_PREFIX + msg.errorMessage;
+		}
+	});
+
+	// ── Sub-pi guard (model switching disabled in sub-pi) ──────────
 	// Sub-pi guard (2026-05-14 audit): dispatch sub-agents set
 	// PI_ABRAIN_DISABLED=1. model-fallback must not fire inside sub-pi
 	// — it would silently switch the sub-agent's model instead of
 	// failing fast and letting the parent handle the error.
 	if (process.env.PI_ABRAIN_DISABLED === "1") return;
+
+	// ═══════════════════════════════════════════════════════════════════
+	// P2 fix (R6 audit): pre-flight check on model-fallback candidates.
+	// model-curator may have removed fallback models from the registry
+	// via its provider whitelist. Warn on session_start so the user
+	// knows before an error hits that their fallback chain is broken.
+	// ═══════════════════════════════════════════════════════════════════
+	{
+		const config = loadConfig();
+		if (config.fallbackModels?.length) {
+			pi.on("session_start", async (_event, ctx) => {
+				try {
+					const reg = ctx.modelRegistry;
+					if (!reg) return;
+					const available: Array<{ provider: string; id: string }> =
+						(typeof reg.getAvailable === "function" ? reg.getAvailable() : null) ??
+						(typeof reg.getAll === "function" ? reg.getAll() : []) ??
+						[];
+					const availableIds = new Set(available.map((m) => `${m.provider}/${m.id}`));
+					for (const entry of config.fallbackModels!) {
+						if (!availableIds.has(entry)) {
+							console.error(
+								`[model-fallback] WARN: fallback model "${entry}" not in registry — ` +
+								`may have been removed by model-curator whitelist`,
+							);
+							try {
+								ctx.ui?.notify?.(
+									`model-fallback: "${entry}" absent from registry (check modelCurator.providers whitelist)`,
+									"warning",
+								);
+							} catch { /* best-effort */ }
+						}
+					}
+				} catch { /* best-effort */ }
+			});
+		}
+	}
 
 	const config = loadConfig();
 	// Auto-detect pi's retry budget so we always align the give-up node.

@@ -176,7 +176,7 @@ async function main() {
     const { rebuildGraphIndex } = req("./memory/graph.js");
     const { rebuildMarkdownIndex } = req("./memory/index-file.js");
     const { planMigrationDryRun, writeMigrationReport, formatMigrationPlan } = req("./memory/migrate.js");
-    const { runMigrationGo, formatMigrationGoSummary } = req("./memory/migrate-go.js");
+    const { preflightMigrationGo, runMigrationGo, formatMigrationGoSummary } = req("./memory/migrate-go.js");
     const { bindAbrainProject } = req("./_shared/runtime.js");
     const { runDoctorLite, formatDoctorLiteReport } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
@@ -628,6 +628,19 @@ Original Pensieve seed content.
 
     // With --project=<id>, target_path resolves to the abrain destination.
     const fakeAbrainHome = path.join(root, ".abrain-fake");
+    const missingCanonical = await planMigrationDryRun(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root, {
+      abrainHome: fakeAbrainHome,
+      projectId: "smoke-proj",
+    });
+    const missingSeedSkip = missingCanonical.skipped.find((s) => s.source_path === ".pensieve/maxims/eliminate-special-cases-by-redesigning-data-flow.md");
+    assert(
+      missingSeedSkip && /would fail: extract seed's canonical copy not found/.test(missingSeedSkip.reason),
+      `dry-run should mirror --go canonical-copy guard for extract seed: ${JSON.stringify(missingCanonical.skipped)}`,
+    );
+    writeFile(
+      path.join(fakeAbrainHome, "knowledge", "eliminate-special-cases-by-redesigning-data-flow.md"),
+      "---\nkind: maxim\n---\n# Canonical seed\n",
+    );
     const migration = await planMigrationDryRun(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root, {
       abrainHome: fakeAbrainHome,
       projectId: "smoke-proj",
@@ -712,7 +725,7 @@ Original Pensieve seed content.
     assert(correlatedWrite.correlationId === "corr-smoke" && correlatedWrite.candidateId === "corr-smoke:c1", "writer result should echo audit correlation ids");
     // Audit log remains project-local (forensic), even though entry markdown went to abrain.
     const auditRows = fs.readFileSync(path.join(root, ".pi-astack", "sediment", "audit.jsonl"), "utf-8").trim().split("\n").map((line) => JSON.parse(line));
-    const correlatedAudit = auditRows.find((row) => row.operation === "create" && row.target === "project:writer-correlation-fixture");
+    const correlatedAudit = auditRows.find((row) => row.operation === "create" && row.target === `project:${writerTarget2.projectId}:writer-correlation-fixture`);
     assert(correlatedAudit?.lane === "auto_write", "writer audit row should include lane");
     assert(correlatedAudit?.session_id === "session-smoke", "writer audit row should include session_id");
     assert(correlatedAudit?.correlation_id === "corr-smoke", "writer audit row should include correlation_id");
@@ -1616,7 +1629,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       execFileSync("git", ["-C", wfHome, "init", "-q"]);
       execFileSync("git", ["-C", wfHome, "config", "user.email", "smoke@pi-astack.local"]);
       execFileSync("git", ["-C", wfHome, "config", "user.name", "pi-astack smoke"]);
-      const wfSettings = DEFAULT_SEDIMENT_SETTINGS;
+      const wfSettings = { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: true };
 
       // 1) cross-project workflow → ~/.abrain/workflows/<slug>.md
       const wfX = await writeAbrainWorkflow(
@@ -1749,7 +1762,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
     // legacy short-term entry without schema_version, project-specific
     // pipeline, cross-project pipeline, derived index file to skip), build
     // a fake abrain repo, run runMigrationGo, assert routing + normalization
-    // + commits + preflight rejection on dirty parent. Stays offline.
+    // + commits + source-side dirty/untracked tolerance. Stays offline.
     {
       const goParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-go-parent-"));
       execFileSync("git", ["-C", goParent, "init", "-q"]);
@@ -1878,16 +1891,16 @@ This is a cross-project review pipeline body with enough content.
         migrationTimestamp: "2026-05-12T10:00:00.000+08:00",
       };
 
-      // 1) Preflight rejects dirty parent
+      // 1) Preflight allows dirty parent / dirty .pensieve.
+      // Post-B5, .pensieve is a legacy input snapshot; requiring tracked+clean
+      // source state blocks exactly the repos migration is meant to retire.
       fs.writeFileSync(path.join(goParent, "dirty-file.txt"), "oops");
-      const dirty = await runMigrationGo(goOpts);
-      assert(dirty.ok === false, `dirty parent must fail preflight, got ok=${dirty.ok}`);
-      assert(
-        dirty.preconditionFailures.some((f) => /not clean/.test(f)),
-        `dirty parent failure must mention 'not clean': ${dirty.preconditionFailures.join("; ")}`,
-      );
-      assert(dirty.movedCount === 0 && dirty.workflowCount === 0, `dirty preflight must not migrate anything`);
+      fs.appendFileSync(path.join(goParent, ".pensieve", "maxims", "test-rule.md"), "\nDirty source note.\n");
+      const dirty = await preflightMigrationGo(goOpts);
+      assert(dirty.ok === true, `dirty parent should not fail preflight anymore: ${dirty.failures.join("; ")}`);
+      assert(dirty.parentRepoWasClean === false, `dirty preflight should record parentRepoWasClean=false`);
       fs.unlinkSync(path.join(goParent, "dirty-file.txt"));
+      execFileSync("git", ["-C", goParent, "checkout", "--", ".pensieve/maxims/test-rule.md"]);
 
       // 2) Preflight rejects when abrain dirty
       fs.writeFileSync(path.join(goAbrain, "dirty-file.txt"), "oops");
@@ -2162,6 +2175,121 @@ This is a cross-project review pipeline body with enough content.
       );
     }
 
+    // === per-repo migration --go: dirty/untracked source tolerance ========
+    {
+      const dParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-dirty-parent-"));
+      execFileSync("git", ["-C", dParent, "init", "-q"]);
+      execFileSync("git", ["-C", dParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", dParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", dParent, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(dParent, ".pensieve", "maxims", "dirty-rule.md"), makeEntry({ title: "Dirty Rule", kind: "maxim" }));
+      execFileSync("git", ["-C", dParent, "add", "-A"]);
+      execFileSync("git", ["-C", dParent, "commit", "-q", "-m", "init dirty pensieve"]);
+
+      const dAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-dirty-abrain-"));
+      execFileSync("git", ["-C", dAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", dAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", dAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", dAbrain, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(dAbrain, "README.md"), "# abrain dirty smoke\n");
+      execFileSync("git", ["-C", dAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", dAbrain, "commit", "-q", "-m", "init abrain"]);
+      await bindMigrationProject(dParent, dAbrain, "dirty-project");
+
+      fs.appendFileSync(path.join(dParent, ".pensieve", "maxims", "dirty-rule.md"), "\nDirty source note.\n");
+      writeFile(path.join(dParent, "dirty-file.txt"), "outside staged change\n");
+      writeFile(path.join(dParent, ".pensieve", "state.md"), "# staged support file\n");
+      execFileSync("git", ["-C", dParent, "add", "dirty-file.txt", ".pensieve/state.md"]);
+
+      const dirtyResult = await runMigrationGo({
+        pensieveTarget: path.join(dParent, ".pensieve"),
+        abrainHome: dAbrain,
+        cwd: dParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2099-05-12T11:00:00.000+08:00",
+      });
+      assert(dirtyResult.ok, `dirty source migration should succeed: ${JSON.stringify(dirtyResult)}`);
+      assert(dirtyResult.parentRepoWasClean === false, `dirty source result should record parentRepoWasClean=false`);
+      assert(dirtyResult.commitErrors.length === 0, `dirty source should have no commit errors: ${dirtyResult.commitErrors.join("; ")}`);
+      const dirtyTarget = path.join(dAbrain, "projects", "dirty-project", "maxims", "dirty-rule.md");
+      assert(fs.existsSync(dirtyTarget), `dirty source target should exist at ${dirtyTarget}`);
+      const dirtyText = fs.readFileSync(dirtyTarget, "utf-8");
+      assert(/Dirty source note/.test(dirtyText), `dirty working-tree content must be migrated:\n${dirtyText}`);
+      const dirtyUpdated = dirtyText.match(/^updated: (.+)$/m)?.[1] || "";
+      assert(!/2026-05-08/.test(dirtyUpdated), `dirty tracked updated should use fs.mtime, not stale git/frontmatter time: ${dirtyUpdated}\n${dirtyText}`);
+      assert(!fs.existsSync(path.join(dParent, ".pensieve", "maxims", "dirty-rule.md")), `dirty source should be removed after migration`);
+      assert(dirtyResult.parentCommitSha && /^[0-9a-f]{40}$/.test(dirtyResult.parentCommitSha), `dirty parent commit sha invalid: ${dirtyResult.parentCommitSha}`);
+      const dirtyParentShow = execFileSync("git", ["-C", dParent, "show", "--name-only", "--pretty=", dirtyResult.parentCommitSha], { encoding: "utf-8" });
+      assert(/\.pensieve\/maxims\/dirty-rule\.md/.test(dirtyParentShow), `parent cleanup commit should include migrated source deletion:\n${dirtyParentShow}`);
+      assert(!/dirty-file\.txt/.test(dirtyParentShow), `parent cleanup commit must not include outside staged file:\n${dirtyParentShow}`);
+      assert(!/\.pensieve\/state\.md/.test(dirtyParentShow), `parent cleanup commit must not include staged support file:\n${dirtyParentShow}`);
+      const dirtyStatus = execFileSync("git", ["-C", dParent, "status", "--porcelain"], { encoding: "utf-8" });
+      assert(/^A  dirty-file\.txt/m.test(dirtyStatus), `outside staged file should remain staged after migration:\n${dirtyStatus}`);
+      assert(/^A  \.pensieve\/state\.md/m.test(dirtyStatus), `staged support file should remain staged after migration:\n${dirtyStatus}`);
+      const dirtySummary = formatMigrationGoSummary(dirtyResult, dParent);
+      assert(/git revert -n/.test(dirtySummary), `dirty rollback should suggest non-committing revert:\n${dirtySummary}`);
+      assert(/abrain is the only full copy/.test(dirtySummary), `dirty rollback must warn about dirty source copy:\n${dirtySummary}`);
+      assert(!dirtySummary.includes(`git reset --hard ${dirtyResult.parentPreSha}`), `dirty rollback must not suggest parent reset --hard:\n${dirtySummary}`);
+    }
+
+    // === per-repo migration --go: true untracked/ignored source entries ===
+    {
+      const uParent = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-untracked-parent-"));
+      execFileSync("git", ["-C", uParent, "init", "-q"]);
+      execFileSync("git", ["-C", uParent, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", uParent, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", uParent, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(uParent, "README.md"), "# parent\n");
+      writeFile(path.join(uParent, ".gitignore"), ".pensieve/\n");
+      execFileSync("git", ["-C", uParent, "add", "-A"]);
+      execFileSync("git", ["-C", uParent, "commit", "-q", "-m", "init parent with ignored pensieve"]);
+
+      const uAbrain = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-untracked-abrain-"));
+      execFileSync("git", ["-C", uAbrain, "init", "-q"]);
+      execFileSync("git", ["-C", uAbrain, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", uAbrain, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", uAbrain, "config", "commit.gpgsign", "false"]);
+      writeFile(path.join(uAbrain, "README.md"), "# abrain untracked smoke\n");
+      execFileSync("git", ["-C", uAbrain, "add", "-A"]);
+      execFileSync("git", ["-C", uAbrain, "commit", "-q", "-m", "init abrain"]);
+      await bindMigrationProject(uParent, uAbrain, "untracked-project");
+
+      // Reproduce repos like ~/work/base/sub2api: .pensieve itself carries
+      // `.gitignore: *`, so ordinary rg-based scans see only odd support
+      // leftovers such as state.md. Migration must explicitly include ignored
+      // files because .pensieve is the legacy input snapshot.
+      writeFile(path.join(uParent, ".pensieve", ".gitignore"), "*\n");
+      writeFile(path.join(uParent, ".pensieve", "state.md"), "# State support file\n");
+      writeFile(path.join(uParent, ".pensieve", "maxims", "untracked-rule.md"), makeEntry({ title: "Untracked Rule", kind: "maxim" }));
+      const ignoredDryRun = await planMigrationDryRun(
+        path.join(uParent, ".pensieve"),
+        DEFAULT_SETTINGS,
+        undefined,
+        uParent,
+        { abrainHome: uAbrain, projectId: "untracked-project" },
+      );
+      assert(ignoredDryRun.migrateCount === 1, `dry-run should see ignored .pensieve entry, got ${JSON.stringify(ignoredDryRun)}`);
+      assert(ignoredDryRun.skipped.some((s) => s.source_path.endsWith(".pensieve/state.md")), `dry-run should still skip root state.md support file: ${JSON.stringify(ignoredDryRun)}`);
+      const untrackedResult = await runMigrationGo({
+        pensieveTarget: path.join(uParent, ".pensieve"),
+        abrainHome: uAbrain,
+        cwd: uParent,
+        settings: DEFAULT_SETTINGS,
+        migrationTimestamp: "2026-05-12T11:30:00.000+08:00",
+      });
+      assert(untrackedResult.ok, `ignored .pensieve untracked source migration should succeed: ${JSON.stringify(untrackedResult)}`);
+      assert(untrackedResult.parentRepoWasClean === true, `ignored .pensieve entries should not make git status dirty`);
+      assert(untrackedResult.untrackedSourceCount === 1, `ignored/untracked source count should be 1, got ${untrackedResult.untrackedSourceCount}`);
+      assert(untrackedResult.parentCommitSha === null, `ignored/untracked-only source should not create parent commit: ${untrackedResult.parentCommitSha}`);
+      assert(!fs.existsSync(path.join(uParent, ".pensieve", "maxims", "untracked-rule.md")), `untracked source should be removed from legacy .pensieve`);
+      assert(fs.existsSync(path.join(uAbrain, "projects", "untracked-project", "maxims", "untracked-rule.md")), `untracked source should be written to abrain`);
+      const untrackedSummary = formatMigrationGoSummary(untrackedResult, uParent);
+      assert(/untracked\/ignored sources migrated: 1/.test(untrackedSummary), `untracked summary should count ignored source:\n${untrackedSummary}`);
+      assert(/no migration commit to undo/.test(untrackedSummary), `untracked summary should say parent has no commit:\n${untrackedSummary}`);
+      assert(/recover them from the abrain migrated copies/.test(untrackedSummary), `untracked rollback should warn to recover from abrain before reset:\n${untrackedSummary}`);
+      assert(!untrackedSummary.includes(`git reset --hard ${untrackedResult.parentPreSha}`), `ignored/untracked rollback must not suggest parent reset --hard:\n${untrackedSummary}`);
+    }
+
     // === per-repo migration --go: timestamp recovery (git/fs/fm triangulation) ===
     //
     // analyzeEntry resolves `created` to min(fm.created, git-author-first,
@@ -2169,8 +2297,8 @@ This is a cross-project review pipeline body with enough content.
     // fs.mtime-when-untracked). Without this triangulation every legacy
     // entry would migrate as "created today", destroying LLM time-aware
     // ranking signal. The four fixtures below cover:
-    //   (1) fm.created "future"   → git-first wins (never trust future-dated fm)
-    //   (2) fm.created absent     → git-first wins (real authoring signal)
+    //   (1) fm.created "future"   → future fm is rejected; created is no later than git-first
+    //   (2) fm.created absent     → created is no later than git-first (fs.birthtime may be earlier)
     //   (3) fm.created "ancient"  → fm wins (author claims very early date)
     //   (4) tracked-but-modified  → updated picks git author-last (commit 2)
     {
@@ -2180,8 +2308,9 @@ This is a cross-project review pipeline body with enough content.
       execFileSync("git", ["-C", tParent, "config", "user.name", "pi-astack smoke"]);
       execFileSync("git", ["-C", tParent, "config", "commit.gpgsign", "false"]);
 
-      // (1) fm.created = far-future date; git-first should win because
-      //     min(future, git-first, fs.birthtime) = git-first.
+      // (1) fm.created = far-future date; future fm must not win. The
+      //     chosen created value is min(git-first, fs.birthtime), so on
+      //     filesystems with birthtime it can be a few ms before git-first.
       writeFile(
         path.join(tParent, ".pensieve", "decisions", "future-fm.md"),
         `---
@@ -2332,10 +2461,10 @@ Second body (after edit).
       execFileSync("git", ["-C", tAbrain, "commit", "-q", "-m", "init abrain"]);
       await bindMigrationProject(tParent, tAbrain, "tstamp-test");
 
-      // Now drop an UNTRACKED file (after the binding commit) so git log
-      // returns empty for it. fs.birthtime / fs.mtime are the only
-      // signals; we just verify created/updated are NOT the migration
-      // timestamp (i.e. fs fallback engaged).
+      // Now add a late entry after the binding commit. This fixture is
+      // committed before migration so timestamp recovery can assert that
+      // git-first comes from the late commit. True untracked-source migration
+      // is covered in the dedicated block above.
       writeFile(
         path.join(tParent, ".pensieve", "decisions", "untracked.md"),
         `---
@@ -2350,13 +2479,11 @@ schema_version: 1
 Body.
 `,
       );
-      // Preflight requires a clean working tree; the untracked file would
-      // trip `git status --porcelain`. Commit it on its own so it lands
-      // AFTER the binding commit; git-first will then resolve to this
-      // very commit, exercising the "committed-but-not-in-initial-pensieve"
-      // branch (which is still tracked, but only after the migrate-go
-      // git-times batch picks it up). For an untracked-with-fs-only test
-      // we rely on fixture (5) below.
+      // Commit it on its own so it lands AFTER the binding commit;
+      // git-first will then resolve to this very commit, exercising the
+      // "committed-but-not-in-initial-pensieve" branch. True untracked
+      // fs-only behavior is covered by the dedicated untracked-source
+      // migration smoke above.
       execFileSync("git", ["-C", tParent, "add", "-A"]);
       execFileSync("git", ["-C", tParent, "commit", "-q", "-m", "add late untracked entry"]);
       const untrackedGitFirst = gitTime(".pensieve/decisions/untracked.md", ["--reverse", "--diff-filter=A"]);
@@ -2382,8 +2509,13 @@ Body.
         const m = text.match(new RegExp(`^${field}: (.+)$`, "m"));
         return m ? m[1].replace(/^"|"$/g, "") : null;
       };
+      const assertCreatedNotAfter = (actual, reference, label) => {
+        const a = Date.parse(actual);
+        const r = Date.parse(reference);
+        assert(Number.isFinite(a) && Number.isFinite(r) && a <= r, `${label} created should be no later than ${reference}, got ${actual}`);
+      };
 
-      // (1) future-fm: created must be git-first (NOT 2099-01-01).
+      // (1) future-fm: created must not be future fm (2099-01-01).
       //     updated must equal git-last — NOT the future-dated
       //     fm.updated 2099-01-01 (caught by the future-date guard in
       //     resolveUpdated, which caps at min(migrationTimestamp,
@@ -2393,7 +2525,7 @@ Body.
       const futureText = readEntry("future-fm");
       const futureCreated = fmField(futureText, "created");
       const futureUpdated = fmField(futureText, "updated");
-      assert(futureCreated === futureGitFirst, `future-fm created should be git-first ${futureGitFirst}, got ${futureCreated}`);
+      assertCreatedNotAfter(futureCreated, futureGitFirst, "future-fm");
       assert(!futureCreated.startsWith("2099"), `future-fm created must not leak 2099 fm value: ${futureCreated}`);
       // Strong assertion: updated must EXACTLY equal git-last (which is
       // bounded by real time). Both "2099-01-01" (fm leak) and
@@ -2401,9 +2533,9 @@ Body.
       assert(futureUpdated === futureGitLast, `future-fm updated must be git-last ${futureGitLast}, got ${futureUpdated}`);
       assert(!futureUpdated.startsWith("2099"), `future-fm updated must NOT carry 2099 (future-date guard failure): ${futureUpdated}`);
 
-      // (2) no-fm-dates: created = git-first (no fm signal), updated = git-last.
+      // (2) no-fm-dates: created = min(git-first, fs.birthtime), updated = git-last.
       const noFmText = readEntry("no-fm-dates");
-      assert(fmField(noFmText, "created") === noFmGitFirst, `no-fm-dates created should be git-first ${noFmGitFirst}`);
+      assertCreatedNotAfter(fmField(noFmText, "created"), noFmGitFirst, "no-fm-dates");
       assert(fmField(noFmText, "updated") === noFmGitLast, `no-fm-dates updated should be git-last ${noFmGitLast}`);
       assert(!fmField(noFmText, "created").startsWith("2099"), `no-fm-dates created must not be migration ts`);
 
@@ -2417,12 +2549,12 @@ Body.
       const ancientUpdated = fmField(ancientText, "updated");
       assert(!ancientUpdated.startsWith("2020-"), `ancient-fm updated should be max(git-last, fm.updated), got ${ancientUpdated}`);
 
-      // (4) twice-edited: created = git-first (commit 1), updated = git-last
+      // (4) twice-edited: created = min(git-first, fs.birthtime), updated = git-last
       //     (commit 2). Critical: updated must NOT equal created.
       const twiceText = readEntry("twice-edited");
       const twiceCreated = fmField(twiceText, "created");
       const twiceUpdated = fmField(twiceText, "updated");
-      assert(twiceCreated === twiceGitFirst, `twice-edited created should be git-first ${twiceGitFirst}, got ${twiceCreated}`);
+      assertCreatedNotAfter(twiceCreated, twiceGitFirst, "twice-edited");
       assert(twiceUpdated === twiceGitLast, `twice-edited updated should be git-last ${twiceGitLast}, got ${twiceUpdated}`);
       assert(twiceUpdated > twiceCreated, `twice-edited updated must be > created (git history): ${twiceCreated} vs ${twiceUpdated}`);
 
@@ -2446,7 +2578,7 @@ Body.
       const untrackedText = readEntry("untracked");
       const untrackedCreated = fmField(untrackedText, "created");
       const untrackedUpdated = fmField(untrackedText, "updated");
-      assert(untrackedCreated === untrackedGitFirst, `untracked-late created should be git-first ${untrackedGitFirst}, got ${untrackedCreated}`);
+      assertCreatedNotAfter(untrackedCreated, untrackedGitFirst, "untracked-late");
       assert(!untrackedCreated.startsWith("2099-12"), `untracked-late created must not be migration ts: ${untrackedCreated}`);
       assert(!untrackedUpdated.startsWith("2099-12"), `untracked-late updated must not be migration ts: ${untrackedUpdated}`);
     }

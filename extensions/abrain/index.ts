@@ -655,20 +655,26 @@ export default function activate(pi: ExtensionAPI): void {
         auditBashInject(prepared.record);
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : String(e);
-        console.error(`[abrain] vault bash injection error (command proceeds uninjected): ${message}`);
-        // Deliberately NOT blocking the command — we err on the side of
-        // letting the user's command run rather than breaking bash entirely.
-        // The audit log records the inject failure for forensic purposes.
+        console.error(`[abrain] vault bash injection error (BLOCKING command — uninjected execution would leak secrets or run without vault env): ${message}`);
+        // P2 fix (R6 audit): fail-closed — if vault injection fails for any
+        // reason (env file write failure, decryption error, state corruption),
+        // MUST block the command rather than executing it without injected
+        // secrets. An uninjected command with $VAULT_* placeholders would:
+        // (a) expand to host-environment variables if they exist, or
+        // (b) run with literal $VAULT_* placeholders — both are dangerous.
+        // The user can always re-run the command after fixing the vault issue.
         auditBashInjectBlock(String(event.input?.command ?? ""), `inject_error: ${message.slice(0, 200)}`);
+        return { block: true, reason: `vault injection error: ${message.slice(0, 200)}` };
       }
     });
 
     eventRegistry.on("tool_result", async (event, ctx) => {
       // ── Vault bash output authorization guard ─────────────────
       // Outer try/catch: if authorizeVaultBashOutput or redaction
-      // throws, we fall through to release the raw (unredacted) output
-      // rather than silently withholding it. This is the safer default
-      // for operational continuity; the audit log records the failure.
+      // throws, we fail-CLOSED — withhold the bash output rather
+      // than releasing raw vault-touched data to LLM context.
+      // Audit row records the failure for forensic diagnosis.
+      // (Changed from fail-open in R6 audit, 2026-05-14.)
       try {
         if (event.toolName !== "bash") return;
         const record = vaultBashRuns.get(event.toolCallId);
@@ -691,19 +697,39 @@ export default function activate(pi: ExtensionAPI): void {
         };
       } catch (e: unknown) {
         const message = e instanceof Error ? e.message : String(e);
-        console.error(`[abrain] vault bash output authorization error (falling through — output released unredacted): ${message}`);
-        // On authorization failure, release the output unredacted rather
-        // than silently blocking it. The vault operator can audit the
-        // vault-events.jsonl to identify any missed redactions.
+        console.error(`[abrain] vault bash output authorization error (withholding output — authorization boundary failure): ${message}`);
+        // Fail-closed: authorization/redaction failure MUST NOT release
+        // raw vault-backed output into LLM context. The user can re-run
+        // the command manually to get their output; a leaked secret is
+        // irreversible. The vault operator can inspect vault-events.jsonl
+        // to diagnose the authorization failure.
         try {
           const record = vaultBashRuns.get(event.toolCallId);
           if (record) {
             vaultBashRuns.delete(event.toolCallId);
             try { fs.rmSync(record.envFile, { force: true }); } catch {}
-            auditBashOutput("bash_output_release", record);
+            auditBashOutput("bash_output_withhold", record);
           }
         } catch { /* best-effort */ }
+        return {
+          content: [{ type: "text", text: `[vault] bash output withheld — authorization/redaction error: ${message.slice(0, 300)}` }],
+          details: { ...(event.details ?? {}), vault: { outputWithheld: true, reason: "authorization_error" } },
+        };
       }
+    });
+
+    // P2 fix (R6 audit): session_shutdown cleanup for orphaned vault bash runs.
+    // vaultBashRuns and env files are normally cleaned in tool_result, but
+    // if the session ends without a matching tool_result (cancelled command,
+    // pi crash, toolCallId mismatch), leftover plaintext records and env
+    // files would persist across sessions. This handler drains any leftovers.
+    eventRegistry.on("session_shutdown", async () => {
+      try {
+        for (const [, record] of vaultBashRuns) {
+          try { fs.rmSync(record.envFile, { force: true }); } catch {}
+        }
+        vaultBashRuns.clear();
+      } catch { /* best-effort */ }
     });
   }
 

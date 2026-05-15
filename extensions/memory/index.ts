@@ -129,12 +129,13 @@ function registerMemoryCommand(pi: ExtensionAPI) {
       if (subcommand === "migrate") {
         // Slash surface (per user preference): `/memory migrate` defaults to
         // dry-run; `--go` executes per-repo migration. Mutually exclusive.
-        // No `--apply --yes` double-confirmation — git working tree clean
-        // is the precondition. Rollback uses the pre-migration SHA captured
-        // during preflight and printed at the end of the --go summary
-        // (NOT `HEAD~1` — abrain side has N+1 commits when N workflow
-        // entries are routed; see docs/migration/abrain-pensieve-migration.md
-        // §5).
+        // No `--apply --yes` double-confirmation. Post-B5, the source
+        // `.pensieve/` is just the legacy input snapshot: dirty/untracked
+        // parent repos are allowed. Abrain target cleanliness remains the
+        // hard safety precondition; rollback guidance is printed at the end
+        // of the --go summary (NOT `HEAD~1` — abrain side has N+1 commits
+        // when N workflow entries are routed; see docs/migration/
+        // abrain-pensieve-migration.md §5).
         //
         // Flag scope (ADR 0017 / B4.5):
         //   --dry-run            : default. Supports --report.
@@ -298,7 +299,8 @@ export default function (pi: ExtensionAPI) {
       "Search markdown memory using a natural-language retrieval prompt via the unified read-only Facade. " +
       "Internally uses ADR 0015 two-stage LLM rerank by default (stage 1 candidate selection from memory index, stage 2 full-content rerank) " +
       "so Chinese-English mixed queries, semantic paraphrases, trigger phrases, and timeline-aware relevance work. " +
-      "Searches current project .pensieve/ and, when configured/present, ~/.abrain/. " +
+      "Searches project memory (~/.abrain/projects/<id>/ post-B5 cutover, " +
+      "falling back to legacy .pensieve/ when not yet migrated) and, when configured/present, ~/.abrain/knowledge/. " +
       "Returns normalized cards without scope/backend/source_path so the LLM does not choose a backend.",
     promptSnippet: "memory_search(query: natural-language retrieval prompt, filters?: { kinds?, status?, limit? })",
     promptGuidelines: [

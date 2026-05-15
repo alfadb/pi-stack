@@ -220,7 +220,12 @@ async function lintFile(file: string): Promise<LintIssue[]> {
   }
 }
 
-export async function markdownFilesForTarget(target: string, settings: MemorySettings, signal?: AbortSignal): Promise<string[]> {
+export async function markdownFilesForTarget(
+  target: string,
+  settings: MemorySettings,
+  signal?: AbortSignal,
+  opts: { includeIgnored?: boolean } = {},
+): Promise<string[]> {
   const abs = path.resolve(target);
   let stat: fsSync.Stats;
   try {
@@ -230,7 +235,7 @@ export async function markdownFilesForTarget(target: string, settings: MemorySet
   }
   if (stat.isFile()) return abs.endsWith(".md") ? [abs] : [];
   if (!stat.isDirectory()) return [];
-  const rgFiles = await listFilesWithRg(abs, signal);
+  const rgFiles = await listFilesWithRg(abs, signal, { includeIgnored: opts.includeIgnored });
   const files = rgFiles ?? await walkMarkdownFiles(abs, settings.maxEntries, signal);
   return files
     .filter((file) => file.endsWith(".md"))

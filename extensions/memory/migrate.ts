@@ -177,6 +177,19 @@ async function planMigrationForFile(
 
   const seed = legacyPensieveSeedFor(relPath, frontmatter);
   if (seed) {
+    if (seed.disposition === "extract" && seed.globalTarget && opts.abrainHome) {
+      const globalCopy = path.join(opts.abrainHome, seed.globalTarget);
+      try {
+        await fs.access(globalCopy);
+      } catch {
+        return {
+          skipped: {
+            source_path: sourceDisplay,
+            reason: `would fail: extract seed's canonical copy not found in abrain: ${seed.globalTarget}`,
+          },
+        };
+      }
+    }
     return { skipped: { source_path: sourceDisplay, reason: legacyPensieveSeedDryRunReason(seed) } };
   }
 
@@ -258,7 +271,11 @@ export async function planMigrationDryRun(
   opts: MigrationDryRunOptions = {},
 ): Promise<MigrationPlanReport> {
   const absTarget = path.resolve(target);
-  const files = await markdownFilesForTarget(absTarget, settings, signal);
+  // Migration targets legacy `.pensieve/` as an explicit source snapshot.
+  // Many repos intentionally have `.pensieve/.gitignore: *`; dry-run must
+  // still see those ignored/untracked entries, otherwise it reports only
+  // support files such as state.md.
+  const files = await markdownFilesForTarget(absTarget, settings, signal, { includeIgnored: true });
   const projectRoot = inferProjectRoot(absTarget);
 
   const items: MigrationPlanItem[] = [];

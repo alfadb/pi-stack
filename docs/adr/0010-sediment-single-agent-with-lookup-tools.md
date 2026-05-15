@@ -1,6 +1,6 @@
 # ADR 0010 — sediment 单 agent + lookup tools 写入策略（v6.6，v6.8 仍用）
 
-- **状态**: Accepted (evolved 2026-05-10)。单-agent 内核保留并由 [ADR 0016](0016-sediment-as-llm-curator.md) 继承为 LLM curator；lookup-tools loop 内核由 [ADR 0015](0015-memory-search-llm-driven-retrieval.md) D7 落地为 curator dedup（create 前调 `memory_search` 识别语义近邻）；markdown 终结符协议（SKIP / SKIP_DUPLICATE / ## GBRAIN）已被 frontmatter + compiled truth + `## Timeline` 格式取代。写入 substrate 从 `gbrain put` 转为 sediment 内部 writer（create/update/merge/archive/supersede/delete/skip），不暴露 LLM-facing 写工具。
+- **状态**: Accepted (evolved 2026-05-10)。单-agent 内核保留并由 [ADR 0016](0016-sediment-as-llm-curator.md) 继承为 LLM curator；lookup-tools loop 内核由 [ADR 0015](0015-memory-search-llm-driven-retrieval.md) D7 落地为 curator dedup（create 前调 `memory_search` 识别语义近邻）；SKIP_DUPLICATE / ## GBRAIN 终结符已退役，SKIP 保留为 extractor→sediment runner 空结果信号（no candidate to write）；写入 substrate 从 `gbrain put` 转为 sediment 内部 writer（create/update/merge/archive/supersede/delete/skip），不暴露 LLM-facing 写工具。
 - **日期**: 2026-05-06
 - **决策者**: alfadb
 - **替代**: ADR 0004（v6.5 三模型投票方案）

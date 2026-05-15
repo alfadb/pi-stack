@@ -86,6 +86,7 @@ export function renderDispatchStatus(
     case "running":   return `📡 dispatch${c}`;
     case "completed": return `✅ dispatch${c}${dur}`;
     case "failed":    return `⚠️  dispatch${c}${dur}`;
+    default:          return `❓ dispatch (${state})${c}${dur}`;
   }
 }
 
@@ -109,16 +110,15 @@ function applyDispatchStatus(
 // ── Prompt file helper ──────────────────────────────────────────
 
 /**
- * If the prompt is short enough to pass as an argument safely, return it
- * directly. Otherwise write to a temp .md file and return the @file-path.
- * All prompts are passed via @file for safety — no threshold guessing.
+ * Simple prompt-to-file writer. The caller is responsible for providing
+ * a unique tmpDir (via mkdtemp) to prevent concurrent dispatch_parallel
+ * tasks from overwriting each other's prompt files (R6 audit P1 fix).
  */
 function promptArg(
   prompt: string,
   tmpDir: string,
 ): { arg: string; cleanup?: () => void } {
   const file = path.join(tmpDir, "dispatch-prompt.md");
-  fs.mkdirSync(tmpDir, { recursive: true });
   fs.writeFileSync(file, prompt, "utf-8");
   return {
     arg: `@${file}`,
@@ -230,7 +230,7 @@ function runSubprocess(
 ): Promise<SubprocessResult> {
   return new Promise((resolve) => {
     const start = Date.now();
-    const tmpDir = path.join(os.tmpdir(), `pi-dispatch-${Date.now()}`);
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-dispatch-"));
     const { arg: promptArgValue, cleanup: cleanupTemp } = promptArg(prompt, tmpDir);
 
     const args = [

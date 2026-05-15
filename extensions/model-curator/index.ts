@@ -277,6 +277,10 @@ export default function (pi: ExtensionAPI) {
   if (process.env.PI_ABRAIN_DISABLED === "1") return;
 
   pi.on("session_start", async (_event, ctx) => {
+    // P2 fix (R6 audit): outer try/catch so model-curator startup
+    // failure (network/auth/registry error) doesn't reject the hook
+    // and silently disable all other session_start handlers.
+    try {
     const reg = ctx.modelRegistry;
     if (!reg) return;
 
@@ -333,6 +337,13 @@ export default function (pi: ExtensionAPI) {
       if (line.includes("WARN") || line.includes("FAIL") || line.includes("SKIP")) {
         console.error(line);
       }
+    }
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(`[model-curator] session_start error (model whitelist failed, leaving registry as-is): ${message}`);
+      try {
+        ctx.ui?.setStatus?.(FOOTER_STATUS_KEYS.modelCurator, "⚠️ model-curator error");
+      } catch { /* ignore */ }
     }
   });
 

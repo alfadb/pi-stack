@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
@@ -48,6 +48,11 @@ export interface ProjectEntryDraft {
   status?: EntryStatus;
   confidence?: number;
   triggerPhrases?: string[];
+  /** Slugs of upstream entries this entry derives from (set by curator CREATE op
+   *  when the candidate is a downstream observation building on a neighbor's
+   *  premise). Written to frontmatter `derives_from` for graph/reconciliation.
+   *  ADR 0018 Layer 1 — update-vs-create discipline. */
+  derivesFrom?: string[];
   sessionId?: string;
   timelineNote?: string;
 }
@@ -262,6 +267,7 @@ function buildMarkdown(draft: ProjectEntryDraft, scope: "project" | "world", pro
     `created: ${timestamp}`,
     `updated: ${timestamp}`,
     ...yamlList("trigger_phrases", draft.triggerPhrases),
+    ...yamlList("derives_from", draft.derivesFrom),
   ];
   if (scope === "project" && projectId) {
     frontmatter.push(`project_id: ${yamlString(projectId)}`);
@@ -293,7 +299,7 @@ function frontmatterOrder(frontmatterText: string): string[] {
 function renderFrontmatter(frontmatter: Record<string, Jsonish>, originalOrder: string[]): string {
   const preferred = [
     "id", "scope", "kind", "status", "confidence", "schema_version",
-    "title", "created", "updated", "trigger_phrases",
+    "title", "created", "updated", "trigger_phrases", "derives_from",
   ];
   const keys = [
     ...preferred,
@@ -736,7 +742,7 @@ export async function deleteProjectEntry(
     ? abrainKnowledgeDir(abrainHome)
     : await ensureAbrainEntryRoot(abrainHome, opts.projectId);
   const auditRoot = scope === "world" ? abrainHome : projectRoot;
-  const targetPrefix = scope === "world" ? "world" : "project";
+  const targetPrefix = scope === "world" ? "world" : `project:${opts.projectId}`;
   const slug = slugify(slugRaw);
   const mode: DeleteMode = opts.mode === "hard" ? "hard" : "soft";
   const reason = opts.reason || "deleted by sediment curator";
@@ -786,6 +792,16 @@ export async function deleteProjectEntry(
     await fs.unlink(target);
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
     const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, "delete", gitCommitProjectId) : null;
+    // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
+    // (git add succeeded but git commit failed), reset the index to
+    // prevent the staged deletion from being committed alongside a
+    // later successful write — same ghost-file class bug as b40df1e.
+    if (opts.settings.gitCommit && git === null) {
+      try {
+        const rel = path.relative(abrainHome, target);
+        execFileSync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+      } catch { /* best-effort */ }
+    }
     const auditPath = await appendAudit(auditRoot, withWriterAuditContext(opts, opts.sessionId, {
       operation: "delete",
       target: `${targetPrefix}:${slug}`,
@@ -824,7 +840,7 @@ export async function updateProjectEntry(
     ? await fs.mkdir(abrainKnowledgeDir(abrainHome), { recursive: true }).then(() => abrainKnowledgeDir(abrainHome))
     : await ensureAbrainEntryRoot(abrainHome, opts.projectId);
   const auditRoot = scope === "world" ? abrainHome : projectRoot;
-  const targetPrefix = scope === "world" ? `world` : `project`;
+  const targetPrefix = scope === "world" ? `world` : `project:${opts.projectId}`;
   const slug = slugify(slugRaw);
   const resultCtx = resultAuditFields(opts, patch.sessionId);
   const doAudit = (event: Record<string, unknown>) =>
@@ -947,6 +963,16 @@ export async function updateProjectEntry(
     const operation = opts.auditOperation || "update";
     const gitCommitProjectId = scope === "world" ? undefined : opts.projectId;
     const git = opts.settings.gitCommit ? await gitCommit(abrainHome, target, slug, operation, gitCommitProjectId) : null;
+    // P0 fix (2026-05-14 audit round 6): if gitCommit() returns null
+    // (git add succeeded but git commit failed), reset the index to
+    // prevent the staged update from being committed alongside a later
+    // successful write — same class of bug as b40df1e (create path).
+    if (opts.settings.gitCommit && git === null) {
+      try {
+        const rel = path.relative(abrainHome, target);
+        execFileSync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5000, stdio: ["ignore", "pipe", "pipe"] });
+      } catch { /* best-effort */ }
+    }
     const auditPath = await doAudit(withWriterAuditContext(opts, patch.sessionId, {
       operation,
       target: `${targetPrefix}:${slug}`,
@@ -1067,7 +1093,7 @@ export async function writeProjectEntry(
   const target = scope === "world"
     ? path.join(entryRoot, `${slug}.md`)
     : path.join(entryRoot, kindDirectory(safeDraft.kind, status), `${slug}.md`);
-  const targetId = scope === "world" ? `world:${slug}` : `project:${slug}`;
+  const targetId = scope === "world" ? `world:${slug}` : `project:${opts.projectId}:${slug}`;
 
   const duplicate = await detectProjectDuplicate(entryRoot, safeDraft.title, {
     slug,
@@ -1611,7 +1637,9 @@ export async function writeAbrainWorkflow(
       };
     }
     await atomicWrite(target, markdown);
-    const git = await gitCommitAbrain(abrainHome, target, slug);
+    // P2 fix (R6 audit): respect settings.gitCommit — don't force git commit
+    // when user explicitly disabled it. Match writeProjectEntry behavior.
+    const git = opts.settings.gitCommit ? await gitCommitAbrain(abrainHome, target, slug) : null;
     // Round 9 P1 (deepseek R9 P1-3 fix): gitCommitAbrain swallows all
     // exceptions and returns null on any git failure (index.lock race,
     // commit hook fail, EACCES). Before this fix, a null git left an

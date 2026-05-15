@@ -403,8 +403,8 @@ export default function (pi: ExtensionAPI) {
     label: "Vision Analysis",
     description:
       "Analyze images using the best available vision-capable model. " +
-      "Use when your current model does not support image input (or when you " +
-      "want a dedicated vision model). Automatically selects the strongest " +
+      "Use when your current model does not support image input. " +
+      "Automatically selects the strongest " +
       "vision-capable model from available providers. Accepts base64-encoded " +
       "images or file paths confined to the project directory.",
     promptSnippet: "vision(imageBase64?, path?, prompt, mimeType?) — analyze an image with the best vision model",
@@ -450,6 +450,19 @@ export default function (pi: ExtensionAPI) {
         modelRegistry: VisionDeps["modelRegistry"];
       },
     ) {
+      // P0 fix (2026-05-14 audit round 6): modelRegistry may be undefined in
+      // some pi versions — return isError instead of crashing.
+      if (!ctx.modelRegistry) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "❌ vision: modelRegistry not available in this pi session.",
+          }],
+          details: { error: "modelRegistry missing" },
+          isError: true,
+        };
+      }
+
       const prefs = loadVisionPrefs();
 
       const result = await analyzeImage(params, {

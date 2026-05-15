@@ -4,6 +4,7 @@ import { loadEntries } from "../memory/parser";
 import { llmSearchEntries } from "../memory/llm-search";
 import type { MemoryEntry } from "../memory/types";
 import type { SedimentSettings } from "./settings";
+import { sanitizeForMemory } from "./sanitizer";
 import type { DeleteMode, ProjectEntryDraft, ProjectEntryUpdateDraft } from "./writer";
 
 interface ModelRegistryLike {
@@ -12,7 +13,7 @@ interface ModelRegistryLike {
 }
 
 export type CuratorDecision =
-  | { op: "create"; scope?: "world"; rationale?: string }
+  | { op: "create"; scope?: "world"; derives_from?: string[]; rationale?: string }
   | { op: "update"; slug: string; scope?: "world"; patch: ProjectEntryUpdateDraft; rationale?: string }
   | { op: "merge"; target: string; sources: string[]; scope?: "world"; compiledTruth: string; timelineNote?: string; rationale?: string }
   | { op: "archive"; slug: string; scope?: "world"; reason: string; rationale?: string }
@@ -81,13 +82,30 @@ function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecision {
+function parseDecision(rawText: string, neighborScopes: Map<string, string>): CuratorDecision {
   const payload = unwrapJsonText(rawText);
   if (!payload || typeof payload !== "object") throw new Error("curator JSON must be an object");
   const obj = payload as Record<string, unknown>;
   const op = asString(obj.op)?.toLowerCase();
   const rationale = asString(obj.rationale ?? obj.why);
   const scope = asString(obj.scope) === "world" ? "world" as const : undefined;
+  // R6 audit P1 fix: validate that the curator's scope decision matches
+  // the neighbor's actual scope. allowedSlugs was previously a Set<string>
+  // that permitted world→project and project→world scope confusion;
+  // now neighborScopes (Map<slug, scope>) carries the ground truth.
+  const allowedSlugs = new Set(neighborScopes.keys());
+  function validateScope(slug: string): void {
+    const neighborScope = neighborScopes.get(slug);
+    if (scope === "world" && neighborScope !== "world") {
+      throw new Error(`curator set scope:world on project-scope neighbor "${slug}" — use project scope (omit scope) instead`);
+    }
+    // curator omitted scope (defaults to project) but neighbor is world-scope:
+    // this is also an error — updating a world entry as project would write
+    // to the wrong directory and produce entry_not_found.
+    if (!scope && neighborScope === "world") {
+      throw new Error(`curator omitted scope on world-scope neighbor "${slug}" — must set scope:"world"`);
+    }
+  }
 
   if (op === "skip") {
     return { op: "skip", reason: asString(obj.reason) ?? rationale ?? "curator decided to skip", ...(rationale ? { rationale } : {}) };
@@ -96,6 +114,7 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
   if (op === "update") {
     const slug = asString(obj.slug);
     if (!slug || !allowedSlugs.has(slug)) throw new Error(`curator update slug is not an allowed neighbor: ${slug || "<missing>"}`);
+    validateScope(slug);
     const patchObj = (obj.patch && typeof obj.patch === "object" ? obj.patch : obj) as Record<string, unknown>;
     const patch: ProjectEntryUpdateDraft = {
       ...(asString(patchObj.title) ? { title: asString(patchObj.title)! } : {}),
@@ -114,8 +133,14 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
     const sources = asStringArray(obj.sources);
     const compiledTruth = asString(obj.compiled_truth ?? obj.compiledTruth);
     if (!target || !allowedSlugs.has(target)) throw new Error(`curator merge target is not an allowed neighbor: ${target || "<missing>"}`);
+    validateScope(target);
     const invalidSource = sources.find((slug) => !allowedSlugs.has(slug));
     if (invalidSource) throw new Error(`curator merge source is not an allowed neighbor: ${invalidSource}`);
+    // R6 review P1: validate scope for all sources, not just target.
+    // If curator declares scope:world but a source is project-scope,
+    // the merge would cross scope boundaries and produce partial results
+    // (source deletion targeting the wrong store).
+    for (const src of sources) validateScope(src);
     if (!sources.includes(target)) sources.unshift(target);
     if (!compiledTruth) throw new Error("curator merge requires compiled_truth");
     return { op: "merge", target, sources: Array.from(new Set(sources)), ...(scope ? { scope } : {}), compiledTruth, timelineNote: asString(obj.timeline_note ?? obj.timelineNote) ?? rationale, ...(rationale ? { rationale } : {}) };
@@ -124,6 +149,7 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
   if (op === "archive") {
     const slug = asString(obj.slug);
     if (!slug || !allowedSlugs.has(slug)) throw new Error(`curator archive slug is not an allowed neighbor: ${slug || "<missing>"}`);
+    validateScope(slug);
     return { op: "archive", slug, ...(scope ? { scope } : {}), reason: asString(obj.reason) ?? rationale ?? "archived by sediment curator", ...(rationale ? { rationale } : {}) };
   }
 
@@ -131,6 +157,7 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
     const oldSlug = asString(obj.old_slug ?? obj.oldSlug ?? obj.slug);
     const newSlug = asString(obj.new_slug ?? obj.newSlug);
     if (!oldSlug || !allowedSlugs.has(oldSlug)) throw new Error(`curator supersede old_slug is not an allowed neighbor: ${oldSlug || "<missing>"}`);
+    validateScope(oldSlug);
     if (newSlug && !allowedSlugs.has(newSlug)) throw new Error(`curator supersede new_slug is not an allowed neighbor: ${newSlug}`);
     return { op: "supersede", oldSlug, ...(newSlug ? { newSlug } : {}), ...(scope ? { scope } : {}), reason: asString(obj.reason) ?? rationale ?? "superseded by sediment curator", ...(rationale ? { rationale } : {}) };
   }
@@ -138,6 +165,7 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
   if (op === "delete") {
     const slug = asString(obj.slug);
     if (!slug || !allowedSlugs.has(slug)) throw new Error(`curator delete slug is not an allowed neighbor: ${slug || "<missing>"}`);
+    validateScope(slug);
     return {
       op: "delete",
       slug,
@@ -149,7 +177,8 @@ function parseDecision(rawText: string, allowedSlugs: Set<string>): CuratorDecis
   }
 
   if (op === "create") {
-    return { op: "create", ...(scope ? { scope } : {}), ...(rationale ? { rationale } : {}) };
+    const derives_from = asStringArray(obj.derives_from ?? obj.derivesFrom);
+    return { op: "create", ...(scope ? { scope } : {}), ...(derives_from.length ? { derives_from } : {}), ...(rationale ? { rationale } : {}) };
   }
 
   throw new Error(`unsupported curator op: ${op || "<missing>"}`);
@@ -216,7 +245,7 @@ function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): 
     "Output JSON only, one object. No markdown wrapper.",
     "",
     "Allowed operations for this implementation batch:",
-    "- {\"op\":\"create\", \"scope\"?: \"world\", \"rationale\": string}  — scope omitted defaults to project",
+    "- {\"op\":\"create\", \"scope\"?: \"world\", \"derives_from\"?: [slug, ...], \"rationale\": string}  — scope omitted defaults to project; set derives_from when the new entry is a downstream observation building on a neighbor's premise (links the new entry to upstream neighbor for graph tracing)",
     "",
     "Scope judgment (when to set scope: world on any operation):",
     "- Use scope: world when the candidate is a durable cross-project engineering maxim, principle, or pattern that does NOT depend on any specific project's context, file paths, or module names.",
@@ -242,6 +271,7 @@ function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): 
     "Update vs create discipline (added 2026-05-13 after curator P0 in abrain commit 2e8924d: candidate was a downstream observation that touched the same topic as an existing entry; curator overwrote the upstream entry instead of creating a derived one, dropping 4 evidence bullets + 3 fix steps + principle section).",
     "- Use UPDATE only when the candidate REFINES the SAME claim the neighbor already makes (corrects an error, adds confidence, narrows scope, supplies a better compiled truth for the SAME assertion).",
     "- When the candidate is a DOWNSTREAM observation that builds on a neighbor's premise but states a DIFFERENT claim (a new failure mode, a new operational hazard, a new consequence, a new specialization): use CREATE — do NOT update the neighbor. 'Same topic area' is NOT sufficient grounds for update; the candidate must contradict, supersede, or directly refine the neighbor's claim.",
+    "- When you CREATE a downstream observation, set \"derives_from\": [\"<upstream-neighbor-slug>\"] to preserve the graph link. This makes the upstream→downstream relationship traceable in graph rebuild / doctor-lite and prevents silent duplicate families.",
     "- When in doubt: prefer CREATE over UPDATE. A spurious duplicate is recoverable via merge later; an UPDATE that overwrites durable evidence/fix/principle sections is data loss recoverable only via git history.",
     "",
     "Update body-preservation contract (when you DO choose update):",
@@ -330,13 +360,35 @@ export async function curateProjectDraft(
 ): Promise<CuratorOutcome> {
   const totalStart = Date.now();
   const searchStart = Date.now();
+
+  // Belt-and-suspenders: sanitize the extractor's output before feeding it
+  // to any LLM (search prompt → memory_search LLM, curator prompt → curator
+  // LLM). The extractor prompt instructs the LLM not to emit secrets, but
+  // PII (home paths, IPs, emails) can still leak through verbatim transcript
+  // quotes. Writer-level sanitize runs later at writeProjectEntry time — by
+  // then the LLMs have already seen the raw text. (2026-05-14 audit round 6)
+  const titleSanitize = sanitizeForMemory(draft.title);
+  const bodySanitize = sanitizeForMemory(draft.compiledTruth);
+  const safeDraft: ProjectEntryDraft = {
+    ...draft,
+    title: titleSanitize.text ?? draft.title,
+    compiledTruth: bodySanitize.text ?? draft.compiledTruth,
+  };
+  // If a credential is detected in the draft itself (extremely unlikely after
+  // extractor sanitize, but belt-and-suspenders), skip immediately.
+  if (!titleSanitize.ok || !bodySanitize.ok) {
+    const error = `curator pre-sanitize aborted: ${(!titleSanitize.ok ? titleSanitize.error : bodySanitize.error)}`;
+    const decision: CuratorDecision = { op: "skip", reason: "credential_in_draft", rationale: error };
+    return { decision, audit: { decision, neighbors: [], stage_ms: { search: 0, decide: 0, total: Date.now() - totalStart }, error } };
+  }
+
   let entries: MemoryEntry[];
   let cards: any[];
   try {
     entries = relevantEntriesForCurator(await loadEntries(deps.projectRoot, deps.memorySettings, deps.signal));
     cards = await llmSearchEntries(
       entries,
-      { query: makeSearchPrompt(draft), filters: { limit: 5, status: ["all"] } },
+      { query: makeSearchPrompt(safeDraft), filters: { limit: 5, status: ["all"] } },
       deps.memorySettings,
       deps.modelRegistry,
       deps.signal,
@@ -375,10 +427,10 @@ export async function curateProjectDraft(
     const raw = await callCuratorModel(
       deps.sedimentSettings,
       deps.modelRegistry,
-      makeCuratorPrompt(draft, neighbors),
+      makeCuratorPrompt(safeDraft, neighbors),
       deps.signal,
     );
-    const decision = parseDecision(raw, new Set(neighbors.map((entry) => entry.slug)));
+    const decision = parseDecision(raw, new Map(neighbors.map((entry) => [entry.slug, entry.scope ?? "project"])));
     const decideMs = Date.now() - decideStart;
     return {
       decision,

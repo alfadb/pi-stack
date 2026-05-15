@@ -146,6 +146,8 @@ export function renderSedimentStatus(
         return "✅ sediment";
       case "failed":
         return "⚠️  sediment";
+      default:
+        return `❓ sediment (${state})`;
     }
   })();
   return detail ? `${prefix}: ${detail}` : prefix;
@@ -1608,6 +1610,9 @@ async function tryAutoWriteLane(args: {
       await writeProjectEntry(
         {
           ...draft,
+          ...(curated.decision.op === "create" && curated.decision.derives_from?.length
+            ? { derivesFrom: curated.decision.derives_from }
+            : {}),
           sessionId,
           timelineNote:
             draft.timelineNote || "captured from LLM auto-write extractor",
