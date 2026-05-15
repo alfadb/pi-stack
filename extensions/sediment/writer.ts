@@ -585,7 +585,12 @@ async function gitCommit(
   const scopeTag = projectId ? `project:${projectId}` : "world";
   try {
     const rel = path.relative(abrainHome, filePath);
-    await execFileAsync("git", ["-C", abrainHome, "add", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
+    // Round 2 audit fix (opus m3): `--` terminates option parsing so a
+    // slug like `-x` can't be reinterpreted as a flag. Defense-in-depth
+    // — sediment slug sanitizer should already reject these, but a free
+    // `--` costs nothing and the blast radius widened with ADR 0020
+    // (bad commit now auto-pushes to remote).
+    await execFileAsync("git", ["-C", abrainHome, "add", "--", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
     await execFileAsync(
       "git",
       ["-C", abrainHome, "commit", "-m", `sediment: ${op} ${slug} (${scopeTag})`],
@@ -603,7 +608,16 @@ async function gitCommit(
     // Dynamic require so sediment doesn't take a hard dep on the abrain
     // extension load order (abrain extension owns git-sync.ts; sediment
     // is conceptually upstream and can run with abrain disabled).
-    if (sha && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1") {
+    // Round 2 audit fix (opus M4 + gpt #1): also gate on PI_ABRAIN_DISABLED
+    // as defense-in-depth. Today sub-pi safety relies on sediment's own
+    // activate() early-return when PI_ABRAIN_DISABLED=1, but that's single-
+    // layer. If a future refactor calls writer functions outside the
+    // sediment activate path (test harness, ad-hoc import), pushAsync
+    // would auto-exfiltrate sub-pi-derived commits to origin. Adding the
+    // inline guard makes ADR 0014 invariant #6 enforcement multi-layer.
+    if (sha
+      && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1"
+      && process.env.PI_ABRAIN_DISABLED !== "1") {
       try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const gitSync = require("../abrain/git-sync");
@@ -1446,7 +1460,8 @@ async function appendAbrainWorkflowAudit(abrainHome: string, event: Record<strin
 async function gitCommitAbrain(abrainHome: string, filePath: string, slug: string): Promise<string | null> {
   try {
     const rel = path.relative(abrainHome, filePath);
-    await execFileAsync("git", ["-C", abrainHome, "add", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
+    // Round 2 audit fix (opus m3): same `--` defense-in-depth as gitCommit.
+    await execFileAsync("git", ["-C", abrainHome, "add", "--", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
     await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `workflow: ${slug}`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
     const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
     return stdout.trim() || null;

