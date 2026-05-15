@@ -85,10 +85,10 @@ sediment 是唯一 dedicated writer：
 
 1. `agent_end` 读取 session window。
 2. 先解析显式 `MEMORY: ... END_MEMORY` blocks。
-3. 没有显式 block 且 `autoLlmWriteEnabled=true` 时，运行 LLM extractor。
-4. sanitizer 阻断 credential/secret 风险。
-5. curator 通过 `memory_search` 找邻居并决定 `create/update/merge/archive/supersede/delete/skip`。
-6. writer 上锁、lint、atomic write、append audit、best-effort git commit。
+3. 在进入 LLM / audit / writer 前运行 sanitizer：credential/secret-like strings 被替换为 `[SECRET:<type>]`，不再因 pattern 命中阻断整轮。
+4. 没有显式 block 且 `autoLlmWriteEnabled=true` 时，LLM extractor 只接收 redacted transcript，并在 prompt 中被要求保留 typed placeholders、不得还原 raw secret。
+5. curator 通过已 redacted 的 `memory_search` query 找邻居并决定 `create/update/merge/archive/supersede/delete/skip`。
+6. writer 上锁、lint、atomic write、append audit、best-effort git commit；audit raw text / error fields 也存 redacted form。
 
 当前路径：
 

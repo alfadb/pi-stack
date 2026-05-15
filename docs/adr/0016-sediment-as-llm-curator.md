@@ -1,6 +1,6 @@
 # ADR 0016 — Sediment 从 gate-heavy extractor 转向 LLM curator
 
-- **状态**: Accepted（2026-05-10）。**2026-05-13 [ADR 0018](0018-sediment-curator-defense-layers.md) 补充并随后修订**：curator "update over create" 原则在 LLM 实践中需要防御；当前保留 curator prompt update-vs-create discipline + writer trigger_phrases UNION；body_shrink/body_section_loss 机械门控及对应 smoke fixtures 已于 ADR 0018 revert (`ee1c809`) 移除。详见 ADR 0018 头部决策摘要。
+- **状态**: Accepted（2026-05-10）。**2026-05-13 [ADR 0018](0018-sediment-curator-defense-layers.md) 补充并随后修订**：curator "update over create" 原则在 LLM 实践中需要防御；当前保留 curator prompt update-vs-create discipline + writer trigger_phrases UNION；body_shrink/body_section_loss 机械门控及对应 smoke fixtures 已于 ADR 0018 revert (`ee1c809`) 移除。**2026-05-15 修订**：credential/secret sanitizer 从“pattern 命中整轮 fail-closed”调整为“typed redaction + continue”；raw secret 仍不得进入 LLM/audit/memory。详见 ADR 0018 头部决策摘要。
 - **日期**: 2026-05-10
 - **决策者**: alfadb
 - **依赖**: [ADR 0015](0015-memory-search-llm-driven-retrieval.md) / [ADR 0013](0013-asymmetric-trust-three-lanes.md) / [memory-architecture.md](../memory-architecture.md) §8
@@ -26,8 +26,8 @@ Sediment 的角色从 **extractor + mechanical gates** 调整为 **LLM curator +
 默认原则：
 
 1. **语义判断交给 LLM**：是否值得记、记成什么 kind/status/confidence、是否 maxim、是否 active，由 LLM 根据上下文和检索结果判断。
-2. **硬 gate 只保留两类**：
-   - 敏感信息：secret/token/private key/JWT/credential URL 等 fail-closed；
+2. **硬 safety/storage boundary 只保留两类**：
+   - 敏感信息：secret/token/private key/JWT/credential URL 等先被 deterministic sanitizer 替换为 `[SECRET:<type>]`，然后继续 extraction/curation/write；raw secret 不进入 LLM/audit/memory。只有 sanitizer 自身出现不可恢复错误时才 fail closed。
    - 存储完整性：path sandbox、schema parse、lint error、lock、atomic write、audit、git。
 3. **知识库是 self-evolving**：历史知识可以被 update、merge、supersede、archive、delete；默认维护当前最佳 compiled truth，而不是追加平行条目。
 4. **主会话仍只读**：`memory_update/delete` 是 sediment sidecar 内部能力，不把写工具直接暴露给主会话 LLM。
@@ -61,7 +61,7 @@ UPDATE / MERGE existing memory
 
 | 旧 gate | 新状态 |
 |---|---|
-| secret / credential sanitizer | 保留 hard gate |
+| secret / credential sanitizer | 保留安全边界；2026-05-15 起为 typed redaction + continue，不再因 credential pattern 整轮拒绝 |
 | path sandbox / lock / atomic write / audit / git | 保留 storage gate |
 | schema parse / lint error | 保留 storage gate |
 | forceProvisional | 删除 |
@@ -116,8 +116,8 @@ UPDATE / MERGE existing memory
 
 缓解：
 
-- secret gate 和 storage gate 仍 fail-closed；
-- 所有 operation 写 audit + git commit，可回滚；audit 是给 LLM 诊断的主界面，记录 lane、session_id、correlation_id、candidate_id、window/checkpoint summary、settings snapshot、entry breakdown、candidate/result、curator neighbors/decision、LLM summary、stage timings；writer-level create/update/merge/archive/supersede/delete/reject rows 与 agent_end summary row 共享 correlation/candidate id，便于端到端追踪；
+- secret boundary 仍禁止 plaintext 跨越 LLM/audit/memory，但默认通过 typed placeholder redaction 保留上下文并继续；storage gate 仍 fail-closed；
+- 所有 operation 写 audit + git commit，可回滚；audit 是给 LLM 诊断的主界面，记录 lane、session_id、correlation_id、candidate_id、window/checkpoint summary、settings snapshot、entry breakdown、candidate/result、curator neighbors/decision、LLM summary、stage timings，以及 raw_text redaction metadata；writer-level create/update/merge/archive/supersede/delete/reject rows 与 agent_end summary row 共享 correlation/candidate id，便于端到端追踪；
 - delete 默认 soft；hard delete 默认不用，只在 secret/junk/用户明确要求时启用；
 - Phase 1/2 已支持 create/update/merge/archive/supersede/delete/skip；manual sediment dry-run commands deliberately not exposed.
 

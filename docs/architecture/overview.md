@@ -69,7 +69,7 @@ Storage
 - **project `.pensieve/` 作为写入目标**：B5 后不存在；只读迁移源。
 - **promotion gates / project→world promote lane**：ADR 0014 后失去意义；writer 直接路由到正确 zone。
 - **grep/BM25 graceful fallback**：ADR 0015 后 `memory_search` 是 LLM retrieval，失败 hard error。
-- **mechanical readiness/rate/sampling gates**：ADR 0016 删除；只保留 sanitizer/存储完整性等 hard safety。
+- **mechanical readiness/rate/sampling gates**：ADR 0016 删除；只保留 sanitizer/存储完整性等 safety boundary。sanitizer 当前语义是 typed redaction + continue，而不是 secret pattern 命中即整轮拒绝。
 - **主会话直接写长期记忆**：违背 ADR 0003 的核心不变量。
 
 ## 6. Roadmap（设计愿景中仍未完成）
@@ -83,4 +83,4 @@ Storage
 | qmd optional acceleration | 可选诊断/加速层，不作为 `memory_search` fallback | backlog |
 | schema/version compatibility | frontmatter、binding、audit schema 的前向兼容策略 | backlog |
 
-设计取舍：除 credential/secret 泄漏这类不可逆风险外，优先优化 prompt/curator 行为，而不是增加 silent mechanical reject gate。silent reject 会制造“死条目”，违背 sediment 自进化前提。
+设计取舍：除 credential/secret 泄漏这类不可逆风险外，优先优化 prompt/curator 行为，而不是增加 silent mechanical reject gate。credential/secret 边界也优先 redact plaintext 并保留可沉淀上下文；只有不可恢复的 sanitizer/storage 错误才 fail closed。silent reject 会制造“死条目”，违背 sediment 自进化前提。

@@ -6,7 +6,7 @@
 
 | npm script | File | Coverage |
 |---|---|---|
-| `smoke:memory` | `scripts/smoke-memory-sediment.mjs` | memory facade + sediment integration regressions |
+| `smoke:memory` | `scripts/smoke-memory-sediment.mjs` | memory facade + sediment integration regressions, including credential typed-redaction boundary (pre-LLM, audit, writer, `memory_search` query) |
 | `smoke:dispatch` | `scripts/smoke-dispatch-input-compat.mjs` | dispatch input compatibility |
 | `smoke:fallback-timing` | `scripts/smoke-model-fallback-mutation-timing.mjs` | model-fallback mutation timing |
 | `smoke:vision` | `scripts/smoke-vision.mjs` | vision tool registration/schema/basic path |
@@ -34,7 +34,7 @@ npm run smoke:vision
 npm run smoke:imagine
 ```
 
-For doc-only changes, run at least `npm run smoke:paths` if paths/runtime references were touched. For memory/sediment/vault changes, run the relevant subset above plus any command-specific smoke.
+For doc-only changes, run at least `npm run smoke:paths` if paths/runtime references were touched. For memory/sediment/vault changes, run the relevant subset above plus any command-specific smoke. For sanitizer or sediment secret-boundary changes, run `npm run smoke:memory` because it covers typed placeholders, prompt redaction, audit raw_text/error redaction, trigger phrase sanitization, and `memory_search` query redaction.
 
 ## Historical note
 

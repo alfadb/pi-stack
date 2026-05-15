@@ -15,10 +15,10 @@ sediment 是 pi-astack 的唯一 dedicated memory writer。主会话不会获得
 agent_end
   ├── checkpoint / run-window
   ├── explicit MEMORY extractor（fence-aware）
+  ├── sanitizer（typed redaction before any LLM/audit/write boundary）
   ├── if no explicit block and autoLlmWriteEnabled:
-  │     └── LLM extractor（transcript → candidates）
-  ├── sanitizer（credential/secret hard gate）
-  ├── memory_search lookup（ADR 0015）
+  │     └── LLM extractor（redacted transcript → candidates）
+  ├── memory_search lookup（ADR 0015；query 先 redaction）
   ├── curator LLM（create/update/merge/archive/supersede/delete/skip）
   ├── writer validation / lint / lock / atomic write
   ├── audit JSONL
@@ -37,9 +37,9 @@ agent_end
 
 ADR 0016 后，curator 是主要语义判断者。旧的 readiness/rate/sampling/rolling/G2-G13 机械 gate 已删除；它们会制造 silent reject 和死条目。
 
-仍然 hard-fail 的内容主要是：
+仍然 hard safety/storage boundary 主要是：
 
-- credential/secret sanitizer。
+- credential/secret sanitizer：不再因命中 pattern 阻断整轮；pre-LLM / memory_search query / curator prompt / writer / audit 均将 raw secret 替换为 `[SECRET:<type>]` 后继续。若未来 sanitizer 出现不可恢复错误，才 fail closed。
 - schema/kind/status validation。
 - slug/path traversal/collision。
 - file lock / atomic write / audit consistency。
@@ -90,12 +90,13 @@ sediment 的 markdown write 是 source-of-truth；git commit 是 best-effort aud
 
 通过 dispatch 产生的 sub-pi 默认设置 `PI_ABRAIN_DISABLED=1`。沉淀、memory、vault 等扩展在 sub-pi 中不注册或 early return，避免子进程获得长期记忆/secret 写能力。ephemeral session 不推进 checkpoint，也不写长期记忆。
 
-## 8. Prompt-first policy
+## 8. Secret boundary and prompt-first policy
 
 历史上曾尝试 body shrink / section loss 等 mechanical gates。它们会 silent reject curator 的修复，让条目永久 stale。当前原则：
 
 - 对 LLM 语义错误，优先修 curator/extractor prompt 与 examples。
-- 对不可逆安全事故（credential leakage），保留 sanitizer hard gate。
+- 对 credential/secret 泄漏，保留 deterministic sanitizer，但边界语义是 **redact plaintext, continue extraction**：raw secret 不进入第三方 LLM、audit JSONL 或 memory markdown；保留语义价值的上下文与 `[SECRET:<type>]` 占位符。
+- extractor / curator prompt 明确要求不要复制 raw secrets；看到 secret-like string 时输出 typed placeholder，且不得还原或编造 `[SECRET:<type>]` 的原值。
 - 对存储完整性，保留 schema/path/lock/atomic write hard gates。
 
 ## 9. 相关文档
