@@ -23,9 +23,12 @@ These tools may be visible to the assistant depending on pi settings and sub-pi 
 ```text
 /abrain bind --project=<id>
 /abrain status
+/abrain sync
 ```
 
-Manages ADR 0017 strict project binding. Required before project-scoped sediment/vault writes.
+- `bind` / `status`: ADR 0017 strict project binding. Required before project-scoped sediment/vault writes. `status` also shows ADR 0020 git auto-sync state (remote, ahead/behind, last push, last fetch).
+- `sync` ([ADR 0020](../adr/0020-abrain-auto-sync-to-remote.md)): manual `git fetch + ff-pull + push` against `~/.abrain`'s `origin` remote. Auto-sync already runs in the background (startup fetch + post-sediment-commit push); `/abrain sync` is the manual escape hatch and the divergence runbook surface. Conflict-resolution is intentionally human-only: when local and remote both have new commits, `/abrain sync` aborts and prints the exact `cd ~/.abrain && git merge|rebase origin/main` commands. LLM auto-merge was explicitly rejected to avoid hallucinated content polluting the knowledge substrate.
+- `PI_ABRAIN_NO_AUTOSYNC=1` env var disables both startup fetch and post-commit push (for offline / CI use).
 
 ### `/memory`
 

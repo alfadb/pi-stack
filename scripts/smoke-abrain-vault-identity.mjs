@@ -102,6 +102,7 @@ for (const file of [
   "vault-bash",
   "brain-layout",
   "i18n",
+  "git-sync",
 ]) {
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
@@ -129,6 +130,7 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")')
   .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
+  .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 fs.writeFileSync(path.join(tmpDir, "index.cjs"), indexCompiled);
 const indexModule = require(path.join(tmpDir, "index.cjs"));

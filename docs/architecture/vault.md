@@ -137,6 +137,7 @@ Dispatch sub-agents run independent pi processes. By default they receive `PI_AB
 | `ssh-key` / `gpg-file` backends (Tier 3 explicit-only) | shipped, deprecated for new users (`/vault status` shows deprecation notice; reader stays fail-soft) |
 | `passphrase-only` backend init | shipped (init writes file); **unlock unimplemented** (reader needs tty pass-through, roadmap P0d) |
 | Cross-device identity transport | manual (user `scp ~/.abrain/.vault-identity/master.age` between devices); P0d will add passphrase wrap so identity can enter git |
+| Cross-device knowledge + encrypted vault sync | shipped via [ADR 0020](../adr/0020-abrain-auto-sync-to-remote.md): sediment commit → background `git push origin HEAD:main`; pi startup → background `git fetch + merge --ff-only`. `vault/<scope>/*.md.age` (encrypted secrets) and `.vault-identity/master.age.pub` ride this transport. Identity secret stays gitignored. |
 | masked TUI wizard | pending (roadmap P0d) |
 | `.env` import | pending (roadmap P0d) |
 | backend migration wizard | pending (roadmap P0d) |

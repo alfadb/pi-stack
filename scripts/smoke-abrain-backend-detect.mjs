@@ -457,12 +457,14 @@ fs.writeFileSync(path.join(tmpDir, "vault-reader.cjs"), transpileTsToCjs(vaultRe
 fs.writeFileSync(path.join(tmpDir, "vault-bash.cjs"), transpileTsToCjs(vaultBashSrc));
 fs.writeFileSync(path.join(tmpDir, "brain-layout.cjs"), transpileTsToCjs(brainLayoutSrc));
 fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts")));
+fs.writeFileSync(path.join(tmpDir, "git-sync.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/git-sync.ts")));
 // vault-reader.cjs keeps its own relative imports (./keychain, ./vault-writer),
 // so provide extensionless .js companions in the tmp dir as well.
 fs.copyFileSync(path.join(tmpDir, "keychain.cjs"), path.join(tmpDir, "keychain.js"));
 fs.copyFileSync(path.join(tmpDir, "vault-writer.cjs"), path.join(tmpDir, "vault-writer.js"));
 fs.copyFileSync(path.join(tmpDir, "vault-reader.cjs"), path.join(tmpDir, "vault-reader.js"));
 fs.copyFileSync(path.join(tmpDir, "brain-layout.cjs"), path.join(tmpDir, "brain-layout.js"));
+fs.copyFileSync(path.join(tmpDir, "git-sync.cjs"), path.join(tmpDir, "git-sync.js"));
 // _shared/runtime is required by index.ts via ../_shared/runtime; mirror that layout.
 const sharedTargetDir = path.join(tmpDir, "_shared");
 fs.mkdirSync(sharedTargetDir, { recursive: true });
@@ -480,6 +482,7 @@ indexCompiled = indexCompiled
   .replace(/require\("\.\/vault-bash"\)/g, 'require("./vault-bash.cjs")')
   .replace(/require\("\.\/i18n"\)/g, 'require("./i18n.cjs")')
   .replace(/require\("\.\/brain-layout"\)/g, 'require("./brain-layout.cjs")')
+  .replace(/require\("\.\/git-sync"\)/g, 'require("./git-sync.cjs")')
   .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
 const indexFile = path.join(tmpDir, "index.cjs");
 fs.writeFileSync(indexFile, indexCompiled);

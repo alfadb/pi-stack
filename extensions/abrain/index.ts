@@ -53,6 +53,10 @@ import {
   ensureBrainLayout,
 } from "./brain-layout";
 import {
+  fetchAndFF, pushAsync, sync as gitSync, getStatus as getGitSyncStatus,
+  formatSyncStatus, type AbrainSyncStatus,
+} from "./git-sync";
+import {
   authKey,
   prepareBootVaultBashCommand,
   redactVaultBashContent,
@@ -602,6 +606,28 @@ export default function activate(pi: ExtensionAPI): void {
       console.error(`[abrain] reconcile failed:`, err);
     });
 
+  // ── Startup git fetch + ff (ADR 0020) ────────────────────────
+  // Fire-and-forget: pull any new commits from abrain remote so this pi
+  // session starts with the freshest knowledge sediment from other devices.
+  // Fast-forward only — divergence aborts silently (user runs /abrain sync
+  // to see the runbook). Skipped when there's no git remote.
+  if (process.env.PI_ABRAIN_NO_AUTOSYNC !== "1") {
+    fetchAndFF({ abrainHome: ABRAIN_HOME })
+      .then((event) => {
+        if (event.result === "ok" && event.behind && event.behind > 0) {
+          console.error(`[abrain] git fetch: fast-forwarded ${event.behind} commit(s) from origin/main`);
+        } else if (event.result === "diverged") {
+          console.error(`[abrain] git fetch: diverged (local ahead ${event.ahead}, remote ahead ${event.behind}). Run /abrain sync for resolution runbook.`);
+        } else if (event.result === "failed" || event.result === "timeout") {
+          console.error(`[abrain] git fetch ${event.result}: ${event.error || "unknown"} (auto-sync continues; use /abrain sync to retry)`);
+        }
+      })
+      .catch((err) => {
+        // git-sync ops should never throw, but belt-and-suspenders:
+        console.error(`[abrain] git fetch threw (should be caught internally):`, err);
+      });
+  }
+
   // ── 7-zone layout bootstrap ──────────────────────────────────
   // Ensure brain directory structure exists (idempotent). Vault zone
   // is created here so it's available before /vault init runs.
@@ -834,11 +860,11 @@ export default function activate(pi: ExtensionAPI): void {
 
   if (typeof registry.registerCommand !== "function") return;
 
-  // /abrain command — project binding strict mode (ADR 0017 / B4.5).
+  // /abrain command — project binding (ADR 0017 / B4.5) + git auto-sync (ADR 0020).
   registry.registerCommand("abrain", {
-    description: "Abrain project binding: /abrain bind [--project=<id>] | /abrain status",
+    description: "Abrain control: /abrain bind [--project=<id>] | /abrain status | /abrain sync",
     getArgumentCompletions(prefix: string) {
-      const items = ["bind ", "bind --project=", "status"];
+      const items = ["bind ", "bind --project=", "status", "sync"];
       const filtered = items.filter((item) => item.startsWith(prefix));
       return filtered.length ? filtered.map((value) => ({ value, label: value })) : null;
     },
@@ -1413,8 +1439,28 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
   const tokens = rawArgs.split(/\s+/).filter(Boolean);
   const sub = tokens.shift() ?? "status";
   if (sub === "status") {
+    // Binding status (ADR 0017) + git auto-sync status (ADR 0020) in one view.
     const current = snapshotBootActiveProject(commandCwd);
-    ui.notify(formatBindingStatus(current), current.activeProject ? "info" : "warning");
+    const bindingMsg = formatBindingStatus(current);
+    let syncStatus: AbrainSyncStatus | null = null;
+    try {
+      syncStatus = await getGitSyncStatus(ABRAIN_HOME);
+    } catch (e: unknown) {
+      // getStatus is best-effort; if it throws, we still show binding status.
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[abrain] getGitSyncStatus failed:`, msg);
+    }
+    const syncMsg = syncStatus ? formatSyncStatus(syncStatus) : "";
+    const diverged = syncStatus ? (syncStatus.ahead > 0 && syncStatus.behind > 0) : false;
+    const fullMsg = syncMsg ? `${bindingMsg}\n\n${syncMsg}` : bindingMsg;
+    ui.notify(fullMsg, diverged ? "warning" : (current.activeProject ? "info" : "warning"));
+    return;
+  }
+  if (sub === "sync") {
+    // Manual /abrain sync: fetch + ff-pull + push in one call (ADR 0020).
+    ui.notify("abrain: syncing with origin/main...", "info");
+    const result = await gitSync({ abrainHome: ABRAIN_HOME });
+    ui.notify(result.summary, result.ok ? "info" : "warning");
     return;
   }
   if (sub === "bind") {
@@ -1461,7 +1507,7 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
     }
     return;
   }
-  ui.notify(`/abrain: unknown subcommand '${sub}'. available: bind / status`, "warning");
+  ui.notify(`/abrain: unknown subcommand '${sub}'. available: bind / status / sync`, "warning");
 }
 
 function handleStatus(ui: { notify(message: string, type?: string): void }): void {

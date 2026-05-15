@@ -33,6 +33,7 @@
     "smoke:abrain-vault-reader": "node scripts/smoke-abrain-vault-reader.mjs",
     "smoke:abrain-vault-bash": "node scripts/smoke-abrain-vault-bash.mjs",
     "smoke:abrain-vault-identity": "node scripts/smoke-abrain-vault-identity.mjs",
+    "smoke:abrain-git-sync": "node scripts/smoke-abrain-git-sync.mjs",
     "smoke:abrain-active-project": "node scripts/smoke-abrain-active-project.mjs",
     "smoke:abrain-secret-scope": "node scripts/smoke-abrain-secret-scope.mjs",
     "smoke:abrain-i18n": "node scripts/smoke-abrain-i18n.mjs"

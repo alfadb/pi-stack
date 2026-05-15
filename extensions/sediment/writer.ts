@@ -592,7 +592,34 @@ async function gitCommit(
       { timeout: 20_000, maxBuffer: 1024 * 1024 },
     );
     const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
-    return stdout.trim() || null;
+    const sha = stdout.trim() || null;
+
+    // ADR 0020: after each successful sediment commit, fire-and-forget
+    // a git push to origin/main so cross-device knowledge sync happens
+    // automatically. Failures are silently audited to
+    // ~/.abrain/.state/git-sync.jsonl and never block sediment's main
+    // path. Skipped if no `origin` remote is configured.
+    //
+    // Dynamic require so sediment doesn't take a hard dep on the abrain
+    // extension load order (abrain extension owns git-sync.ts; sediment
+    // is conceptually upstream and can run with abrain disabled).
+    if (sha && process.env.PI_ABRAIN_NO_AUTOSYNC !== "1") {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const gitSync = require("../abrain/git-sync");
+        if (typeof gitSync.pushAsync === "function") {
+          // Detach: don't await. We've already returned the commit SHA
+          // to our caller; push happens in the background and writes its
+          // own audit row.
+          gitSync.pushAsync({ abrainHome }).catch(() => undefined);
+        }
+      } catch {
+        // git-sync module not loadable (e.g. abrain extension was deleted
+        // or sediment is running standalone). Silently skip.
+      }
+    }
+
+    return sha;
   } catch {
     return null;
   }
