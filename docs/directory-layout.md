@@ -64,7 +64,7 @@ Vendor dirs are git submodules. Treat them as read-only source material; port id
 | `extensions/model-curator/` | model whitelist + capability prompt injection. |
 | `extensions/model-fallback/` | retry/fallback chain after model errors. |
 | `extensions/compaction-tuner/` | context percent compaction trigger. |
-| `extensions/_shared/` | shared runtime path, timestamp, binding utilities. |
+| `extensions/_shared/` | shared runtime infrastructure (NOT a pi-loaded extension; library imported by all others). Key exports in `runtime.ts`: `resolveActiveProject` (strict three-file binding resolver — the actual home of the "Vault P1 active project resolver" called by abrain/memory/sediment/dispatch), `bindAbrainProject`, `abrainProjectDir`, `acquireFileLock`/`withFileLock`, `ensureSedimentLegacyMigrated`, `ensureProjectGitignoredOnce`; `footer-status.ts` holds the cross-extension footer key registry. |
 
 ## 4. Runtime paths
 
@@ -93,9 +93,9 @@ Vendor dirs are git submodules. Treat them as read-only source material; port id
 
 ```text
 ~/.abrain/
-├── identity/
-├── skills/
-├── habits/
+├── identity/                    # Lane G — writer not implemented (mkdir placeholder only)
+├── skills/                      # Lane G — writer not implemented
+├── habits/                      # Lane G — writer not implemented
 ├── workflows/
 ├── projects/
 │   └── <projectId>/
@@ -109,8 +109,11 @@ Vendor dirs are git submodules. Treat them as read-only source material; port id
 │       └── vault/
 ├── knowledge/
 ├── vault/
-├── .vault-master.age
-├── .vault-pubkey
+├── .vault-identity/             # abrain-age-key (Tier 1 default, ADR 0019)
+│   ├── master.age               # 0600 — gitignored, never leaves the host without explicit scp
+│   └── master.age.pub           # 0644 — committed; same content mirrored to .vault-pubkey below
+├── .vault-pubkey                # mirrors .vault-identity/master.age.pub for vault-writer compat
+├── .vault-master.age            # Tier 3 backends ONLY (ssh-key/gpg-file/passphrase-only); abrain-age-key does NOT create this
 └── .state/
     ├── projects/
     │   └── local-map.json
@@ -127,6 +130,8 @@ Notes:
 - `~/.abrain/workflows/` is cross-project workflows.
 - `~/.abrain/.state/` is local runtime state, not memory truth.
 - Vault encrypted files are not ordinary memory entries.
+- `.vault-identity/master.age` is the abrain-age-key Tier 1 default introduced in ADR 0019 (no longer parasitic on `~/.ssh/id_*`). Cross-device: user manually `scp` the file with `chmod 0600`.
+- Identity/skills/habits directories are mkdir-only stubs until Lane G writer lands (see roadmap).
 
 ### 4.3 Legacy `.pensieve/`
 
@@ -156,9 +161,11 @@ Current files under `scripts/`:
 smoke-abrain-active-project.mjs
 smoke-abrain-backend-detect.mjs
 smoke-abrain-bootstrap.mjs
+smoke-abrain-git-sync.mjs
 smoke-abrain-i18n.mjs
 smoke-abrain-secret-scope.mjs
 smoke-abrain-vault-bash.mjs
+smoke-abrain-vault-identity.mjs
 smoke-abrain-vault-reader.mjs
 smoke-abrain-vault-writer.mjs
 smoke-dispatch-input-compat.mjs
@@ -169,6 +176,8 @@ smoke-pi-astack-paths.mjs
 smoke-vault-subpi-isolation.mjs
 smoke-vision.mjs
 ```
+
+Current count: **17** files, one per `package.json#scripts:smoke:*` entry. Last drift fixed 2026-05-15 (multi-LLM audit added `git-sync` + `vault-identity`).
 
 See [reference/smoke-tests.md](./reference/smoke-tests.md).
 

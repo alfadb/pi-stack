@@ -1235,10 +1235,57 @@ END_MEMORY`;
         // update/merge/archive/supersede/delete schemas now include
         // "scope"?: "world" — was previously only on create.
         '"scope"?: "world"',
+        // 2026-05-15 audit fix: create scope binding directive
+        // (forbid leaking project-scope derives_from into world create,
+        // forbid inventing derivation slugs). Mirror in parseDecision
+        // hard-rejects; prompt must announce the constraint.
+        "HARD CONSTRAINT (2026-05-15)",
+        "every derives_from slug MUST be one of the neighbor slugs",
+        "every derives_from neighbor MUST also be world-scope",
       ];
       for (const needle of curatorRequired) {
         assert(cp.includes(needle), `curator prompt missing required marker: ${JSON.stringify(needle)}`);
       }
+    }
+
+    // === curator parseDecision: create-scope binding (2026-05-15 audit) =====
+    // Roadmap had "Curator scope binding (create branch)" as backlog:
+    // non-create ops enforced neighbor-scope match via validateScope, but
+    // create silently passed any derives_from slug through, including
+    // hallucinated ones, and let world create derive from project-scope
+    // neighbors (leaking project context into world store). Same fix
+    // also closes deepseek audit [LOW] re: derives_from existence check.
+    {
+      const { parseDecision } = req("./sediment/curator.js");
+      const neighbors = new Map([
+        ["world-maxim-a", "world"],
+        ["project-fact-x", "project"],
+      ]);
+      const p = (obj) => parseDecision(JSON.stringify(obj), neighbors);
+      const expectThrows = (obj, substr) => {
+        let threw = false;
+        let msg = "";
+        try { p(obj); } catch (e) { threw = true; msg = e.message; }
+        assert(threw, `parseDecision should throw for ${JSON.stringify(obj)}`);
+        assert(msg.includes(substr), `error should include ${JSON.stringify(substr)}, got: ${msg}`);
+      };
+
+      // baseline: plain create with no derives_from passes
+      const ok1 = p({ op: "create", rationale: "new entry" });
+      assert(ok1.op === "create" && !ok1.derives_from, `plain create should pass: ${JSON.stringify(ok1)}`);
+
+      // project create may derive from either scope
+      assert(p({ op: "create", derives_from: ["project-fact-x"] }).op === "create", "project<-project ok");
+      assert(p({ op: "create", derives_from: ["world-maxim-a"] }).op === "create", "project<-world ok (legit specialization)");
+
+      // world create may only derive from world
+      assert(p({ op: "create", scope: "world", derives_from: ["world-maxim-a"] }).scope === "world", "world<-world ok");
+      expectThrows({ op: "create", scope: "world", derives_from: ["project-fact-x"] }, "cannot derive from project-scope");
+      expectThrows({ op: "create", scope: "world", derives_from: ["world-maxim-a", "project-fact-x"] }, "project-fact-x");
+
+      // hallucinated slugs rejected on both project and world create
+      expectThrows({ op: "create", derives_from: ["invented-slug"] }, "not an allowed neighbor");
+      expectThrows({ op: "create", scope: "world", derives_from: ["made-up"] }, "not an allowed neighbor");
     }
 
     // === writer trigger_phrases UNION =====
@@ -4275,6 +4322,93 @@ Body.
         const onDisk = fs.readFileSync(okPatch.path, "utf-8");
         assert(/^tags:/m.test(onDisk), `non-protected patch should write 'tags:' to frontmatter; got: ${onDisk.slice(0, 400)}`);
         fs.rmSync(denyRoot, { recursive: true, force: true });
+      }
+
+      // 2026-05-15 multi-LLM audit (memory subsystem): roadmap listed
+      // "sediment update/merge unknown frontmatter preservation" as a
+      // backlog item lacking systematic coverage. writer.ts has the
+      // mechanism (`...frontmatter` spread in `nextFrontmatter` +
+      // `renderFrontmatter(_, originalOrder)`) but no fixture exercised
+      // the round-trip. This block does — if any future refactor drops
+      // unknown keys, smoke fails loudly.
+      {
+        const preRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-fm-preserve-"));
+        const preTarget = setupAbrainTarget("fm-preserve");
+        const preOpts = { projectRoot: preRoot, abrainHome: preTarget.abrainHome, projectId: preTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } };
+
+        // Step 1: seed an entry via the normal writer path.
+        const seed = await writeProjectEntry(
+          { title: "Frontmatter Preservation Probe", kind: "fact", status: "active", confidence: 5, compiledTruth: "# Frontmatter Preservation Probe\n\nseed body content here.", timelineNote: "seed", sessionId: "smoke-fmp" },
+          preOpts,
+        );
+        assert(seed.status === "created", `fm-preserve seed must create: ${seed.status} / ${seed.reason}`);
+
+        // Step 2: simulate the situation we actually need to defend
+        // against — a legacy / hand-written entry that carries unknown
+        // frontmatter fields (e.g. tags, source, custom_url, a multi-
+        // line array) that aren't in the canonical writer schema. We
+        // inject them directly into the on-disk file because the public
+        // writer API does not accept arbitrary unknown keys at create
+        // time (only via frontmatterPatch on update). This mirrors how
+        // migrate-go imports preserve unknown fields from legacy
+        // .pensieve entries.
+        const seedRaw = fs.readFileSync(seed.path, "utf-8");
+        const injected = seedRaw.replace(
+          /^---\n/,
+          "---\nlegacy_source: hand-written\nlegacy_custom_url: https://example.org/x\nlegacy_tags:\n  - alpha\n  - beta\nlegacy_complex:\n  - nested-a\n  - nested-b\n  - nested-c\n",
+        );
+        assert(injected !== seedRaw, "injection sentinel marker missing");
+        fs.writeFileSync(seed.path, injected);
+
+        // Step 3: update with NO frontmatterPatch — unknown keys must
+        // survive the read-modify-write cycle. This is the headline
+        // contract: "update body, don't lose anything from frontmatter."
+        const upd1 = await updateProjectEntry(
+          "frontmatter-preservation-probe",
+          { compiledTruth: "# Frontmatter Preservation Probe\n\nfirst update body.", sessionId: "smoke-fmp" },
+          preOpts,
+        );
+        assert(upd1.status === "updated", `fm-preserve update 1 must succeed: ${upd1.status} / ${upd1.reason}`);
+        const disk1 = fs.readFileSync(seed.path, "utf-8");
+        assert(/^legacy_source: hand-written$/m.test(disk1), `unknown scalar 'legacy_source' must survive update; got:\n${disk1.slice(0, 600)}`);
+        assert(/^legacy_custom_url: https:\/\/example\.org\/x$/m.test(disk1), `unknown scalar 'legacy_custom_url' must survive update; got:\n${disk1.slice(0, 600)}`);
+        assert(/^legacy_tags:\n  - alpha\n  - beta$/m.test(disk1), `unknown array 'legacy_tags' must survive (incl. order); got:\n${disk1.slice(0, 600)}`);
+        assert(/^legacy_complex:\n  - nested-a\n  - nested-b\n  - nested-c$/m.test(disk1), `unknown 3-element array 'legacy_complex' must survive; got:\n${disk1.slice(0, 600)}`);
+
+        // Step 4: update WITH a non-protected frontmatterPatch —
+        // unknown keys must STILL survive alongside the new tag.
+        const upd2 = await updateProjectEntry(
+          "frontmatter-preservation-probe",
+          { compiledTruth: "# Frontmatter Preservation Probe\n\nsecond update body.", sessionId: "smoke-fmp", frontmatterPatch: { tags: ["new-tag"] } },
+          preOpts,
+        );
+        assert(upd2.status === "updated", `fm-preserve update 2 must succeed: ${upd2.status} / ${upd2.reason}`);
+        const disk2 = fs.readFileSync(seed.path, "utf-8");
+        assert(/^legacy_source: hand-written$/m.test(disk2), `unknown scalar must survive after frontmatterPatch too; got:\n${disk2.slice(0, 600)}`);
+        assert(/^legacy_tags:\n  - alpha\n  - beta$/m.test(disk2), `unknown array must survive after frontmatterPatch too; got:\n${disk2.slice(0, 600)}`);
+        assert(/^tags:\n  - new-tag$/m.test(disk2), `new patched 'tags' must be written; got:\n${disk2.slice(0, 600)}`);
+
+        // Step 5: protected keys must NOT be duplicated or garbled by
+        // the update + unknown-preservation interaction — i.e. only one
+        // `kind:` line, one `status:` line, etc. (Earlier writer bug
+        // could have left two `updated:` lines after merging.)
+        for (const key of ["id", "scope", "kind", "status", "confidence", "schema_version", "title", "created", "updated"]) {
+          const occurrences = disk2.split("\n").filter((l) => new RegExp(`^${key}:`).test(l)).length;
+          assert(occurrences === 1, `protected key '${key}' must appear exactly once in frontmatter, found ${occurrences}; on-disk:\n${disk2.slice(0, 600)}`);
+        }
+
+        // Step 6: roundtrip via parser — the entry must still be parsable
+        // as a valid MemoryEntry, kind/status normalized, unknown fields
+        // visible in entry.frontmatter for downstream tools (doctor).
+        const { parseEntry } = req("./memory/parser.js");
+        const parsed = await parseEntry(seed.path, { scope: "project", root: preTarget.abrainHome, label: "abrain-project" }, preRoot);
+        assert(parsed, `parseEntry must yield an entry after update with unknown fm; sourcePath=${seed.path}`);
+        assert(parsed.kind === "fact", `kind survives parseEntry: ${parsed.kind}`);
+        assert(parsed.status === "active", `status survives parseEntry: ${parsed.status}`);
+        assert(parsed.frontmatter.legacy_source === "hand-written", `parser exposes unknown scalar via .frontmatter: ${JSON.stringify(parsed.frontmatter.legacy_source)}`);
+        assert(Array.isArray(parsed.frontmatter.legacy_tags) && parsed.frontmatter.legacy_tags.length === 2, `parser exposes unknown array via .frontmatter: ${JSON.stringify(parsed.frontmatter.legacy_tags)}`);
+
+        fs.rmSync(preRoot, { recursive: true, force: true });
       }
     }
 

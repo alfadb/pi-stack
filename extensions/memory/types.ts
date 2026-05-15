@@ -12,8 +12,28 @@ export interface MemoryEntry {
   slug: string;
   id?: string;
   scope: Scope;
+  /**
+   * Normalized kind — ALWAYS one of the canonical 7 enum values
+   * (maxim/decision/anti-pattern/pattern/fact/preference/smell) per
+   * sediment/validation.ts::ENTRY_KINDS. Legacy aliases
+   * (`pipeline`/`knowledge`) and unknown values are folded into the
+   * closest canonical kind by parser.ts::normalizeKind. The original
+   * raw value, if non-canonical, is preserved in `legacyKind` for
+   * doctor/migration diagnostics; the LLM only ever sees normalized
+   * `kind`. (2026-05-15 memory audit fix.)
+   */
   kind: string;
+  /**
+   * Normalized status — ALWAYS one of the canonical 6 enum values per
+   * sediment/validation.ts::ENTRY_STATUSES. Unknown values fold to
+   * `provisional` (neutral; not subject to the default archived
+   * exclusion). Original preserved in `legacyStatus`. (2026-05-15.)
+   */
   status: string;
+  /** Original frontmatter kind if it was non-canonical / legacy alias. */
+  legacyKind?: string;
+  /** Original frontmatter status if it was non-canonical. */
+  legacyStatus?: string;
   confidence: number;
   title: string;
   summary: string;

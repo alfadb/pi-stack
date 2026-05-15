@@ -1151,6 +1151,28 @@ export async function runInit(
       user: process.env.USER,
     }, exec);
 
+    // ADR 0019 invariant 6 post-init assert (2026-05-15 audit fix). The
+    // "abrain-age-key does NOT generate .vault-master.age" property is
+    // currently held only by keychain.ts::encryptMasterKey case "abrain-
+    // age-key" early-returning without writing the file. That contract
+    // is invisible from this caller; a future refactor (e.g. unifying
+    // backend cases into a shared helper) could silently leak a
+    // double-encrypted master.age into the abrain repo, where it would
+    // also be a confusing fallback path for vault-reader. Fail loudly
+    // here instead of relying on case-by-case discipline.
+    if (backend === "abrain-age-key" && fs.existsSync(vaultMasterEncryptedPath)) {
+      // Best-effort cleanup so the regression doesn't poison subsequent
+      // /vault init runs (which would then trip the file-backend pre-
+      // existence guard above). Throw before writing pubkey/backend
+      // marker files so /vault status still reports "uninitialized".
+      try { fs.unlinkSync(vaultMasterEncryptedPath); } catch { /* best-effort */ }
+      throw new Error(
+        `ADR 0019 invariant violation: abrain-age-key init unexpectedly produced ${vaultMasterEncryptedPath}. ` +
+        `This file is reserved for Tier 3 backends (ssh-key/gpg-file/passphrase-only). ` +
+        `Likely cause: a regression in keychain.ts::encryptMasterKey. The orphan file has been removed.`,
+      );
+    }
+
     // (3) write .vault-pubkey + .vault-backend (atomic, both files).
     // For abrain-age-key, .vault-pubkey duplicates .vault-identity/master.age.pub
     // (ADR 0019 invariant 6) so existing vault-writer code stays unchanged.

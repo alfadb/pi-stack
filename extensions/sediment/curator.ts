@@ -82,7 +82,9 @@ function asNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-function parseDecision(rawText: string, neighborScopes: Map<string, string>): CuratorDecision {
+// Exported (2026-05-15) so smoke can pin the create-branch scope guard.
+// Internal-use otherwise — production callers go through curateProjectDraft.
+export function parseDecision(rawText: string, neighborScopes: Map<string, string>): CuratorDecision {
   const payload = unwrapJsonText(rawText);
   if (!payload || typeof payload !== "object") throw new Error("curator JSON must be an object");
   const obj = payload as Record<string, unknown>;
@@ -178,6 +180,43 @@ function parseDecision(rawText: string, neighborScopes: Map<string, string>): Cu
 
   if (op === "create") {
     const derives_from = asStringArray(obj.derives_from ?? obj.derivesFrom);
+    // 2026-05-15 audit fix — close roadmap "Curator scope binding
+    // (create branch)" + deepseek audit [LOW] derives_from validation.
+    //
+    // For non-create ops the scope guard rides on the existing
+    // neighbor's known scope (validateScope above). Create has no
+    // pre-existing target; the only mechanical signal we have is the
+    // derives_from chain. Two checks:
+    //
+    //   (a) Every derives_from slug MUST exist in allowedSlugs.
+    //       Curator was previously free to invent derivation slugs
+    //       (no `allowedSlugs.has(slug)` check), producing dead links
+    //       in the graph. The non-create ops already enforce this; we
+    //       extend the same discipline to create.
+    //
+    //   (b) If curator declares scope:"world" on a create, EVERY
+    //       derives_from neighbor MUST also be world-scope. World
+    //       entries are cross-project, hard-to-add canonical knowledge;
+    //       deriving a world entry from a project-specific neighbor is
+    //       almost always a curator semantic mistake (it leaks
+    //       project-specific context into world store). Project
+    //       creates remain free to derive from either scope (project
+    //       legitimately specializes / applies world knowledge — that
+    //       direction is fine and is how knowledge flows down).
+    //
+    // Note: the scope check is asymmetric on purpose. Symmetric
+    // matching would prevent legit project-from-world derivations.
+    for (const src of derives_from) {
+      if (!allowedSlugs.has(src)) {
+        throw new Error(`curator create derives_from slug is not an allowed neighbor: ${src} (do not invent derivation slugs; only use slugs from the candidate list)`);
+      }
+      if (scope === "world") {
+        const srcScope = neighborScopes.get(src);
+        if (srcScope !== "world") {
+          throw new Error(`curator create scope:"world" cannot derive from project-scope neighbor "${src}" — either drop the scope (let it default to project) or only derive from world neighbors`);
+        }
+      }
+    }
     return { op: "create", ...(scope ? { scope } : {}), ...(derives_from.length ? { derives_from } : {}), ...(rationale ? { rationale } : {}) };
   }
 
@@ -264,7 +303,7 @@ function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): 
     "Output JSON only, one object. No markdown wrapper.",
     "",
     "Allowed operations for this implementation batch:",
-    "- {\"op\":\"create\", \"scope\"?: \"world\", \"derives_from\"?: [slug, ...], \"rationale\": string}  — scope omitted defaults to project; set derives_from when the new entry is a downstream observation building on a neighbor's premise (links the new entry to upstream neighbor for graph tracing)",
+    "- {\"op\":\"create\", \"scope\"?: \"world\", \"derives_from\"?: [slug, ...], \"rationale\": string}  — scope omitted defaults to project; set derives_from when the new entry is a downstream observation building on a neighbor's premise (links the new entry to upstream neighbor for graph tracing). HARD CONSTRAINT (2026-05-15): every derives_from slug MUST be one of the neighbor slugs shown below — inventing derivation slugs will reject the decision. If scope:\"world\", every derives_from neighbor MUST also be world-scope (you cannot derive a world maxim from a project-specific neighbor; that leaks project context into world store).",
     "",
     "Scope judgment (when to set scope: world on any operation):",
     "- Use scope: world when the candidate is a durable cross-project engineering maxim, principle, or pattern that does NOT depend on any specific project's context, file paths, or module names.",

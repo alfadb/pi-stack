@@ -15,6 +15,67 @@ const IGNORE_DIRS = new Set([
   ".git", ".hg", ".svn", "node_modules", ".state", ".index", ".cache",
 ]);
 
+// World-store extra ignores. The world store root is `~/.abrain/`, which
+// also contains `projects/` (per-project sediment writes) and `vault/`
+// (encrypted secrets). Both must be excluded from world scans:
+//   - `projects/` entries are project-scoped knowledge owned by the
+//     active-project store, not world knowledge; including them would
+//     leak other projects into the curator neighbor pool.
+//   - `vault/` is encrypted/structured secret material, never markdown
+//     intended for memory_search.
+// listFilesWithRg already excludes these via --glob; the walker fallback
+// must mirror that behaviour or the safety contract regresses whenever
+// rg is missing/timeout/failed.
+const WORLD_EXTRA_IGNORE_DIRS = new Set(["projects", "vault"]);
+
+// Canonical kind/status enum guard (read side). The write side
+// (sediment/validation.ts::ENTRY_KINDS / ENTRY_STATUSES) is the source of
+// truth; we mirror it here ONLY for normalization so the LLM-facing card
+// never surfaces non-enum values. Do NOT import from sediment to avoid a
+// memory → sediment dependency (memory is read-only, sediment depends on
+// memory). Keep these two lists in sync manually.
+const CANONICAL_KINDS = new Set([
+  "maxim", "decision", "anti-pattern", "pattern", "fact", "preference", "smell",
+]);
+const CANONICAL_STATUSES = new Set([
+  "provisional", "active", "contested", "deprecated", "superseded", "archived",
+]);
+
+// Legacy alias folding. The `pipeline` and `knowledge` kinds existed in
+// pre-v7 pensieve entries and remain produced by inferKindFromPath as a
+// READ-ONLY fallback for entries without `frontmatter.kind`. They are
+// NOT in ENTRY_KINDS; before this fold the LLM saw kind values that the
+// memory_search tool description never declared, which broke the doc
+// contract ("Valid kinds: maxim/decision/anti-pattern/pattern/fact/
+// preference/smell"). Fold to the closest canonical kind here; preserve
+// the original in entry.legacyKind for doctor diagnostics.
+const LEGACY_KIND_FOLD: Record<string, string> = {
+  pipeline: "pattern",   // workflow-shaped templates ≈ patterns
+  knowledge: "fact",     // declarative knowledge ≈ facts
+};
+
+export function normalizeKind(raw: string): { kind: string; legacyKind?: string } {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return { kind: "fact", legacyKind: raw || undefined };
+  if (CANONICAL_KINDS.has(trimmed)) return { kind: trimmed };
+  const folded = LEGACY_KIND_FOLD[trimmed];
+  if (folded) return { kind: folded, legacyKind: trimmed };
+  // Unknown kind — fall back to the most neutral canonical value so the
+  // entry remains searchable instead of silently dropping; expose the
+  // raw value via legacyKind so /memory doctor can flag it.
+  return { kind: "fact", legacyKind: trimmed };
+}
+
+export function normalizeStatus(raw: string | undefined): { status: string; legacyStatus?: string } {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return { status: "active" };
+  if (CANONICAL_STATUSES.has(trimmed)) return { status: trimmed };
+  // Unknown status → provisional (neutral; NOT subject to the default
+  // archived-exclusion in search.ts::entryMatchesFilters, so the entry
+  // still surfaces). Original preserved for diagnostics.
+  return { status: "provisional", legacyStatus: trimmed };
+}
+
 const RELATION_KEYS = new Set([
   "relates_to",
   "derives_from",
@@ -34,14 +95,6 @@ export function resolveStores(cwdRaw: string | undefined, settings: MemorySettin
   const cwd = path.resolve(cwdRaw || process.cwd());
   const stores: StoreRef[] = [];
 
-  // 1. Primary project store: ~/.abrain/projects/<id>/ (B5 cutover 2026-05-13).
-  //    This is the canonical write target for sediment; migrated repos
-  //    have all their markdown entries here.
-  const projectRoot = path.join(cwd, ".pensieve");
-  if (fsSync.existsSync(projectRoot) && fsSync.statSync(projectRoot).isDirectory()) {
-    stores.push({ scope: "project", root: projectRoot, label: "project" });
-  }
-
   // Resolve abrain home once (used by both project-dual and world)
   const abrainHome = path.resolve(
     process.env.ABRAIN_ROOT
@@ -50,28 +103,59 @@ export function resolveStores(cwdRaw: string | undefined, settings: MemorySettin
   );
   const abrainExists = fsSync.existsSync(abrainHome) && fsSync.statSync(abrainHome).isDirectory();
 
-  // 2. Abrain project store — now the PRIMARY store post-B5 cutover
-  //    (2026-05-13). All sediment writes target this path. Migrated repos
-  //    have their entries here; unmigrated repos still have entries in
-  //    .pensieve/ (see legacy fallback below). loadEntries() deduplicates
-  //    across both stores, preferring abrain when the same slug exists.
+  // STORE PRIORITY (post-B5 cutover, 2026-05-13). Order matters: it is
+  // also the dedup priority — when the same bare slug appears in multiple
+  // stores, the FIRST one wins (see loadEntries below). Do not reorder
+  // without re-reading the audit notes in docs/audits/.
+  //
+  //   1. abrain project store — PRIMARY post-B5. Canonical write target
+  //      for sediment; the only place new entries should appear.
+  //   2. world store — ~/.abrain/, scoped knowledge. Searched after
+  //      project so a project-scoped same-slug override wins.
+  //   3. legacy .pensieve/ — FALLBACK ONLY for repos that have not been
+  //      migrated. sediment no longer writes here; if the same slug
+  //      already exists in an abrain store, the .pensieve copy is stale
+  //      and must NOT shadow the canonical entry.
+  //
+  // Resolve active project once (shared between abrain-project and legacy
+  // .pensieve anchor) to keep both stores consistent with strict binding.
+  let activeProjectRoot: string | null = null;
+  let abrainProjDir: string | null = null;
   if (abrainExists) {
     try {
       const resolved = resolveActiveProject(cwd, { abrainHome });
       if (resolved.activeProject) {
-        const abrainProjDir = abrainProjectDir(abrainHome, resolved.activeProject.projectId);
-        if (fsSync.existsSync(abrainProjDir) && fsSync.statSync(abrainProjDir).isDirectory()) {
-          stores.push({ scope: "project", root: abrainProjDir, label: "abrain-project" });
+        const dir = abrainProjectDir(abrainHome, resolved.activeProject.projectId);
+        if (fsSync.existsSync(dir) && fsSync.statSync(dir).isDirectory()) {
+          abrainProjDir = dir;
+        }
+        if (resolved.activeProject.projectRoot) {
+          activeProjectRoot = resolved.activeProject.projectRoot;
         }
       }
     } catch {
-      // Strict binding resolution failure → no project dual-read, not an error.
+      // Strict binding resolution failure → no project store / legacy stays at cwd.
     }
   }
 
-  // 3. World store: ~/.abrain/ (flat legacy world knowledge)
+  // 1. Abrain project store (PRIMARY)
+  if (abrainProjDir) {
+    stores.push({ scope: "project", root: abrainProjDir, label: "abrain-project" });
+  }
+
+  // 2. World store: ~/.abrain/ (knowledge/, workflows/, etc.)
   if (settings.includeWorld && abrainExists) {
     stores.push({ scope: "world", root: abrainHome, label: "world" });
+  }
+
+  // 3. Legacy .pensieve/ FALLBACK. Anchored at active project root (not
+  //    raw cwd) so launching pi from a subdirectory still finds the
+  //    legacy tree; falls back to cwd if active project resolution did
+  //    not succeed (unbound repo).
+  const legacyAnchor = activeProjectRoot ?? cwd;
+  const legacyRoot = path.join(legacyAnchor, ".pensieve");
+  if (fsSync.existsSync(legacyRoot) && fsSync.statSync(legacyRoot).isDirectory()) {
+    stores.push({ scope: "project", root: legacyRoot, label: "legacy-pensieve" });
   }
 
   return stores;
@@ -480,8 +564,18 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
   const slug = normalizeBareSlug(id || pathSlug || extractTitle(body) || "entry");
 
   const title = scalarString(frontmatter.title) || extractTitle(body) || titleFromSlug(slug);
-  const kind = scalarString(frontmatter.kind) || scalarString(frontmatter.type) || inferKindFromPath(relPath);
-  const status = scalarString(frontmatter.status) || "active";
+  const rawKind = scalarString(frontmatter.kind) || scalarString(frontmatter.type) || inferKindFromPath(relPath);
+  const rawStatus = scalarString(frontmatter.status) || "active";
+  // Normalize to canonical enum (2026-05-15 audit fix). entry.kind /
+  // entry.status now always come from sediment/validation.ts's enum;
+  // non-canonical values are preserved in legacyKind / legacyStatus for
+  // diagnostics and never leak to the LLM-facing normalized card.
+  const kindNorm = normalizeKind(rawKind);
+  const statusNorm = normalizeStatus(rawStatus);
+  const kind = kindNorm.kind;
+  const status = statusNorm.status;
+  // confidence default uses the NORMALIZED kind so the heuristic remains
+  // stable as new legacy aliases get folded.
   const confidence = Math.min(10, Math.max(0, scalarNumber(frontmatter.confidence) ?? defaultConfidence(kind)));
   const scopeRaw = scalarString(frontmatter.scope);
   const scope: Scope = scopeRaw === "world" || scopeRaw === "project" ? scopeRaw : store.scope;
@@ -496,6 +590,8 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
     scope,
     kind,
     status,
+    ...(kindNorm.legacyKind ? { legacyKind: kindNorm.legacyKind } : {}),
+    ...(statusNorm.legacyStatus ? { legacyStatus: statusNorm.legacyStatus } : {}),
     confidence,
     title,
     summary,
@@ -545,8 +641,14 @@ export async function listFilesWithRg(
   }
 }
 
-export async function walkMarkdownFiles(root: string, maxEntries: number, signal?: AbortSignal): Promise<string[]> {
+export async function walkMarkdownFiles(
+  root: string,
+  maxEntries: number,
+  signal?: AbortSignal,
+  opts: { extraIgnoreDirs?: Set<string> } = {},
+): Promise<string[]> {
   const out: string[] = [];
+  const extraIgnore = opts.extraIgnoreDirs;
 
   async function walk(dir: string) {
     throwIfAborted(signal);
@@ -564,6 +666,7 @@ export async function walkMarkdownFiles(root: string, maxEntries: number, signal
     for (const entry of entries) {
       if (out.length >= maxEntries) return;
       if (IGNORE_DIRS.has(entry.name)) continue;
+      if (extraIgnore && extraIgnore.has(entry.name)) continue;
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(abs);
@@ -585,7 +688,12 @@ export async function scanStore(
 ): Promise<MemoryEntry[]> {
   throwIfAborted(signal);
   const rgFiles = await listFilesWithRg(store.root, signal);
-  const files = (rgFiles ?? await walkMarkdownFiles(store.root, settings.maxEntries, signal))
+  // World walker MUST exclude `projects/` and `vault/` to mirror the rg
+  // --glob exclusions. Without this, an `rg`-missing host would leak
+  // other projects' sediment writes and encrypted vault material into
+  // memory_search results. (gpt-5.5 audit, 2026-05-15)
+  const extraIgnoreDirs = store.scope === "world" ? WORLD_EXTRA_IGNORE_DIRS : undefined;
+  const files = (rgFiles ?? await walkMarkdownFiles(store.root, settings.maxEntries, signal, { extraIgnoreDirs }))
     .filter((file) => path.basename(file) !== "_index.md")
     .slice(0, settings.maxEntries);
 
@@ -619,30 +727,38 @@ export async function loadEntries(
   );
   const flat = batches.flat();
 
-  // Dedup: when the same slug appears in multiple stores (e.g. .pensieve/
-  // and abrain/projects/<id>/ after migration), keep the first occurrence.
-  // Stores are ordered by priority: .pensieve/ > abrain project > world.
-  // Within same slug, higher-confidence entries win; otherwise first-wins.
-  const seen = new Map<string, MemoryEntry>();
-  for (const entry of flat) {
-    const existing = seen.get(entry.slug);
-    if (!existing) {
-      seen.set(entry.slug, entry);
-      continue;
-    }
-    // Keep the entry with higher confidence; tiebreak by updated date
-    if (entry.confidence > existing.confidence) {
-      seen.set(entry.slug, entry);
-    } else if (entry.confidence === existing.confidence) {
-      // Round 7 P1 (sonnet audit fix): use compareTimestamps (Date.parse-
-      // based, TZ aware) instead of string compare. Date-only vs full ISO
-      // / cross-TZ-offset values used to break tiebreak ordering across
-      // .pensieve and abrain stores.
-      const eu = entry.updated || entry.created;
-      const xu = existing.updated || existing.created;
-      if (compareTimestamps(eu, xu) > 0) seen.set(entry.slug, entry);
+  // Dedup across stores. Store priority is fixed in resolveStores:
+  //   abrain-project > world > legacy-pensieve
+  // The first occurrence of a given slug wins UNCONDITIONALLY across
+  // stores — abrain-project canonical entries must never be shadowed by
+  // a stale legacy .pensieve copy with a higher (legacy) confidence
+  // value. (B5 cutover semantics; 2026-05-15 memory audit fix.)
+  //
+  // Within the same store the same slug should not appear twice; if it
+  // does (e.g. duplicate frontmatter id), keep the higher-confidence
+  // entry, then more-recently-updated entry. compareTimestamps is
+  // Date.parse-based (TZ aware) so date-only vs full ISO formats compare
+  // correctly. (Round 7 P1 sonnet audit fix.)
+  const seen = new Map<string, { entry: MemoryEntry; storeIndex: number }>();
+  for (let i = 0; i < batches.length; i++) {
+    for (const entry of batches[i]) {
+      const existing = seen.get(entry.slug);
+      if (!existing) {
+        seen.set(entry.slug, { entry, storeIndex: i });
+        continue;
+      }
+      // Cross-store: earlier store always wins (B5 priority).
+      if (i !== existing.storeIndex) continue;
+      // Same-store tiebreak: confidence then updated.
+      if (entry.confidence > existing.entry.confidence) {
+        seen.set(entry.slug, { entry, storeIndex: i });
+      } else if (entry.confidence === existing.entry.confidence) {
+        const eu = entry.updated || entry.created;
+        const xu = existing.entry.updated || existing.entry.created;
+        if (compareTimestamps(eu, xu) > 0) seen.set(entry.slug, { entry, storeIndex: i });
+      }
     }
   }
 
-  return Array.from(seen.values());
+  return Array.from(seen.values()).map((v) => v.entry);
 }
