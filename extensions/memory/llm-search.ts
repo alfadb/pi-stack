@@ -17,7 +17,7 @@ function logSearchMetrics(entry: Record<string, unknown>, projectRoot?: string):
     // disk. Sanitize first: pattern-match → replace with placeholder.
     if (typeof entry.query === "string" && entry.query.length > 0) {
       const s = sanitizeForMemory(entry.query);
-      if (!s.ok) entry = { ...entry, query: `[redacted: ${s.error}]` };
+      entry = { ...entry, query: s.ok ? (s.text ?? entry.query) : `[redacted: ${s.error}]` };
     }
     const file = memorySearchMetricsPath(projectRoot);
     const dir = path.dirname(file);
@@ -480,8 +480,13 @@ export async function llmSearchEntries(
   signal?: AbortSignal,
   projectRoot?: string,
 ) {
-  const query = String(params.query ?? "").trim();
-  if (!query) return [];
+  const rawQuery = String(params.query ?? "").trim();
+  if (!rawQuery) return [];
+  // memory_search sends the query to an LLM reranker and persists a metrics
+  // row. Sanitize before both the prompt and the 80-char metrics truncation;
+  // truncating first can leave a partial credential that no longer matches.
+  const querySanitize = sanitizeForMemory(rawQuery);
+  const query = querySanitize.ok ? (querySanitize.text ?? rawQuery) : `[redacted: ${querySanitize.error}]`;
 
   assertModelRegistry(modelRegistryRaw);
   const modelRegistry = modelRegistryRaw;

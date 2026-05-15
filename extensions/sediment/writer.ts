@@ -410,7 +410,8 @@ function mergeUpdateMarkdown(
   // validateProjectEntryDraft, letting callers slip in arbitrary keys
   // including the lifecycle-controlled ones (`id`, `scope`, `kind`,
   // `status`, `confidence`, `schema_version`, `title`, `created`,
-  // `updated`). All in-repo callers (`mergeProjectEntries`,
+  // `updated`) and search-anchor keys (`trigger_phrases`) that must go
+  // through dedicated merge/sanitize logic. All in-repo callers (`mergeProjectEntries`,
   // `supersedeProjectEntry`) only set relation keys (`derives_from`,
   // `superseded_by`), so the current blast radius is theoretical — but
   // the API contract leaves an obvious foot-gun if a future Lane G /
@@ -418,7 +419,7 @@ function mergeUpdateMarkdown(
   // of system-managed keys so the validator/lint contract is preserved.
   const PROTECTED_FRONTMATTER_KEYS = new Set([
     "id", "scope", "kind", "status", "confidence", "schema_version",
-    "title", "created", "updated",
+    "title", "created", "updated", "trigger_phrases",
   ]);
   const userPatch = patch.frontmatterPatch ?? {};
   for (const k of Object.keys(userPatch)) {
@@ -1244,7 +1245,7 @@ export async function writeProjectEntry(
 //     `trigger`, `tags`, no `confidence`, no `compiled_truth` section.
 //
 // What it shares with writeProjectEntry (intentionally, to avoid drift):
-//   - sanitize gate (sanitizeForMemory, fail-closed on secrets)
+//   - sanitize gate (sanitizeForMemory redacts secrets/PII to placeholders)
 //   - atomic write (tmp + rename)
 //   - markdown lint (lintMarkdown)
 //   - lockfile + atomic stale reclaim
@@ -1436,7 +1437,7 @@ async function gitCommitAbrain(abrainHome: string, filePath: string, slug: strin
  *
  * Substrate (mirrors writeProjectEntry):
  *   1. validation (schema)
- *   2. sanitize all free-text fields (fail-closed on secrets/PII)
+ *   2. sanitize all free-text fields (redact secrets/PII to placeholders)
  *   3. build markdown (frontmatter v1 + body + Timeline)
  *   4. lint (warnings recorded; errors reject)
  *   5. dedupe (slug collision)

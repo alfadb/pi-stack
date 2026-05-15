@@ -194,11 +194,30 @@ function relevantEntriesForCurator(entries: MemoryEntry[]): MemoryEntry[] {
   return entries.filter((entry) => entry.scope === "project" || entry.scope === "world");
 }
 
+function sanitizePromptText(text: string): string {
+  const s = sanitizeForMemory(text);
+  return s.ok ? (s.text ?? text) : `[redacted: ${s.error}]`;
+}
+
+function sanitizeDecisionStrings<T>(value: T): T {
+  if (typeof value === "string") return sanitizePromptText(value) as T;
+  if (Array.isArray(value)) return value.map((item) => sanitizeDecisionStrings(item)) as T;
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = sanitizeDecisionStrings(item);
+    }
+    return out as T;
+  }
+  return value;
+}
+
 function entryForPrompt(entry: MemoryEntry): string {
+  const timelineTail = entry.timeline.slice(-4).join("\n") || "(none)";
   return [
     `## ${entry.slug}`,
     `scope: ${entry.scope ?? "project"}`,
-    `title: ${entry.title}`,
+    `title: ${sanitizePromptText(entry.title)}`,
     `kind: ${entry.kind}`,
     `status: ${entry.status}`,
     `confidence: ${entry.confidence}`,
@@ -206,10 +225,10 @@ function entryForPrompt(entry: MemoryEntry): string {
     entry.updated ? `updated: ${entry.updated}` : undefined,
     "",
     "### compiled_truth",
-    entry.compiledTruth,
+    sanitizePromptText(entry.compiledTruth),
     "",
     "### timeline_tail",
-    entry.timeline.slice(-4).join("\n") || "(none)",
+    sanitizePromptText(timelineTail),
   ].filter((x): x is string => x !== undefined).join("\n");
 }
 
@@ -260,6 +279,8 @@ function makeCuratorPrompt(draft: ProjectEntryDraft, neighbors: MemoryEntry[]): 
     "- {\"op\":\"delete\", \"slug\": one_of_neighbors, \"scope\"?: \"world\", \"mode\": \"soft\"|\"hard\", \"reason\": string, \"rationale\": string}",
     "",
     "Rules:",
+    "- Candidate and neighbor bodies may contain [SECRET:<type>] placeholders. Preserve placeholders when semantically relevant, but never replace them with raw values and never invent secret values.",
+    "- If you see any raw secret-like string in a candidate or neighbor, write only a typed placeholder such as [SECRET:api_key], [SECRET:token], [SECRET:connection_url], or [SECRET:private_key] in your JSON output.",
     "- Prefer update over create when the candidate refines, implements, corrects, or supersedes a single neighbor.",
     "- Prefer merge when two or more neighbors are the same evolving knowledge unit and the candidate supplies a better compiled truth.",
     "- Prefer skip when the candidate adds no durable information beyond a neighbor.",
@@ -363,10 +384,11 @@ export async function curateProjectDraft(
 
   // Belt-and-suspenders: sanitize the extractor's output before feeding it
   // to any LLM (search prompt → memory_search LLM, curator prompt → curator
-  // LLM). The extractor prompt instructs the LLM not to emit secrets, but
-  // PII (home paths, IPs, emails) can still leak through verbatim transcript
-  // quotes. Writer-level sanitize runs later at writeProjectEntry time — by
-  // then the LLMs have already seen the raw text. (2026-05-14 audit round 6)
+  // LLM). The extractor prompt instructs the LLM to use placeholders, but
+  // raw PII/credentials can still leak through transcript quotes. Writer-
+  // level sanitize runs later at writeProjectEntry time — by then the LLMs
+  // have already seen the raw text. (2026-05-14 audit round 6; 2026-05-15
+  // credential redaction instead of whole-run abort)
   const titleSanitize = sanitizeForMemory(draft.title);
   const bodySanitize = sanitizeForMemory(draft.compiledTruth);
   const safeDraft: ProjectEntryDraft = {
@@ -374,10 +396,10 @@ export async function curateProjectDraft(
     title: titleSanitize.text ?? draft.title,
     compiledTruth: bodySanitize.text ?? draft.compiledTruth,
   };
-  // If a credential is detected in the draft itself (extremely unlikely after
-  // extractor sanitize, but belt-and-suspenders), skip immediately.
+  // sanitizeForMemory currently redacts credentials and returns ok=true. Keep
+  // this defensive branch for future unrecoverable sanitizer errors.
   if (!titleSanitize.ok || !bodySanitize.ok) {
-    const error = `curator pre-sanitize aborted: ${(!titleSanitize.ok ? titleSanitize.error : bodySanitize.error)}`;
+    const error = sanitizePromptText(`curator sanitize failed: ${(!titleSanitize.ok ? titleSanitize.error : bodySanitize.error)}`);
     const decision: CuratorDecision = { op: "skip", reason: "credential_in_draft", rationale: error };
     return { decision, audit: { decision, neighbors: [], stage_ms: { search: 0, decide: 0, total: Date.now() - totalStart }, error } };
   }
@@ -395,7 +417,7 @@ export async function curateProjectDraft(
       deps.projectRoot,
     ) as any[];
   } catch (e: unknown) {
-    const error = e instanceof Error ? e.message : String(e);
+    const error = sanitizePromptText(e instanceof Error ? e.message : String(e));
     const searchMs = Date.now() - searchStart;
     const decision: CuratorDecision = { op: "skip", reason: "curator_search_error", rationale: error };
     return {
@@ -430,14 +452,14 @@ export async function curateProjectDraft(
       makeCuratorPrompt(safeDraft, neighbors),
       deps.signal,
     );
-    const decision = parseDecision(raw, new Map(neighbors.map((entry) => [entry.slug, entry.scope ?? "project"])));
+    const decision = sanitizeDecisionStrings(parseDecision(raw, new Map(neighbors.map((entry) => [entry.slug, entry.scope ?? "project"]))));
     const decideMs = Date.now() - decideStart;
     return {
       decision,
       audit: { decision, neighbors: neighborAudit, stage_ms: { search: searchMs, decide: decideMs, total: Date.now() - totalStart } },
     };
   } catch (e: unknown) {
-    const error = e instanceof Error ? e.message : String(e);
+    const error = sanitizePromptText(e instanceof Error ? e.message : String(e));
     const decision: CuratorDecision = { op: "skip", reason: "curator_error", rationale: error };
     const decideMs = Date.now() - decideStart;
     return {

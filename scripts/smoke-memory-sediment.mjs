@@ -117,9 +117,11 @@ exports.Type = {
   writeFile(path.join(outRoot, "node_modules", "@earendil-works", "pi-ai", "index.js"), `
 exports.__calls = [];
 exports.__configs = [];
+exports.__prompts = [];
 exports.streamSimple = (_model, opts, config) => {
   exports.__configs.push(config || {});
   const prompt = opts && opts.messages && opts.messages[0] && opts.messages[0].content && opts.messages[0].content[0] && opts.messages[0].content[0].text || '';
+  exports.__prompts.push(prompt);
   let text;
   if (prompt.includes('MEMORY_SEARCH_CANDIDATES')) {
     exports.__calls.push('memory-search-stage2');
@@ -546,6 +548,24 @@ async function main() {
     // not a reasoning task. settings.ts default was updated in commit 4b4432f
     // but this smoke assertion was missed; now restored.
     assert(piAiStub.__configs[0]?.reasoning === "off" && piAiStub.__configs[1]?.reasoning === "off", `memory_search thinking config mismatch (expected both stages off per ADR 0015 D3): ${JSON.stringify(piAiStub.__configs)}`);
+
+    // Metrics logs must store the sanitized query, not raw credential-like
+    // text pasted into memory_search.
+    const searchToken = "ghp_" + "1234567890abcdefghijklmnopqrstuv";
+    const secretQueryRaw = await search.execute("smoke-llm-secret-query", search.prepareArguments({ query: `find memory about ${searchToken}`, limit: 2 }), new AbortController().signal, null, { cwd: root, modelRegistry: mockModelRegistry });
+    assert(!secretQueryRaw.isError, `memory_search secret-query smoke returned error: ${JSON.stringify(secretQueryRaw)}`);
+    const secretSearchPrompts = piAiStub.__prompts.slice(-2).join("\n");
+    assert(
+      secretSearchPrompts.includes("[SECRET:github_token]") && !secretSearchPrompts.includes(searchToken),
+      "memory_search LLM prompts must contain placeholder and not raw query credential",
+    );
+    const metricsPath = path.join(root, ".pi-astack", "memory", "search-metrics.jsonl");
+    const metricLines = fs.readFileSync(metricsPath, "utf-8").trim().split(/\n/);
+    const lastMetric = JSON.parse(metricLines[metricLines.length - 1]);
+    assert(
+      String(lastMetric.query).includes("[SECRET:github_token]") && !String(lastMetric.query).includes(searchToken),
+      `memory_search metrics query must redact raw token: ${JSON.stringify(lastMetric)}`,
+    );
 
     const graph = await rebuildGraphIndex(path.join(root, ".pensieve"), DEFAULT_SETTINGS, undefined, root);
     assert(fs.existsSync(path.join(root, ".pensieve", ".index", "graph.json")), "graph.json not written");
@@ -976,42 +996,91 @@ END_MEMORY`;
     // Only sensitive-info and storage-integrity checks remain hard gates.
 
     // Sensitive-info sanitizer patterns — JWT, PEM, AWS access key, conn URL.
+    // Credentials are redacted to typed placeholders, not used to abort the
+    // whole sediment run.
     {
-      const jwt = sanitizeForMemory("Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c");
-      assert(!jwt.ok && /jwt_token/.test(jwt.error || ""), `jwt_token must reject: ${JSON.stringify(jwt)}`);
-      const pem = sanitizeForMemory("-----BEGIN RSA PRIVATE KEY-----\nMIIBOwIBAAJBAL...\n-----END RSA PRIVATE KEY-----");
-      assert(!pem.ok && /pem_private_key/.test(pem.error || ""), `pem_private_key must reject: ${JSON.stringify(pem)}`);
-      const aws = sanitizeForMemory("AKIAIOSFODNN7EXAMPLE is the access key");
-      assert(!aws.ok && /aws_access_key/.test(aws.error || ""), `aws_access_key must reject: ${JSON.stringify(aws)}`);
-      const dbUrl = sanitizeForMemory("db: mongodb://user:p4ssw0rd@host.example/dbname");
-      assert(!dbUrl.ok && /connection_url/.test(dbUrl.error || ""), `connection_url must reject: ${JSON.stringify(dbUrl)}`);
-      // Negative: ordinary IP/email/$HOME paths still must not match credential rules.
+      const assertRedacted = (label, result, rawNeedle, placeholderRe = /\[SECRET:[^\]]+\]/) => {
+        assert(result.ok, `${label} should sanitize successfully: ${JSON.stringify(result)}`);
+        assert(result.text && placeholderRe.test(result.text), `${label} should contain typed placeholder: ${JSON.stringify(result)}`);
+        assert(!result.text.includes(rawNeedle), `${label} leaked raw secret: ${JSON.stringify(result)}`);
+        assert(result.replacements.some((r) => r.startsWith("credential:")), `${label} missing credential replacement marker: ${JSON.stringify(result)}`);
+      };
+
+      const jwtRaw = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+      assertRedacted("jwt_token", sanitizeForMemory(`Authorization: Bearer ${jwtRaw}`), jwtRaw);
+      const pemRaw = "-----BEGIN RSA PRIVATE KEY-----\nMIIBOwIBAAJBAL...\n-----END RSA PRIVATE KEY-----";
+      assertRedacted("pem_private_key", sanitizeForMemory(pemRaw), "BEGIN RSA PRIVATE KEY");
+      const pemHeaderOnlyRaw = "-----BEGIN OPENSSH PRIVATE KEY-----";
+      assertRedacted("pem_private_key header-only", sanitizeForMemory(`partial ${pemHeaderOnlyRaw}`), "BEGIN OPENSSH PRIVATE KEY");
+      const awsRaw = "AKIA" + "IOSFODNN7EXAMPLE";
+      assertRedacted("aws_access_key", sanitizeForMemory(`${awsRaw} is the access key`), awsRaw);
+      const dbRaw = "mongodb://user:p4ssw0rd@host.example/dbname";
+      assertRedacted("connection_url", sanitizeForMemory(`db: ${dbRaw}`), dbRaw);
+      const neo4jRaw = "neo4j+s://user:p4ssw0rd@aura.example.net/db";
+      assertRedacted("generic credential URL scheme", sanitizeForMemory(`graph: ${neo4jRaw}`), neo4jRaw, /\[SECRET:connection_url\]/);
+      const sqlalchemyRaw = "sqlalchemy+psycopg2://svc:p4ssw0rd@db.example/app";
+      assertRedacted("driver-prefixed credential URL scheme", sanitizeForMemory(`dsn: ${sqlalchemyRaw}`), sqlalchemyRaw, /\[SECRET:connection_url\]/);
+      const localDsn = sanitizeForMemory("redis://localhost:6379 is the local cache endpoint");
+      assert(!localDsn.replacements.some((r) => r.startsWith("credential:")), `local DSN without userinfo must not be treated as credential URL: ${JSON.stringify(localDsn)}`);
+      // Negative: ordinary IP/email/$HOME paths still get non-secret scrub only.
       const benign = sanitizeForMemory("user@example.com on 127.0.0.1 at /home/worker/projects");
-      assert(benign.ok, `benign content should pass: ${JSON.stringify(benign)}`);
+      assert(benign.ok && !benign.replacements.some((r) => r.startsWith("credential:")), `benign content should pass without credential marker: ${JSON.stringify(benign)}`);
 
       // Round 8 P1 (opus R8 audit): credential pattern coverage gaps.
-      // Each of these used to bypass the gate — now must hard-reject.
-      const bearer = sanitizeForMemory("curl -H 'Authorization: Bearer ya29.a0AfH6SMBxxxxxxxxxxxxxxxxxxxxxxx'");
-      assert(!bearer.ok && /bearer_token/.test(bearer.error || ""), `bearer_token must reject: ${JSON.stringify(bearer)}`);
+      // Each of these used to bypass the gate — now must be redacted.
+      const bearerRaw = "ya29.a0AfH6SMBxxxxxxxxxxxxxxxxxxxxxxx";
+      const bearerResult = sanitizeForMemory(`curl -H 'Authorization: Bearer ${bearerRaw}'`);
+      assertRedacted("bearer_token", bearerResult, bearerRaw, /Bearer \[SECRET:bearer_token\]/);
+      assert(bearerResult.text.includes("Bearer [SECRET:bearer_token]"), `bearer replacement must preserve header shape: ${JSON.stringify(bearerResult)}`);
       const slackToken = "xox" + "b-12345678901-1234567890-AbCdEfGhIjKlMnOpQrStUvWx";
-      const slack = sanitizeForMemory(`slackbot config: ${slackToken}`);
-      assert(!slack.ok && /slack_token/.test(slack.error || ""), `slack_token must reject: ${JSON.stringify(slack)}`);
-      const google = sanitizeForMemory("GOOGLE_API_KEY=AIzaSyB1234567890ABCDEFGHIJKLMNOPQRSTUV");
-      assert(!google.ok && /(google_api_key|generic_secret_assignment)/.test(google.error || ""), `google_api_key must reject: ${JSON.stringify(google)}`);
+      assertRedacted("slack_token", sanitizeForMemory(`slackbot config: ${slackToken}`), slackToken);
+      const googleRaw = "AIzaSyB1234567890ABCDEFGHIJKLMNOPQRSTUV";
+      const googleResult = sanitizeForMemory(`GOOGLE_API_KEY=${googleRaw}`);
+      assertRedacted("google_api_key", googleResult, googleRaw, /\[SECRET:google_api_key\]/);
+      assert(googleResult.text.includes("GOOGLE_API_KEY=[SECRET:google_api_key]"), `google assignment should keep vendor-specific placeholder: ${JSON.stringify(googleResult)}`);
       const stripeKey = "sk" + "_live_4eC39HqLyjWDarjtT1zdp7dc";
-      const stripeLive = sanitizeForMemory(`STRIPE_SECRET_KEY=${stripeKey}`);
-      assert(!stripeLive.ok && /(stripe_key|generic_secret_assignment)/.test(stripeLive.error || ""), `stripe_key must reject: ${JSON.stringify(stripeLive)}`);
-      const httpAuth = sanitizeForMemory("clone: https://admin:hunter2@private.git.example.com/repo.git");
-      assert(!httpAuth.ok && /http_basic_auth_url/.test(httpAuth.error || ""), `http_basic_auth_url must reject: ${JSON.stringify(httpAuth)}`);
-      const passwd = sanitizeForMemory("server config: passwd: superSecretPassword12345");
-      assert(!passwd.ok && /generic_secret_assignment/.test(passwd.error || ""), `passwd keyword must reject: ${JSON.stringify(passwd)}`);
+      const stripeResult = sanitizeForMemory(`STRIPE_SECRET_KEY=${stripeKey}`);
+      assertRedacted("stripe_key", stripeResult, stripeKey, /\[SECRET:stripe_key\]/);
+      assert(stripeResult.text.includes("STRIPE_SECRET_KEY=[SECRET:stripe_key]"), `stripe assignment should keep vendor-specific placeholder: ${JSON.stringify(stripeResult)}`);
+      const httpRaw = "https://admin:hunter2@private.git.example.com/repo.git";
+      assertRedacted("http basic auth URL", sanitizeForMemory(`clone: ${httpRaw}`), httpRaw, /\[SECRET:connection_url\]/);
+      const passwdRaw = "superSecretPassword12345";
+      const passwdResult = sanitizeForMemory(`server config: passwd: ${passwdRaw}`);
+      assertRedacted("passwd keyword", passwdResult, passwdRaw, /passwd: \[SECRET:generic_secret_assignment\]/);
+      assert(passwdResult.text.includes("passwd: [SECRET:generic_secret_assignment]"), `generic assignment must preserve key/value shape: ${JSON.stringify(passwdResult)}`);
+      const punctPasswordRaw = "p@ss!word!hunter2";
+      assertRedacted("punctuated long password", sanitizeForMemory(`password=${punctPasswordRaw}`), punctPasswordRaw, /password=\[SECRET:generic_secret_assignment\]/);
+      const colonPasswordRaw = "secret:fooBarBaz12345";
+      assertRedacted("colon long password", sanitizeForMemory(`password: ${colonPasswordRaw}`), colonPasswordRaw, /password: \[SECRET:generic_secret_assignment\]/);
+      const punctApiKeyRaw = "tok@en123def456ghi789";
+      assertRedacted("punctuated api key", sanitizeForMemory(`api_key: ${punctApiKeyRaw}`), punctApiKeyRaw, /api_key: \[SECRET:generic_secret_assignment\]/);
+      const shortPasswordRaw = "abc12345";
+      const shortPasswordResult = sanitizeForMemory(`password: ${shortPasswordRaw}`);
+      assertRedacted("short password keyword", shortPasswordResult, shortPasswordRaw, /password: \[SECRET:short_secret_assignment\]/);
+      const benignPasswordState = sanitizeForMemory("password: required before continuing");
+      assert(!benignPasswordState.replacements.some((r) => r.startsWith("credential:")), `short secret heuristic must not redact benign state words: ${JSON.stringify(benignPasswordState)}`);
 
       // Round 8 P1 (opus R8 audit): zero-width / bidi-control bypass
       // forms must NOT defeat keyword scanning. Insert U+200B between
-      // "pass" and "word" — the original gate would lexically miss
-      // "password" because of the invisible char.
+      // "pass" and "word" — fallback redacts the containing line.
       const zwsp = sanitizeForMemory("config\u200B: pass\u200Bword: superSecretPassword12345");
-      assert(!zwsp.ok && /generic_secret_assignment/.test(zwsp.error || ""), `zero-width-space bypass must still reject: ${JSON.stringify(zwsp)}`);
+      assert(zwsp.ok && zwsp.text === "[SECRET:generic_secret_assignment]", `zero-width-space bypass must redact containing line: ${JSON.stringify(zwsp)}`);
+      const zwspMulti = sanitizeForMemory(["keep this durable context", "config\u200B: pass\u200Bword: superSecretPassword12345", "keep this too"].join("\n"));
+      assert(
+        zwspMulti.ok && zwspMulti.text === ["keep this durable context", "[SECRET:generic_secret_assignment]", "keep this too"].join("\n"),
+        `zero-width-space bypass must redact only the affected line: ${JSON.stringify(zwspMulti)}`,
+      );
+      const zwspPem = sanitizeForMemory([
+        "before pem context",
+        "-----BEGIN\u200B RSA PRIVATE KEY-----",
+        "MIIBOwIBAAJBALABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890",
+        "-----END RSA PRIVATE KEY-----",
+        "after pem context",
+      ].join("\n"));
+      assert(
+        zwspPem.ok && !zwspPem.text.includes("MIIBOwIBAAJBAL") && zwspPem.text.includes("before pem context") && zwspPem.text.includes("after pem context"),
+        `zero-width PEM bypass must redact block body without dropping surrounding context: ${JSON.stringify(zwspPem)}`,
+      );
     }
 
     // compiledTruth body containing a bare `---` line gets escaped
@@ -1047,8 +1116,8 @@ END_MEMORY`;
       assert(!/^---$/m.test(fm2.body), `frontmatter breakout body still has bare frontmatter delimiter: ${fm2.body}`);
     }
 
-    // triggerPhrases pass through sanitizer; a credential in any
-    //     phrase rejects the whole write.
+    // triggerPhrases pass through sanitizer; credentials are redacted to
+    // placeholders instead of rejecting the whole write.
     {
       const g8Root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-g8-"));
       fs.mkdirSync(path.join(g8Root, ".pensieve"), { recursive: true });
@@ -1056,14 +1125,17 @@ END_MEMORY`;
       execFileSync("git", ["config", "user.email", "pi@example.test"], { cwd: g8Root });
       execFileSync("git", ["config", "user.name", "pi smoke"], { cwd: g8Root });
       const g8Target = setupAbrainTarget("phrase-leak");
-      const bad = await writeProjectEntry({
+      const rawTriggerSecret = "sk-abcdef0123456789abcdef0123456789";
+      const redacted = await writeProjectEntry({
         title: "Phrase Leak",
         kind: "fact",
         confidence: 5,
         compiledTruth: "Body that is fine on its own and long enough to pass validation.",
-        triggerPhrases: ["normal phrase", "sk-abcdef0123456789abcdef0123456789"],
+        triggerPhrases: ["normal phrase", rawTriggerSecret],
       }, { projectRoot: g8Root, abrainHome: g8Target.abrainHome, projectId: g8Target.projectId, settings: { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: false }, dryRun: false });
-      assert(bad.status === "rejected" && /openai_api_key|credential/.test(bad.reason || ""), `trigger phrase sanitizer must reject credential in triggerPhrases: ${JSON.stringify(bad)}`);
+      assert(redacted.status === "created", `trigger phrase credential should redact, not reject: ${JSON.stringify(redacted)}`);
+      const redactedWritten = fs.readFileSync(redacted.path, "utf-8");
+      assert(redactedWritten.includes("[SECRET:openai_api_key]") && !redactedWritten.includes(rawTriggerSecret), "trigger phrase credential was not redacted in written file");
       // Negative: phrases that only contain $HOME paths get scrubbed and pass.
       const ok = await writeProjectEntry({
         title: "Phrase Path Scrub",
@@ -1099,6 +1171,9 @@ END_MEMORY`;
         "Per-window cap",
         "TWO MEMORY blocks",
         "Title hygiene",
+        "[SECRET:api_key]",
+        "[SECRET:connection_url]",
+        "Do not invent, reconstruct, or transform the original value.",
         // Cross-scope wikilink hygiene (added 2026-05-13 after B5
         // sediment writer cutover so newly auto-written entries that
         // reference global maxims / workflows ship with explicit
@@ -1154,6 +1229,8 @@ END_MEMORY`;
         // ADR / file path discipline added 2026-05-13.
         "Wikilink target discipline",
         "MUST be referenced in PROSE",
+        "[SECRET:<type>] placeholders",
+        "never replace them with raw values",
         // Scope on non-create operations (R5 2026-05-14 fix):
         // update/merge/archive/supersede/delete schemas now include
         // "scope"?: "world" — was previously only on create.
@@ -1353,9 +1430,11 @@ END_MEMORY`;
       const RESPONSES = [
         // Run 1: clean valid block.
         "MEMORY:\ntitle: A2 Mock Extracted Insight\nkind: fact\nconfidence: 4\n---\n# A2 Mock Extracted Insight\n\nThe LLM auto-write lane successfully extracted this insight from the transcript window.\nEND_MEMORY",
-        // Run 2: SKIP.
+        // Run 2: SKIP for the credential-redaction prompt check.
         "SKIP",
-        // Run 3: maxim/high-confidence attempt. ADR 0016 trusts it.
+        // Run 3: SKIP.
+        "SKIP",
+        // Run 4: maxim/high-confidence attempt. ADR 0016 trusts it.
         "MEMORY:\ntitle: Trusted Maxim Attempt\nkind: maxim\nstatus: active\nconfidence: 9\n---\n# Trusted Maxim Attempt\n\nThis attempts to mint a maxim with confidence 9. ADR 0016 trusts the model to write maxim/high confidence when warranted.\nEND_MEMORY",
       ];
       // Reset global so we control invocation count.
@@ -1401,47 +1480,60 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         modelRegistry: mockModelRegistry,
       });
       assert(r1.ok && r1.rawText && r1.rawText.includes("A2 Mock Extracted Insight"), `r1 mock should return valid block: ${JSON.stringify(r1)}`);
-      // Round 9 P0 (sonnet R9-1 fix): sanitizer must run as an INPUT
-      // gate. windowText containing a credential MUST NOT reach the LLM
-      // provider; runLlmExtractor must short-circuit before streamSimple.
-      // Failure mode: bug case would call mockLLM and r.ok=true; here
-      // the mock is observable via globalThis.__A2_LAST_PROMPT__ —
-      // assert that AFTER the pre-sanitize call, the mock prompt cache
-      // does NOT change.
-      const promptBefore = globalThis.__A2_LAST_PROMPT__;
+      // Round 10: sanitizer must run as an INPUT redaction boundary.
+      // windowText containing a credential may still reach the LLM provider,
+      // but only after the raw token is replaced with a typed placeholder.
+      const rawGithubToken = "ghp_" + "1234567890abcdefghijklmnopqrstuv";
       const rSecret = await runLlmExtractor(
-        "--- ENTRY X t1 message/user ---\nMy github token is ghp_1234567890abcdefghijklmnopqrstuv. Help me debug.",
+        `--- ENTRY X t1 message/user ---\nMy github token is ${rawGithubToken}. Help me debug.`,
         { settings: a2Settings, modelRegistry: mockModelRegistry },
       );
+      assert(rSecret.ok, `window with credential should redact and continue, got: ${JSON.stringify(rSecret)}`);
       assert(
-        rSecret.ok === false && rSecret.preSanitizeAborted === true,
-        `R9 P0: window with credential must abort BEFORE LLM call, got: ${JSON.stringify(rSecret)}`,
+        globalThis.__A2_LAST_PROMPT__.includes("[SECRET:github_token]") && !globalThis.__A2_LAST_PROMPT__.includes(rawGithubToken),
+        "mock LLM prompt must contain placeholder and not raw credential",
       );
       assert(
-        /github_token/.test(rSecret.preSanitizeReason || "") || /credential/.test(rSecret.preSanitizeReason || ""),
-        `R9 P0: preSanitizeReason should identify credential pattern, got: ${rSecret.preSanitizeReason}`,
+        rSecret.preSanitizeRedacted && rSecret.preSanitizeReplacements?.includes("credential:github_token"),
+        `extractor result should expose pre-LLM redaction metadata: ${JSON.stringify(rSecret)}`,
       );
+      const rSecretSummary = summarizeLlmExtractorResult(rSecret, { maxCandidates: 3, rawPreviewChars: 100 });
       assert(
-        globalThis.__A2_LAST_PROMPT__ === promptBefore,
-        `R9 P0: mock LLM was called despite credential in window — sanitize gate is leaking the conversation`,
+        rSecretSummary.quality.reason === "skip" && rSecretSummary.quality.preSanitizeRedacted && rSecretSummary.quality.preSanitizeReplacements?.includes("credential:github_token"),
+        `audit summary should record redaction without credential_in_window abort semantics: ${JSON.stringify(rSecretSummary)}`,
       );
-      // R9 P0 sonnet R9-3: summarize must mark quality.reason="credential_in_window"
-      const sumSecret = summarizeLlmExtractorResult(rSecret, { maxCandidates: 3, rawPreviewChars: 100 });
+      const authErrorToken = "ghp_" + "abcdefghijklmnopqrstuv1234567890";
+      const authErrorResult = await runLlmExtractor("--- ENTRY 1 t message/assistant ---\nhello", {
+        settings: a2Settings,
+        modelRegistry: {
+          find: () => ({ id: "mock-extractor" }),
+          getApiKeyAndHeaders: async () => ({ ok: false, error: `bad auth ${authErrorToken}` }),
+        },
+      });
       assert(
-        sumSecret.quality.reason === "credential_in_window" && sumSecret.quality.passed === false,
-        `R9 P0: summary should classify pre-sanitize abort, got: ${JSON.stringify(sumSecret.quality)}`,
+        !authErrorResult.ok && authErrorResult.error?.includes("[SECRET:github_token]") && !authErrorResult.error.includes(authErrorToken),
+        `extractor auth errors must be sanitized before audit summary: ${JSON.stringify(authErrorResult)}`,
       );
 
-      // Round 9 P0 (sonnet R9-3 fix): rawTextPreview on an LLM response
-      // that echoes back a credential must redact (replace whole preview
-      // with placeholder), not store the secret in audit.jsonl.
+      // rawTextPreview on an LLM response that echoes back a credential
+      // must redact the secret span with a typed placeholder, not store the
+      // raw value in audit.jsonl.
+      const anthropicEchoRaw = "sk-ant-" + "api03-AbCdEfGhIjKlMnOpQrStUv";
       const sumEcho = summarizeLlmExtractorResult(
-        { ok: true, model: "x/y", rawText: "I see your key sk-ant-api03-AbCdEfGhIjKlMnOpQrStUv", extraction: { count: 0, drafts: [] } },
+        { ok: true, model: "x/y", rawText: `I see your key ${anthropicEchoRaw}`, extraction: { count: 0, drafts: [] } },
         { maxCandidates: 3, rawPreviewChars: 200 },
       );
       assert(
-        sumEcho.quality.rawTextPreview && /^\[redacted:/.test(sumEcho.quality.rawTextPreview),
-        `R9 P0: rawTextPreview echoing a credential must be replaced with [redacted: ...], got: ${sumEcho.quality.rawTextPreview}`,
+        sumEcho.quality.rawTextPreview && sumEcho.quality.rawTextPreview.includes("[SECRET:anthropic_api_key]") && !sumEcho.quality.rawTextPreview.includes(anthropicEchoRaw),
+        `rawTextPreview echoing a credential must redact the secret span, got: ${sumEcho.quality.rawTextPreview}`,
+      );
+      const sumEchoTinyPreview = summarizeLlmExtractorResult(
+        { ok: true, model: "x/y", rawText: `I see your key ${anthropicEchoRaw}`, extraction: { count: 0, drafts: [] } },
+        { maxCandidates: 3, rawPreviewChars: 24 },
+      );
+      assert(
+        sumEchoTinyPreview.quality.rawTextPreview && !sumEchoTinyPreview.quality.rawTextPreview.includes("sk-ant-"),
+        `rawTextPreview must sanitize before truncating partial tokens, got: ${sumEchoTinyPreview.quality.rawTextPreview}`,
       );
       // Benign preview is preserved (no false positive)
       const sumBenign = summarizeLlmExtractorResult(
@@ -1449,8 +1541,8 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
         { maxCandidates: 3, rawPreviewChars: 100 },
       );
       assert(
-        sumBenign.quality.rawTextPreview && !/^\[redacted:/.test(sumBenign.quality.rawTextPreview),
-        `R9 P0: benign preview must NOT be redacted (false positive), got: ${sumBenign.quality.rawTextPreview}`,
+        sumBenign.quality.rawTextPreview && !sumBenign.quality.rawTextPreview.includes("[SECRET:"),
+        `benign preview must NOT be redacted (false positive), got: ${sumBenign.quality.rawTextPreview}`,
       );
       // Verify the prompt contained the Trust Boundary directive.
       assert(globalThis.__A2_LAST_PROMPT__.includes("Trust boundary"), "prompt to mock LLM missing Trust boundary directive");
@@ -1472,14 +1564,14 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       assert(/^updated: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2}$/m.test(r1Written), `r1 updated must be ISO datetime, got:\n${r1Written}`);
       assert(/^- \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?[+-]\d{2}:\d{2} \| smoke-a2 \| captured \| smoke A2 e2e$/m.test(r1Written), `r1 timeline must use ISO datetime, got:\n${r1Written}`);
 
-      // Response[1]: SKIP. Caller should treat as no candidates.
+      // Response[2]: SKIP. Caller should treat as no candidates.
       const r2 = await runLlmExtractor("--- ENTRY 2 t2 message/assistant ---\nNothing notable.", {
         settings: a2Settings,
         modelRegistry: mockModelRegistry,
       });
       assert(r2.ok && r2.rawText === "SKIP", `r2 SKIP path: ${JSON.stringify(r2)}`);
 
-      // Response[2]: maxim+confidence=9. Schema-only validation allows it.
+      // Response[3]: maxim+confidence=9. Schema-only validation allows it.
       const r3 = await runLlmExtractor("--- ENTRY 3 t3 message/assistant ---\nWe should ALWAYS do X.", {
         settings: a2Settings,
         modelRegistry: mockModelRegistry,
@@ -1606,6 +1698,33 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
           ["wrote", "ineligible", "llm_skip", "llm_error", "threw"].includes(outcome.kind),
           `tryAutoWriteLane outcome.kind must be a known variant, got: ${outcome.kind}`,
         );
+
+        // raw_text persisted to audit must use sanitized text, not the
+        // pre-redaction LLM response. This covers sanitizeAndTruncateRawForAudit,
+        // a separate path from llm rawTextPreview.
+        const echoedAnthropic = "sk-ant-" + "api03-AbCdEfGhIjKlMnOpQrStUv";
+        globalThis.__A2_INVOCATIONS__ = 0;
+        globalThis.__A2_RESPONSES__ = [`No memory candidate, but echoed ${echoedAnthropic}`];
+        const rawOutcome = await _tryAutoWriteLaneForTests({
+          cwd: aRoot,
+          sessionId: "smoke-raw-redact",
+          settings: a2Settings,
+          window: tryWin,
+          modelRegistry: mockModelRegistry,
+          signal: undefined,
+          correlationId: "smoke-raw-redact:auto",
+          abrainHome: aTarget.abrainHome,
+          projectId: aTarget.projectId,
+        });
+        assert(rawOutcome.kind === "llm_skip", `raw redaction fixture should produce llm_skip, got: ${JSON.stringify(rawOutcome)}`);
+        assert(
+          rawOutcome.rawTextStored && rawOutcome.rawTextStored.includes("[SECRET:anthropic_api_key]") && !rawOutcome.rawTextStored.includes(echoedAnthropic),
+          `raw_text audit storage must redact echoed secret, got: ${rawOutcome.rawTextStored}`,
+        );
+        assert(
+          rawOutcome.rawTextRedacted === true && rawOutcome.rawTextRedactionReason?.includes("credential:anthropic_api_key"),
+          `raw_text redaction metadata must include reason, got: ${JSON.stringify(rawOutcome)}`,
+        );
       }
 
       _resetAutoWriteStateForTests();
@@ -1621,7 +1740,7 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
     // === abrain workflows lane writer (B1) ==================================
     // Strategy: use a fresh fake abrain home (already git-inited here), exercise
     // writeAbrainWorkflow for: cross-project route, project-specific route,
-    // validation failures, sanitize fail-closed, dedupe collision, audit row,
+    // validation failures, sanitize redaction, dedupe collision, audit row,
     // git commit observation. Stays offline (no real network / LLM).
     {
       const wfHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-wf-"));
@@ -1700,18 +1819,20 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       );
       assert(v3.status === "rejected" && v3.validationErrors.some((e) => e.field === "body"), `short body must reject`);
 
-      // 6) sanitize fail-closed: AWS access key in body → reject
+      // 6) sanitize: AWS access key in body → redact and continue
+      const awsWorkflowRaw = "AKIA" + "IOSFODNN7EXAMPLE";
       const sec = await writeAbrainWorkflow(
         {
           title: "leaks aws key",
           trigger: "never",
-          body: "Run with AKIAIOSFODNN7EXAMPLE which is a fake-looking AWS key pattern.",
+          body: `Run with ${awsWorkflowRaw} which is a fake-looking AWS key pattern.`,
           crossProject: true,
         },
         { abrainHome: wfHome, settings: wfSettings },
       );
-      assert(sec.status === "rejected", `sanitize should reject AWS-pattern body: ${JSON.stringify(sec)}`);
-      assert(sec.reason && sec.reason !== "validation_error", `sanitize rejection should not be validation_error: ${sec.reason}`);
+      assert(sec.status === "created", `sanitize should redact AWS-pattern body and create: ${JSON.stringify(sec)}`);
+      const secWritten = fs.readFileSync(sec.path, "utf-8");
+      assert(secWritten.includes("[SECRET:aws_access_key]") && !secWritten.includes(awsWorkflowRaw), `workflow body secret not redacted: ${secWritten}`);
 
       // 7) dedupe: writing same slug twice → second rejected with duplicate_slug
       const dup = await writeAbrainWorkflow(
@@ -4128,6 +4249,20 @@ Body.
         assert(
           /invalid characters/.test(denyBadKey.reason || ""),
           `bad key shape rejection should mention invalid characters, got reason: ${denyBadKey.reason}`,
+        );
+
+        // trigger_phrases is protected because it must go through the
+        // dedicated triggerPhrases union + sanitizer path, not raw
+        // frontmatterPatch replacement.
+        const denyTriggerPhrases = await updateProjectEntry(
+          "patch-denylist-probe",
+          { compiledTruth: "# Patch Denylist Probe\n\nupdated body content here.", sessionId: "smoke-deny", frontmatterPatch: { trigger_phrases: ["replace anchors"] } },
+          { projectRoot: denyRoot, abrainHome: denyTarget.abrainHome, projectId: denyTarget.projectId, settings: DEFAULT_SEDIMENT_SETTINGS, auditContext: { lane: "explicit" } },
+        );
+        assert(denyTriggerPhrases.status === "rejected", `frontmatterPatch protected key 'trigger_phrases' must be rejected, got: ${denyTriggerPhrases.status}`);
+        assert(
+          /protected key 'trigger_phrases'/.test(denyTriggerPhrases.reason || ""),
+          `trigger_phrases protected-key rejection should mention trigger_phrases, got reason: ${denyTriggerPhrases.reason}`,
         );
 
         // Non-protected key still works (positive case).

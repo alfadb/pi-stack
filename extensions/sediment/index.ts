@@ -45,6 +45,7 @@ import {
   type LlmExtractorResult,
 } from "./llm-extractor";
 import { resolveSettings as resolveMemorySettings } from "../memory/settings";
+import { sanitizeForMemory } from "./sanitizer";
 
 import {
   appendAudit,
@@ -611,9 +612,7 @@ export default function (pi: ExtensionAPI) {
           // request body (which can contain pasted secrets) into
           // audit.jsonl. Other audit rows (drain failures, checkpoint
           // save) already cap; main bg path was the lone exception.
-          error_message: lastAssistant?.errorMessage
-            ? String(lastAssistant.errorMessage).slice(0, 500)
-            : undefined,
+          error_message: sanitizeAuditText(lastAssistant?.errorMessage, 500),
           settings_snapshot: settingsSnapshot,
           extractor: "explicit_marker",
           parser_version: PARSER_VERSION,
@@ -717,7 +716,7 @@ export default function (pi: ExtensionAPI) {
               lane: "auto_write",
               session_id: sessionId,
               reason: "drain_branch_read_failed",
-              error: message.slice(0, 200),
+              error: sanitizeAuditText(message, 200),
               drain: true,
             }).catch(() => {});
             applySedimentStatus(setStatus, sessionId, "failed", `branch: ${message.slice(0, 40)}`);
@@ -780,6 +779,7 @@ export default function (pi: ExtensionAPI) {
                           raw_text: auto.rawTextStored,
                           raw_text_truncated: auto.rawTextTruncated,
                           raw_text_redacted: auto.rawTextRedacted,
+                          raw_text_redaction_reason: auto.rawTextRedactionReason,
                           checkpoint_advanced: true,
                           background_async: true,
                           drain: true,
@@ -826,7 +826,7 @@ export default function (pi: ExtensionAPI) {
                         ...checkpointSummary(win),
                         correlation_id: corrId,
                         reason: "drain_threw",
-                        error: err?.message ? String(err.message).slice(0, 200) : String(err).slice(0, 200),
+                        error: sanitizeAuditText(err?.message ?? String(err), 200),
                         background_async: true,
                         drain: true,
                       }).catch(() => {});
@@ -855,7 +855,7 @@ export default function (pi: ExtensionAPI) {
                     lane: "auto_write",
                     session_id: sessionId,
                     reason: "drain_checkpoint_save_failed",
-                    error: message.slice(0, 200),
+                    error: sanitizeAuditText(message, 200),
                     drain: true,
                   }).catch(() => {});
                   applySedimentStatus(setStatus, sessionId, "failed", `cp_save: ${message.slice(0, 40)}`);
@@ -870,7 +870,7 @@ export default function (pi: ExtensionAPI) {
                 lane: "auto_write",
                 session_id: sessionId,
                 reason: "drain_checkpoint_load_failed",
-                error: message.slice(0, 200),
+                error: sanitizeAuditText(message, 200),
                 drain: true,
               }).catch(() => {});
               applySedimentStatus(setStatus, sessionId, "failed", `cp_load: ${message.slice(0, 40)}`);
@@ -943,6 +943,7 @@ export default function (pi: ExtensionAPI) {
                 raw_text: auto.rawTextStored,
                 raw_text_truncated: auto.rawTextTruncated,
                 raw_text_redacted: auto.rawTextRedacted,
+                raw_text_redaction_reason: auto.rawTextRedactionReason,
                 stage_ms: {
                   window_build: tWindowBuilt - tStart,
                   parse: tParseEnd - tParseStart,
@@ -1032,6 +1033,10 @@ export default function (pi: ExtensionAPI) {
                 auto.kind === "llm_error" || auto.kind === "llm_skip"
                   ? auto.rawTextRedacted
                   : undefined,
+              raw_text_redaction_reason:
+                auto.kind === "llm_error" || auto.kind === "llm_skip"
+                  ? auto.rawTextRedactionReason
+                  : undefined,
               stage_ms: {
                 window_build: tWindowBuilt - tStart,
                 parse: tParseEnd - tParseStart,
@@ -1083,8 +1088,8 @@ export default function (pi: ExtensionAPI) {
                 settings_snapshot: settingsSnapshot,
                 entry_breakdown: entryBreakdown,
                 correlation_id: autoCorrelationId,
-                // Round 9 P1 (sonnet R9-4 fix): cap at 500 chars.
-                error: (err?.message ?? String(err)).slice(0, 500),
+                // Sanitize before capping; provider error spew can echo request bodies.
+                error: sanitizeAuditText(err?.message ?? String(err), 500),
                 checkpoint_advanced: true,
                 background_async: true,
               });
@@ -1265,6 +1270,7 @@ type AutoWriteLaneOutcome =
       rawTextStored?: string;
       rawTextTruncated?: boolean;
       rawTextRedacted?: boolean;
+      rawTextRedactionReason?: string;
     }
   | {
       kind: "llm_error";
@@ -1273,6 +1279,7 @@ type AutoWriteLaneOutcome =
       rawTextStored?: string;
       rawTextTruncated?: boolean;
       rawTextRedacted?: boolean;
+      rawTextRedactionReason?: string;
     }
   | {
       kind: "wrote";
@@ -1285,6 +1292,7 @@ type AutoWriteLaneOutcome =
       rawTextStored?: string;
       rawTextTruncated?: boolean;
       rawTextRedacted?: boolean;
+      rawTextRedactionReason?: string;
     };
 
 function truncateRawForAudit(
@@ -1296,32 +1304,45 @@ function truncateRawForAudit(
   return { text: raw.slice(0, cap), truncated: true };
 }
 
+function sanitizeAuditText(value: unknown, cap: number): string | undefined {
+  const raw = value === undefined || value === null ? "" : String(value);
+  if (!raw) return undefined;
+  const s = sanitizeForMemory(raw);
+  const text = s.ok ? (s.text ?? raw) : `[redacted: ${s.error}]`;
+  return cap > 0 ? text.slice(0, cap) : text;
+}
+
 /**
- * Round 9 P0 (sonnet R9-2 fix): sanitize the raw_text field before it
- * lands in audit.jsonl. The LLM's response (or its error spew) may
- * echo back credentials from the window. truncateRawForAudit only caps
- * length — it does not redact secrets. This wrapper adds the redaction
- * step. Because credential regex matches are anchored to a substring
- * but don't tell us WHERE the match was, the floor-safe action is to
- * replace the whole stored text with a placeholder identifying which
- * pattern fired. operators still have rawTextSha256 to correlate to
- * the model's response if they need to inspect it (separately, with
- * stricter access controls).
+ * Sanitize the raw_text field before it lands in audit.jsonl. The LLM's
+ * response (or its error spew) may echo back credentials from the window.
+ * truncateRawForAudit only caps length — it does not redact secrets. This
+ * wrapper applies the same typed-placeholder redaction used before LLM
+ * calls so raw_text remains useful for forensics without storing plaintext
+ * credentials.
  */
 function sanitizeAndTruncateRawForAudit(
   raw: string | undefined,
   cap: number,
 ): { text?: string; truncated?: boolean; redacted?: boolean; redactionReason?: string } {
-  const t = truncateRawForAudit(raw, cap);
-  if (t.text === undefined) return t;
-  const { sanitizeForMemory } = require("./sanitizer") as typeof import("./sanitizer");
-  const s = sanitizeForMemory(t.text);
-  if (s.ok) return t;
+  if (!raw || cap <= 0) return {};
+  // Sanitize BEFORE truncation. Truncating first can leave a partial token
+  // that no longer matches vendor regexes but is still sensitive audit data.
+  const s = sanitizeForMemory(raw);
+  if (!s.ok) {
+    const t = truncateRawForAudit(`[redacted: ${s.error}]`, cap);
+    return {
+      text: t.text,
+      truncated: raw.length > cap,
+      redacted: true,
+      redactionReason: s.error,
+    };
+  }
+  const sanitized = s.text ?? raw;
+  const t = truncateRawForAudit(sanitized, cap);
   return {
-    text: `[redacted: ${s.error}]`,
-    truncated: t.truncated,
-    redacted: true,
-    redactionReason: s.error,
+    ...t,
+    redacted: s.replacements.length > 0,
+    ...(s.replacements.length > 0 ? { redactionReason: s.replacements.join(",") } : {}),
   };
 }
 
@@ -1390,7 +1411,7 @@ async function tryAutoWriteLane(args: {
     llmResult = {
       ok: false,
       model: settings.extractorModel,
-      error: e?.message ?? "extractor threw",
+      error: sanitizeAuditText(e?.message ?? "extractor threw", 500),
     };
   }
   const llmDurationMs = Date.now() - llmStart;
@@ -1400,8 +1421,12 @@ async function tryAutoWriteLane(args: {
     rawPreviewChars: settings.extractorAuditRawChars,
   });
 
-  const { text: rawTextStored, truncated: rawTextTruncated, redacted: rawTextRedacted } =
-    sanitizeAndTruncateRawForAudit(llmResult.rawText, settings.autoWriteRawAuditChars);
+  const {
+    text: rawTextStored,
+    truncated: rawTextTruncated,
+    redacted: rawTextRedacted,
+    redactionReason: rawTextRedactionReason,
+  } = sanitizeAndTruncateRawForAudit(llmResult.rawText, settings.autoWriteRawAuditChars);
 
   if (!llmResult.ok) {
     return {
@@ -1411,6 +1436,7 @@ async function tryAutoWriteLane(args: {
       rawTextStored,
       rawTextTruncated,
       rawTextRedacted,
+      rawTextRedactionReason,
     };
   }
 
@@ -1435,6 +1461,7 @@ async function tryAutoWriteLane(args: {
       rawTextStored,
       rawTextTruncated,
       rawTextRedacted,
+      rawTextRedactionReason,
     };
   }
 
@@ -1466,7 +1493,7 @@ async function tryAutoWriteLane(args: {
       // error (e.g. path.resolve on malformed data, OOM) would previously
       // kill ALL remaining candidates in the loop. Now we isolate each
       // candidate's curator call and continue to the next.
-      const error = e?.message ?? String(e);
+      const error = sanitizeAuditText(e?.message ?? String(e), 500) ?? "curator crashed";
       curatorAudits.push({ decision: { op: "skip", reason: "curator_crashed", rationale: error }, neighbors: [], stage_ms: { search: 0, decide: 0, total: 0 }, error });
       results.push({
         slug: draft.title,
@@ -1641,6 +1668,7 @@ async function tryAutoWriteLane(args: {
     rawTextStored,
     rawTextTruncated,
     rawTextRedacted,
+    rawTextRedactionReason,
   };
 }
 

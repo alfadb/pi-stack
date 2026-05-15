@@ -11,58 +11,73 @@ export interface SanitizeResult {
 // vendor formats (sk-..., AKIA..., gh*_, eyJ.eyJ.<sig>) with shape-based
 // heuristics (PEM blocks, secret-looking assignments, scheme://creds).
 //
-// Each match aborts the whole sanitize call (see sanitizeForMemory:
-// `return { ok: false, ... }`) — there is no "replace and continue" for
-// credentials. This is by design: if the LLM extractor fed us anything
-// resembling a credential we want a hard reject, not a partial scrub
-// that hides the problem.
+// Credential matches are REDACTED, not used to abort the whole sediment
+// run. The security invariant is "raw secret never crosses the LLM/audit/
+// memory boundary"; the product invariant is "useful surrounding context
+// can still be sedimented with typed placeholders". If a pattern cannot be
+// safely localized after Unicode normalization, we conservatively redact the
+// containing line.
 //
-// ADR 0016 retained sensitive-info hard gate:
-//   - jwt_token       defends against `eyJ...` access/id tokens leaking
-//                     from headers / debug dumps.
-//   - pem_private_key catches the `-----BEGIN ... PRIVATE KEY-----`
-//                     header. The body is intentionally NOT matched —
-//                     header alone is sufficient to fail-closed and
-//                     keeps the regex engine cheap.
-//   - aws_access_key  AKIA / ASIA + 16 uppercase alphanumerics. The
-//                     companion secret key is shape-only (40 chars) so
-//                     we don't try to detect it independently — but the
-//                     access-key ID is enough signal to reject.
-//   - connection_url  scheme://user:pass@host or scheme://...token...
-//                     for common DB/cache schemes. `sqlite://` is
-//                     intentionally excluded (local file paths are not
-//                     credentials and would false-positive constantly).
-const CREDENTIAL_PATTERNS: Array<{ name: string; re: RegExp }> = [
-  { name: "openai_api_key", re: /\bsk-[A-Za-z0-9_-]{20,}\b/g },
+// ADR 0016 retained sensitive-info as the one justified mechanical safety
+// boundary. The boundary now blocks plaintext, not knowledge extraction.
+type CredentialPattern = {
+  name: string;
+  re: RegExp;
+  replace?: (match: string, ...groups: string[]) => string;
+};
+
+function secretPlaceholder(name: string): string {
+  return `[SECRET:${name}]`;
+}
+
+const CREDENTIAL_PATTERNS: CredentialPattern[] = [
+  {
+    name: "pem_private_key",
+    re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/g,
+  },
   { name: "anthropic_api_key", re: /\bsk-ant-[A-Za-z0-9_-]{20,}\b/g },
+  { name: "openai_api_key", re: /\bsk-[A-Za-z0-9_-]{20,}\b/g },
   { name: "github_token", re: /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g },
-  // Round 8 P1 (opus R8 audit): keyword set expanded to include common
-  // aliases that were silently bypassing the gate:
-  //   - passwd / passphrase  — widely used in Linux/SSH contexts
-  //   - access[_-]?key       — AWS / GCP / Azure naming
-  //   - private[_-]?key      — "PRIVATE_KEY=..." assignment form
-  //   - client[_-]?secret    — OAuth 2 / OIDC
-  //   - bearer (Authorization header alias)
-  { name: "generic_secret_assignment", re: /\b(api[_-]?key|token|secret|password|passwd|passphrase|access[_-]?key|private[_-]?key|client[_-]?secret|bearer)\s*[:=]\s*['"]?[A-Za-z0-9_./+\-=]{16,}/gi },
   { name: "jwt_token", re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g },
+  // Header-only fallback for malformed/truncated PEM snippets.
   { name: "pem_private_key", re: /-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/g },
   { name: "aws_access_key", re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
-  // Round 8 P1 (opus R8 audit): connection_url originally covered only
-  // a tiny list of DB/cache schemes. http(s) URLs with embedded basic-auth
-  // credentials (user:pass@host) leaked through. Now matches any scheme
-  // with `://user:pass@` syntax in addition to the explicit DB list.
-  { name: "connection_url", re: /\b(?:mongodb(?:\+srv)?|postgres(?:ql)?|mysql|redis|amqp|amqps):\/\/[^\s"'<>]{6,}/gi },
-  { name: "http_basic_auth_url", re: /\bhttps?:\/\/[^\s"'<>/:]+:[^\s"'<>@]+@[^\s"'<>]+/gi },
+  // Any RFC-ish scheme with embedded user:pass@ credentials, including
+  // empty username forms such as redis://:password@host. This catches
+  // neo4j+s://, clickhouse://, mssql://, ftp://, sqlalchemy+driver://...
+  // without redacting harmless localhost DSNs like redis://localhost:6379.
+  { name: "connection_url", re: /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"'<>/:@]*:[^\s"'<>@]+@[^\s"'<>]+/gi },
   // Round 8 P1 (opus R8 audit): vendor-format tokens missing from R7:
   //   - Bearer <token>: Authorization header form — widely pasted from
   //     curl debug output / browser devtools
   //   - xoxa/xoxb/xoxp/xoxr-... Slack tokens
   //   - AIza... Google API keys (35 chars, dash + underscore allowed)
   //   - sk_live_ / sk_test_ / pk_live_ / rk_live_... Stripe keys (underscore)
-  { name: "bearer_token", re: /\bBearer\s+[A-Za-z0-9._\-/+=]{20,}\b/g },
+  { name: "bearer_token", re: /\bBearer\s+([A-Za-z0-9._\-/+=]{20,})\b/g, replace: () => `Bearer ${secretPlaceholder("bearer_token")}` },
   { name: "slack_token", re: /\bxox[abprs]-[A-Za-z0-9-]{10,}\b/g },
   { name: "google_api_key", re: /\bAIza[0-9A-Za-z_-]{35}\b/g },
   { name: "stripe_key", re: /\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{20,}\b/g },
+  // Generic assignment runs after vendor-format tokens so KEY=<vendor-token>
+  // keeps the more specific placeholder (e.g. STRIPE_SECRET_KEY=[SECRET:stripe_key]).
+  // Keyword set includes common aliases that were silently bypassing the gate:
+  //   - passwd / passphrase  — widely used in Linux/SSH contexts
+  //   - access[_-]?key       — AWS / GCP / Azure naming
+  //   - private[_-]?key      — "PRIVATE_KEY=..." assignment form
+  //   - client[_-]?secret    — OAuth 2 / OIDC
+  //   - bearer (Authorization header alias)
+  {
+    name: "generic_secret_assignment",
+    re: /(?<!\[)\b(api[_-]?key|token|secret|password|passwd|passphrase|access[_-]?key|private[_-]?key|client[_-]?secret|bearer)(\s*[:=]\s*['"]?)[A-Za-z0-9_./+\-=!@#$%^&*?:~]{16,}/gi,
+    replace: (_match, key, sep) => `${key}${sep}${secretPlaceholder("generic_secret_assignment")}`,
+  },
+  // Conservative short-value catch: only strong credential keywords, value
+  // length 8-15, and the value must look secret-like (letter plus digit or
+  // punctuation). This avoids redacting benign states like "password: required".
+  {
+    name: "short_secret_assignment",
+    re: /(?<!\[)\b(password|passwd|passphrase|client[_-]?secret|private[_-]?key)(\s*[:=]\s*['"]?)(?=[A-Za-z0-9_./+\-=!@#$%^&*?:~]{8,15}(?=$|[\s"'<>]))(?=[A-Za-z0-9_./+\-=!@#$%^&*?:~]*[A-Za-z])(?=[A-Za-z0-9_./+\-=!@#$%^&*?:~]*(?:\d|[.\/+\-=!@#$%^&*?:~]))[A-Za-z0-9_./+\-=!@#$%^&*?:~]{8,15}/gi,
+    replace: (_match, key, sep) => `${key}${sep}${secretPlaceholder("short_secret_assignment")}`,
+  },
 ];
 
 // Round 8 P1 (opus R8 audit): Unicode bypass shapes — zero-width spaces
@@ -72,48 +87,77 @@ const CREDENTIAL_PATTERNS: Array<{ name: string; re: RegExp }> = [
 // Cyrillic `ѕ` → Latin `s`; that would require a confusables map and
 // is out of scope here — documented as a known residual).
 const INVISIBLE_BYPASS_CHARS = /[\u200B-\u200D\u2060\u202A-\u202E\u00AD\uFEFF]/g;
+const PEM_END_LINE_RE = /-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----/;
+const PEM_BODY_LINE_RE = /^(?:[A-Za-z0-9+/=]{8,}|Proc-Type:.*|DEK-Info:.*|Version:.*)$/;
 
-export function sanitizeForMemory(input: string): SanitizeResult {
-  const replacements: string[] = [];
+function addReplacement(replacements: string[], name: string): void {
+  if (!replacements.includes(name)) replacements.push(name);
+}
+
+function redactCredentialPatterns(input: string, replacements: string[]): string {
   let text = input;
-
-  // Round 8 P1 (opus R8 audit): pre-normalize for regex scanning so
-  // zero-width / bidi-control bypass forms don't dodge keyword matching.
-  // We normalize a SCAN buffer separately; the output (replacements'd)
-  // text retains its original codepoints, because users may legitimately
-  // care about preserving them in literature / non-credential content.
-  const scanText = input.normalize("NFKC").replace(INVISIBLE_BYPASS_CHARS, "");
 
   for (const pattern of CREDENTIAL_PATTERNS) {
     pattern.re.lastIndex = 0;
-    if (pattern.re.test(scanText)) {
-      pattern.re.lastIndex = 0;
-      return {
-        ok: false,
-        error: `credential pattern detected: ${pattern.name}`,
-        replacements,
-      };
-    }
+    let matched = false;
+    text = text.replace(pattern.re, (...args: unknown[]) => {
+      matched = true;
+      const match = String(args[0] ?? "");
+      const maybeNamedGroups = args[args.length - 1];
+      const hasNamedGroups = typeof maybeNamedGroups === "object" && maybeNamedGroups !== null;
+      const captureEnd = args.length - (hasNamedGroups ? 3 : 2);
+      const groups = args.slice(1, captureEnd).map((group) => typeof group === "string" ? group : "");
+      return pattern.replace
+        ? pattern.replace(match, ...groups)
+        : secretPlaceholder(pattern.name);
+    });
     pattern.re.lastIndex = 0;
+    if (matched) addReplacement(replacements, `credential:${pattern.name}`);
   }
 
-  // Second pass on the original text (keyword formats that DON'T benefit
-  // from invisible-char stripping but still need credential gating). We
-  // already covered the major vendor formats above; this second loop is
-  // intentionally empty to avoid double-matching and inflating the cost.
-  // Reserved for future patterns that must inspect original codepoints.
-  for (const pattern of [] as Array<{ name: string; re: RegExp }>) {
-    pattern.re.lastIndex = 0;
-    if (pattern.re.test(text)) {
+  // Round 8 P1 (opus R8 audit): pre-normalize for regex scanning so
+  // zero-width / bidi-control bypass forms don't dodge keyword matching.
+  // Replacement offsets in the normalized buffer are not reliable, so any
+  // remaining normalized-only hit redacts the containing line. This keeps
+  // the rest of a transcript window usable while preventing raw leakage.
+  const lines = text.split(/(\r?\n)/);
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line === "\n" || line === "\r\n") continue;
+    const scanLine = line.normalize("NFKC").replace(INVISIBLE_BYPASS_CHARS, "");
+    for (const pattern of CREDENTIAL_PATTERNS) {
       pattern.re.lastIndex = 0;
-      return {
-        ok: false,
-        error: `credential pattern detected: ${pattern.name}`,
-        replacements,
-      };
+      const hit = pattern.re.test(scanLine);
+      pattern.re.lastIndex = 0;
+      if (hit) {
+        lines[i] = secretPlaceholder(pattern.name);
+        if (pattern.name === "pem_private_key") {
+          for (let j = i + 1; j < lines.length; j += 1) {
+            const nextLine = lines[j];
+            if (nextLine === "\n" || nextLine === "\r\n") continue;
+            const scanNextLine = nextLine.normalize("NFKC").replace(INVISIBLE_BYPASS_CHARS, "").trim();
+            if (!scanNextLine) break;
+            if (PEM_END_LINE_RE.test(scanNextLine) || PEM_BODY_LINE_RE.test(scanNextLine)) {
+              lines[j] = secretPlaceholder(pattern.name);
+              if (PEM_END_LINE_RE.test(scanNextLine)) break;
+              continue;
+            }
+            break;
+          }
+          addReplacement(replacements, `credential:${pattern.name}:block`);
+        }
+        addReplacement(replacements, `credential:${pattern.name}:line`);
+        break;
+      }
     }
-    pattern.re.lastIndex = 0;
   }
+
+  return lines.join("");
+}
+
+export function sanitizeForMemory(input: string): SanitizeResult {
+  const replacements: string[] = [];
+  let text = redactCredentialPatterns(input, replacements);
 
   const home = os.homedir();
   if (home && text.includes(home)) {

@@ -15,23 +15,21 @@ export interface LlmExtractorResult {
   error?: string;
   rawText?: string;
   extraction?: ReturnType<typeof previewExtraction>;
-  // Round 9 P0 (sonnet R9-1): set when sanitizer pre-scan refused to
-  // forward the window to the LLM provider. Distinguishes "failed before
-  // network call" from "model error".
-  preSanitizeAborted?: boolean;
-  preSanitizeReason?: string;
+  // Input-boundary sanitizer metadata. Current behavior redacts credentials
+  // and PII to placeholders before calling the LLM; it does not abort the
+  // whole extraction window for a credential pattern.
+  preSanitizeRedacted?: boolean;
+  preSanitizeReplacements?: string[];
 }
 
 export interface LlmExtractorQualityGate {
   passed: boolean;
-  // Round 9 P0 (sonnet R9-1): added "credential_in_window" for the
-  // pre-sanitize abort path — distinguishes "refused to send to LLM
-  // provider because window contained a secret" from "model_error"
-  // (network/auth) and from "unparseable_output" (model gibberish).
-  reason: "skip" | "valid_candidates" | "model_error" | "unparseable_output" | "validation_errors" | "too_many_candidates" | "credential_in_window";
+  reason: "skip" | "valid_candidates" | "model_error" | "unparseable_output" | "validation_errors" | "too_many_candidates";
   candidateCount: number;
   validationErrorCount: number;
   invalidCandidateCount: number;
+  preSanitizeRedacted?: boolean;
+  preSanitizeReplacements?: string[];
   rawTextSha256?: string;
   rawTextPreview?: string;
   rawTextTruncated?: boolean;
@@ -72,7 +70,9 @@ export function buildLlmExtractorPrompt(windowText: string): string {
     "",
     "Hard rules:",
     "- Do not invent facts. Prefer SKIP when uncertain.",
-    "- Do not include secrets, API keys, private hostnames, emails, or absolute home paths.",
+    "- Do not include raw secrets, API keys, tokens, passwords, private keys, credential URLs, private hostnames, emails, or absolute home paths.",
+    "- If the transcript contains a secret-like string, replace only the sensitive value with a typed placeholder such as [SECRET:api_key], [SECRET:token], [SECRET:connection_url], or [SECRET:private_key]. Preserve surrounding durable facts when useful; otherwise SKIP.",
+    "- If the transcript already contains [SECRET:<type>] placeholders, keep them as placeholders. Do not invent, reconstruct, or transform the original value.",
     "- Do not output JSON, YAML frontmatter, or code fences anywhere outside the body.",
     "- Body lines that look like '---' on their own line WILL break frontmatter and must be avoided.",
     "- Keep project-specific details only when they are necessary for project memory.",
@@ -156,6 +156,11 @@ function hashRaw(raw: string): string {
   return crypto.createHash("sha256").update(raw).digest("hex");
 }
 
+function sanitizeResultText(text: string): string {
+  const s = sanitizeForMemory(text);
+  return s.ok ? (s.text ?? text) : `[redacted: ${s.error}]`;
+}
+
 export function summarizeLlmExtractorResult(
   result: LlmExtractorResult,
   opts: { maxCandidates: number; rawPreviewChars: number },
@@ -168,29 +173,25 @@ export function summarizeLlmExtractorResult(
 
   let reason: LlmExtractorQualityGate["reason"];
   let passed = false;
-  if (result.preSanitizeAborted) reason = "credential_in_window";
-  else if (!result.ok) reason = "model_error";
+  if (!result.ok) reason = "model_error";
   else if (!raw || raw === "SKIP") { reason = "skip"; passed = true; }
   else if (candidateCount === 0) reason = "unparseable_output";
   else if (candidateCount > opts.maxCandidates) reason = "too_many_candidates";
   else if (validationErrorCount > 0) reason = "validation_errors";
   else { reason = "valid_candidates"; passed = true; }
 
-  // Round 9 P0 (sonnet R9-3 fix): rawTextPreview is the LLM's raw
-  // response, persisted in audit.jsonl via llmAuditSummary.rawTextPreview.
-  // If the model echoed back any credential pattern from the window
-  // (instruction-following models love to repeat what they were given),
-  // it persists to disk unredacted. Sanitize before storing; replace
-  // with placeholder if a pattern is detected so we don't leak the
-  // first N chars of a token (the regex doesn't tell us where in the
-  // string the match was — redacting the whole preview is the safe
-  // floor).
-  const rawSlice = opts.rawPreviewChars > 0 && raw
-    ? raw.slice(0, opts.rawPreviewChars)
-    : undefined;
-  const previewSanitized = rawSlice !== undefined ? sanitizeForMemory(rawSlice) : null;
-  const rawTextPreview = previewSanitized
-    ? (previewSanitized.ok ? rawSlice : `[redacted: ${previewSanitized.error}]`)
+  // rawTextPreview is the LLM's raw response, persisted in audit.jsonl via
+  // llmAuditSummary.rawTextPreview. If the model echoed back any credential
+  // pattern from the window, sanitize before storing and keep typed
+  // placeholders rather than plaintext.
+  // Sanitize BEFORE slicing; truncating first can leave a partial token
+  // that no longer matches regexes but is still sensitive preview data.
+  const previewSanitized = raw ? sanitizeForMemory(raw) : null;
+  const sanitizedRawForPreview = previewSanitized
+    ? (previewSanitized.ok ? (previewSanitized.text ?? raw) : `[redacted: ${previewSanitized.error}]`)
+    : raw;
+  const rawTextPreview = opts.rawPreviewChars > 0 && sanitizedRawForPreview
+    ? sanitizedRawForPreview.slice(0, opts.rawPreviewChars)
     : undefined;
 
   return {
@@ -205,9 +206,11 @@ export function summarizeLlmExtractorResult(
       candidateCount,
       validationErrorCount,
       invalidCandidateCount,
-      ...(raw ? { rawTextSha256: hashRaw(raw) } : {}),
+      ...(result.preSanitizeRedacted ? { preSanitizeRedacted: true } : {}),
+      ...(result.preSanitizeReplacements?.length ? { preSanitizeReplacements: result.preSanitizeReplacements } : {}),
+      ...(raw ? { rawTextSha256: hashRaw(sanitizedRawForPreview) } : {}),
       ...(rawTextPreview !== undefined ? { rawTextPreview } : {}),
-      ...(raw ? { rawTextTruncated: raw.length > opts.rawPreviewChars } : {}),
+      ...(raw ? { rawTextTruncated: sanitizedRawForPreview.length > opts.rawPreviewChars } : {}),
     },
   };
 }
@@ -220,40 +223,39 @@ export async function runLlmExtractor(
     signal?: AbortSignal;
   },
 ): Promise<LlmExtractorResult> {
-  // Round 9 P0 (sonnet R9-1 fix): sanitizer was an OUTPUT-only gate —
-  // it ran at writeProjectEntry time on the LLM's response, but the
-  // window text (user's full conversation, possibly containing secrets
-  // pasted from terminal, curl output, .env dumps) was sent verbatim to
-  // the third-party LLM provider via streamSimple. By the time the
-  // sanitizer ran on the LLM's response, the conversation had ALREADY
-  // left the local machine. This is a fail-loud input gate: if any
-  // credential pattern is detected in the window, we refuse to call
-  // the LLM provider at all. quality.reason = "credential_in_window"
-  // tells the operator what happened.
+  // Round 10 behavior: pre-sanitize is an INPUT REDACTION boundary, not
+  // a whole-run abort. Raw credentials in the transcript are replaced with
+  // typed placeholders before the third-party extractor LLM sees the
+  // window, preserving useful surrounding facts while blocking plaintext
+  // secret exfiltration.
   const windowSanitize = sanitizeForMemory(windowText);
+  const sanitizeMeta = windowSanitize.replacements.length > 0
+    ? { preSanitizeRedacted: true, preSanitizeReplacements: windowSanitize.replacements }
+    : {};
   if (!windowSanitize.ok) {
     return {
       ok: false,
       model: deps.settings.extractorModel,
-      error: `pre-sanitize aborted: ${windowSanitize.error}`,
-      preSanitizeAborted: true,
-      preSanitizeReason: windowSanitize.error,
+      error: sanitizeResultText(`pre-sanitize failed: ${windowSanitize.error ?? "unknown"}`),
+      preSanitizeRedacted: true,
+      ...(windowSanitize.replacements.length ? { preSanitizeReplacements: windowSanitize.replacements } : {}),
     };
   }
+  const sanitizedWindowText = windowSanitize.text ?? windowText;
 
   const parsed = parseModelRef(deps.settings.extractorModel);
   if (!parsed) {
-    return { ok: false, model: deps.settings.extractorModel, error: "invalid extractorModel; expected provider/model" };
+    return { ok: false, model: deps.settings.extractorModel, error: "invalid extractorModel; expected provider/model", ...sanitizeMeta };
   }
 
   const model = deps.modelRegistry.find(parsed.provider, parsed.id);
   if (!model) {
-    return { ok: false, model: deps.settings.extractorModel, error: "extractor model not found in registry" };
+    return { ok: false, model: deps.settings.extractorModel, error: "extractor model not found in registry", ...sanitizeMeta };
   }
 
   const auth = await deps.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok || !auth.apiKey) {
-    return { ok: false, model: deps.settings.extractorModel, error: auth.error || "extractor model auth unavailable" };
+    return { ok: false, model: deps.settings.extractorModel, error: sanitizeResultText(auth.error || "extractor model auth unavailable"), ...sanitizeMeta };
   }
 
   const piAi: {
@@ -264,7 +266,7 @@ export async function runLlmExtractor(
     ): { result(): Promise<{ stopReason?: string; errorMessage?: string; content?: Array<{ type: string; text?: string }> }> };
   } = await import("@earendil-works/pi-ai");
 
-  const prompt = buildLlmExtractorPrompt(windowSanitize.text ?? windowText);
+  const prompt = buildLlmExtractorPrompt(sanitizedWindowText);
   const stream = piAi.streamSimple(
     model,
     {
@@ -288,7 +290,8 @@ export async function runLlmExtractor(
       ok: false,
       model: deps.settings.extractorModel,
       stopReason: finalMsg.stopReason,
-      error: finalMsg.errorMessage || finalMsg.stopReason,
+      error: sanitizeResultText(finalMsg.errorMessage || finalMsg.stopReason || "extractor failed"),
+      ...sanitizeMeta,
     };
   }
 
@@ -299,7 +302,7 @@ export async function runLlmExtractor(
     .trim();
 
   if (!rawText || rawText === "SKIP") {
-    return { ok: true, model: deps.settings.extractorModel, stopReason: finalMsg.stopReason, rawText: rawText || "SKIP", extraction: previewExtraction([]) };
+    return { ok: true, model: deps.settings.extractorModel, stopReason: finalMsg.stopReason, rawText: rawText || "SKIP", extraction: previewExtraction([]), ...sanitizeMeta };
   }
 
   const drafts = parseExplicitMemoryBlocks(rawText);
@@ -309,5 +312,6 @@ export async function runLlmExtractor(
     stopReason: finalMsg.stopReason,
     rawText,
     extraction: previewExtraction(drafts),
+    ...sanitizeMeta,
   };
 }
