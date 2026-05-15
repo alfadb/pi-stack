@@ -4,7 +4,7 @@
 - **日期**：2026-05-10
 - **决策者**：alfadb
 - **依赖**：[ADR 0010](0010-sediment-single-agent-with-lookup-tools.md)（lookup-tools loop 设计，本 ADR 落地其内核）/ [memory-architecture.md](../memory-architecture.md) §6（read facade 契约）/ [brain-redesign-spec.md](../brain-redesign-spec.md) §4（cross-project 召回）
-- **被引用**：[migration/memory-search-llm-upgrade.md](../migration/memory-search-llm-upgrade.md)（Phase 0/1/2 实施计划）
+- **被引用**：[archive/migration/memory-search-llm-upgrade.md](../archive/migration/memory-search-llm-upgrade.md)（已完成实施记录）
 - **触发**：2026-05-10 一次会话内三件事叠加：
   1. **质量复审**最近 50 条 sediment 沉淀，发现最系统问题是 **D6 自重复**（同义改述被 dedupe 漏过：dotfiles 双条 / memory-list 旧条 / round-3 三联 / dogfood 系列 ~40% 重叠）
   2. **memory_search 实现审查**揭示 5 大短板：CJK 不分词（长中文 query 召回 0 命中实测）/ 无词干化（extract ≠ extracting）/ trigger_phrases 不入索引（设计意图遗漏）/ timeline 不入索引 / substring boost 不可控
@@ -21,7 +21,7 @@ rg --files → parseEntry → tokenize(title + slug + compiled_truth)
                        → top-N（默认排除 archived）
 ```
 
-设计目标是"项目级、几百条 entry、英文为主、能跑就行"——明确写在 [docs/migration/steps.md](../migration/steps.md) Phase 1.3。memory-architecture.md 附录 C 早就规划 Phase 3 走 qmd（BM25 + 向量）作为加速层。
+设计目标是"项目级、几百条 entry、英文为主、能跑就行"——明确写在历史 [docs/archive/migration/steps-v7-roadmap.md](../archive/migration/steps-v7-roadmap.md) Phase 1.3。memory-architecture.md 附录 C 曾规划 Phase 3 走 qmd（BM25 + 向量）作为加速层。
 
 ### 当前实现的硬伤
 
@@ -200,7 +200,7 @@ ADR 0010 设计的 lookup-tools loop 由此真正落地：sediment curator 在 c
 
 ## 实施路线
 
-详见 [migration/memory-search-llm-upgrade.md](../migration/memory-search-llm-upgrade.md)：
+详见已归档完成记录 [archive/migration/memory-search-llm-upgrade.md](../archive/migration/memory-search-llm-upgrade.md)：
 
 - **Phase 0**：增强 `_index.md` 格式（已实现）
 - **Phase 1**：实现 `extensions/memory/llm-search.ts` + tool 路由 + settings schema（已实现）

@@ -1,7 +1,7 @@
 # Migration — `.pensieve/` → `~/.abrain/projects/<id>/`
 
-> **状态**：✅ B4 + B4.5 已 ship（2026-05-12）——`/memory migrate --go` 在 `extensions/memory/migrate-go.ts`，smoke 覆盖主路径 + 多轮审计回归场景；[ADR 0017](../adr/0017-project-binding-strict-mode.md) strict binding 已落地：迁移前必须 `/abrain bind --project=<id>`；`/memory migrate` 从 target repo 的 active binding 读取 project id；`--project` 参数已废弃并拒绝；未 bound / path 未确认时拒绝迁移。接下来可按 §4 优先级表手动逐仓迁移。
-> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [ADR 0017](../adr/0017-project-binding-strict-mode.md) / [brain-redesign-spec.md](../brain-redesign-spec.md)
+> **状态**：ACTIVE RUNBOOK（2026-05-15）——B4 `/memory migrate --go`、B4.5 strict binding、B5 sediment writer cutover 均已 ship。本文只描述 legacy `.pensieve/` 历史数据迁入 `~/.abrain/projects/<id>/` 的 per-repo 操作；sediment 新写入已经不触碰 `.pensieve/`。
+> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) / [ADR 0017](../adr/0017-project-binding-strict-mode.md) / [brain-redesign-spec.md](../brain-redesign-spec.md) / [architecture/abrain.md](../architecture/abrain.md)
 > **前置**：[vault-bootstrap.md](vault-bootstrap.md)（vault 基础设施已 ship，P0a-P0c.read）
 
 ## 1. 模型：per-repo 一次性迁移
@@ -215,7 +215,7 @@ P0d: vault wizard / mask input / .env import (pending)
   → 与 B5 独立，可并行
 
 Lane G: /about-me + MEMORY-ABOUT-ME (pending)
-其他 lane writer: skills / habits / world knowledge (pending)
+其他 lane writer: identity / skills / habits (pending；world knowledge writer 已 ship)
 ```
 
 ## 7. 历史注记：废止的 8-phase 渐进方案

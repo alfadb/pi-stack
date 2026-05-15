@@ -1,4 +1,7 @@
-# ADR 0004 — sediment 写入策略
+# ADR 0004 — sediment 写入策略（ARCHIVED ORIGINAL）
+
+> ⚠️ ARCHIVED ORIGINAL：本文保留历史原文；当前 ADR 阅读入口见 [../INDEX.md](../INDEX.md)。
+
 
 - **状态**: **Superseded by ADR 0010 (v6.6)** — 多模型投票方案在实战中暴露了三大问题（独立性假设破产、JSON 输出脆弱、3× 成本），已替换为 ADR 0010 的单 agent + lookup tools 方案。本 ADR 保留作为设计演进档案。
 - **日期**: 2026-05-05（v6.5）/ 2026-05-06 superseded

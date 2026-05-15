@@ -1,6 +1,9 @@
-# pi-astack 迁移路径（Phase 路线图）
+# pi-astack 迁移路径（Phase 路线图，ARCHIVED）
 
-> 基于 [memory-architecture.md](../memory-architecture.md) §11 实施路线图。
+> ⚠️ ARCHIVED：旧 Phase 1-6 路线图已被 ADR 0014-0018、B5 cutover 和 current migration docs 取代。当前迁移路径见 [../../migration/README.md](../../migration/README.md) 与 [../../migration/abrain-pensieve-migration.md](../../migration/abrain-pensieve-migration.md)。
+
+
+> 基于 [memory-architecture.md](../../memory-architecture.md) §11 实施路线图。
 > 替代旧 7 Slice (A→G) 方案（基于 gbrain，已于 2026-05-07 作废）。
 >
 > 单文件 apply/restore 操作手册见 [apply-checklist.md](./apply-checklist.md)。
@@ -76,11 +79,11 @@
 
 **已剥离**（2026-05-12）：per-file apply substrate（`extensions/sediment/migration.ts`、`/sediment migrate-one --plan/--apply --yes/--restore`、`/sediment migration-backups`、backup 子系统）随 Phase 1 迁移完成后剥离。设计动机：per-file workflow 是 Phase 1 为 173 条 legacy entry 定制的临时机械，迁移完成后它就不再服务于任何路径，反而产生两个负担：（1）作为 slash command 出现在提示里，误导 LLM 去调用不需要的备份逻辑；（2）backup 子系统与 git 重复。后续使用场景（例如 ADR 0014 .pensieve → abrain 迁移）全部走 per-repo、不走 per-file。
 
-**per-repo 迁移（2026-05-12 B4 + B4.5 ✅ shipped）**：`/memory migrate --go`——`extensions/memory/migrate-go.ts`，不做 backup，不留 symlink。正确流程是先 `/abrain bind --project=<id>`（命令会用精确 pathspec 自动提交两端 bind artifacts：项目仓 `.abrain-project.json`；abrain 仓 `.gitignore` 如变化 + `projects/<id>/_project.json`；若 auto-commit warning 则先修复提交状态），再 `/memory migrate --dry-run` / `--go`；迁移命令不再接受 `--project`，也不再用 git remote / cwd 推断 project id。B5 后父仓 / `.pensieve/` dirty、ignored 或 untracked 不再 hard-block；`.pensieve` 工作区当前内容就是 legacy 输入快照。**Rollback**：abrain 侧用 preflight 捕获的 `abrainPreSha` reset；父仓只有在迁移开始时 clean 且没有 ignored/untracked source 被迁移时才建议 `git reset --hard <parentPreSha>`，否则 summary 用 `git revert -n <parentCommitSha>`（先审阅再提交）或提示无 parent commit，并提醒 dirty/ignored/untracked 迁移项的完整副本在 abrain，避免误删 unrelated work。不要用 `HEAD~1`，因为 abrain 一侧有 N workflow commit + 1 migrate-in commit = N+1，且 sediment 可能在迁移期间并发 commit。详 [abrain-pensieve-migration.md §5](./abrain-pensieve-migration.md#5-回滚)。7 项 preflight（B4.5 后用户可见项：strict binding bound / 有用户 entry / abrain 仓 git clean；+ 4 项隐藏 sanity guard：pensieveTarget 路径存在 / abrainHome 路径存在 / 父仓 root 存在 / abrainHome 是 git repo；详 [abrain-pensieve-migration.md §2](./abrain-pensieve-migration.md#2-precondition)）。Pipeline 路由走 `writeAbrainWorkflow`，其余 7 kind atomic write 到 `~/.abrain/projects/<id>/<kind-dir>/`。14 仓手动逐个触发，优先级表见 [abrain-pensieve-migration.md §4](./abrain-pensieve-migration.md#4-14-仓迁移建议顺序)。
+**per-repo 迁移（2026-05-12 B4 + B4.5 ✅ shipped）**：`/memory migrate --go`——`extensions/memory/migrate-go.ts`，不做 backup，不留 symlink。正确流程是先 `/abrain bind --project=<id>`（命令会用精确 pathspec 自动提交两端 bind artifacts：项目仓 `.abrain-project.json`；abrain 仓 `.gitignore` 如变化 + `projects/<id>/_project.json`；若 auto-commit warning 则先修复提交状态），再 `/memory migrate --dry-run` / `--go`；迁移命令不再接受 `--project`，也不再用 git remote / cwd 推断 project id。B5 后父仓 / `.pensieve/` dirty、ignored 或 untracked 不再 hard-block；`.pensieve` 工作区当前内容就是 legacy 输入快照。**Rollback**：abrain 侧用 preflight 捕获的 `abrainPreSha` reset；父仓只有在迁移开始时 clean 且没有 ignored/untracked source 被迁移时才建议 `git reset --hard <parentPreSha>`，否则 summary 用 `git revert -n <parentCommitSha>`（先审阅再提交）或提示无 parent commit，并提醒 dirty/ignored/untracked 迁移项的完整副本在 abrain，避免误删 unrelated work。不要用 `HEAD~1`，因为 abrain 一侧有 N workflow commit + 1 migrate-in commit = N+1，且 sediment 可能在迁移期间并发 commit。详 [abrain-pensieve-migration.md §5](../../migration/abrain-pensieve-migration.md#5-回滚)。7 项 preflight（B4.5 后用户可见项：strict binding bound / 有用户 entry / abrain 仓 git clean；+ 4 项隐藏 sanity guard：pensieveTarget 路径存在 / abrainHome 路径存在 / 父仓 root 存在 / abrainHome 是 git repo；详 [abrain-pensieve-migration.md §2](../../migration/abrain-pensieve-migration.md#2-precondition)）。Pipeline 路由走 `writeAbrainWorkflow`，其余 7 kind atomic write 到 `~/.abrain/projects/<id>/<kind-dir>/`。14 仓手动逐个触发，优先级表见 [abrain-pensieve-migration.md §4](../../migration/abrain-pensieve-migration.md#4-14-仓迁移建议顺序)。
 
 ### Phase 1.3 — memory_search（ADR 0015 LLM-driven；无 grep 降级）
 
-**实现状态（2026-05-08 grep baseline；2026-05-10 ADR 0015 Phase 0/1；2026-05-10 fallback removal）**：`extensions/memory/search.ts` + `parser.ts` 保留 legacy grep+tf-idf implementation 供 diagnostics/tests 与 list/get/neighbors 共享逻辑；`extensions/memory/llm-search.ts` 实现双阶段 LLM retrieval；`extensions/memory/index.ts` 注册 `memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 四个只读工具，且 `memory_search` runtime 只走 LLM 路径，失败 hard error。详见 [ADR 0015](../adr/0015-memory-search-llm-driven-retrieval.md) + [memory-search-llm-upgrade.md](./memory-search-llm-upgrade.md)。
+**实现状态（2026-05-08 grep baseline；2026-05-10 ADR 0015 Phase 0/1；2026-05-10 fallback removal）**：`extensions/memory/search.ts` + `parser.ts` 保留 legacy grep+tf-idf implementation 供 diagnostics/tests 与 list/get/neighbors 共享逻辑；`extensions/memory/llm-search.ts` 实现双阶段 LLM retrieval；`extensions/memory/index.ts` 注册 `memory_search` / `memory_get` / `memory_list` / `memory_neighbors` 四个只读工具，且 `memory_search` runtime 只走 LLM 路径，失败 hard error。详见 [ADR 0015](../../adr/0015-memory-search-llm-driven-retrieval.md) + [memory-search-llm-upgrade.md](./memory-search-llm-upgrade.md)。
 
 - runtime：stage1 从内存生成的 enhanced index 选 top-K 候选；stage2 读取候选完整 compiled_truth + timeline 精排
 - no fallback：LLM/model/auth/network/JSON 失败直接返回 error，不用 grep 结果替代
@@ -219,7 +222,7 @@ memory_search(query: "dispatch agent prompt")
 
 ## Phase 2：World 层接入
 
-> ⚠️ **拓扑被 [ADR 0014](../adr/0014-abrain-as-personal-brain.md)（2026-05-09）重新规划**。`~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑，采用七区结构（identity / skills / habits / workflows / projects / knowledge / vault）且吃掉 `.pensieve/`。下面 Phase 2.1 列出的 v7.0 旧 layout（`maxims/patterns/anti-patterns/...`）仅作历史参考。**新迁移计划走 [migration/abrain-pensieve-migration.md](./abrain-pensieve-migration.md) §1-§7**；七区拓扑详见 [brain-redesign-spec.md §1](../brain-redesign-spec.md)。Lane B/D 失效后 Phase 2.3 promotion gates 也被重新思考（详 [phase-2.3-promotion-gates.md](./phase-2.3-promotion-gates.md)）。读侧（resolve / search / get / list / neighbors）不受影响。
+> ⚠️ **拓扑被 [ADR 0014](../../adr/0014-abrain-as-personal-brain.md)（2026-05-09）重新规划**。`~/.abrain/` 从「跨项目 world knowledge 仓库」重定位为 alfadb 数字孪生 / Jarvis 大脑，采用七区结构（identity / skills / habits / workflows / projects / knowledge / vault）且吃掉 `.pensieve/`。下面 Phase 2.1 列出的 v7.0 旧 layout（`maxims/patterns/anti-patterns/...`）仅作历史参考。**新迁移计划走 [migration/abrain-pensieve-migration.md](../../migration/abrain-pensieve-migration.md) §1-§7**；七区拓扑详见 [brain-redesign-spec.md §1](../../brain-redesign-spec.md)。Lane B/D 失效后 Phase 2.3 promotion gates 也被重新思考（详 [phase-2.3-promotion-gates.md](./phase-2.3-promotion-gates.md)）。读侧（resolve / search / get / list / neighbors）不受影响。
 
 **验收标准**：
 - [x] `~/.abrain/` 目录结构落地，独立 git repo【2026-05-08 完成；layout：`maxims/ decisions/ knowledge/ staging/ archive/ pipelines/ .state/ .index/`，独立 `.git/`，README.md + .gitignore，1 init commit；目前空，等 promotion gates 落地后通过 sediment 填充。**ADR 0014 后七区拓扑未启用，走 abrain-pensieve-migration.md 重新规划】
@@ -236,7 +239,7 @@ memory_search(query: "dispatch agent prompt")
 
 ### Phase 2.1 — ~/.abrain 初始化
 
-> **v7.0 旧命令仅作历史参考**。ADR 0014 下七区拓扑初始化走 [abrain-pensieve-migration.md](./abrain-pensieve-migration.md) P1（生成 layout + `.gitignore` whitelist vault 不上 git）。
+> **v7.0 旧命令仅作历史参考**。ADR 0014 下七区拓扑初始化走 [abrain-pensieve-migration.md](../../migration/abrain-pensieve-migration.md) P1（生成 layout + `.gitignore` whitelist vault 不上 git）。
 
 ```bash
 # v7.0 旧 layout (仅参考)
@@ -262,7 +265,7 @@ echo "ABRAIN_ROOT=~/.abrain" >> ~/.bashrc
 
 ### ~~Phase 2.3 — Promotion gates 基础版~~ （已取消）
 
-> ⚠️ **已被 [ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D3（2026-05-09）取消**。abrain 七区拓扑下不再有 "project → world promotion" 概念——sediment writer 直接将条目路由到七区（identity / skills / habits / workflows / projects / knowledge / vault）中一个，kind 决定子目录。Promotion gates 1-5 不在路线图上；原设计动机记录仅作历史保留于 [`phase-2.3-promotion-gates.md`](./phase-2.3-promotion-gates.md)（顶部已标 SUPERSEDED）。Lane B/D 同期在 [ADR 0013](../adr/0013-asymmetric-trust-three-lanes.md) 中失效。
+> ⚠️ **已被 [ADR 0014](../../adr/0014-abrain-as-personal-brain.md) §D3（2026-05-09）取消**。abrain 七区拓扑下不再有 "project → world promotion" 概念——sediment writer 直接将条目路由到七区（identity / skills / habits / workflows / projects / knowledge / vault）中一个，kind 决定子目录。Promotion gates 1-5 不在路线图上；原设计动机记录仅作历史保留于 [`phase-2.3-promotion-gates.md`](./phase-2.3-promotion-gates.md)（顶部已标 SUPERSEDED）。Lane B/D 同期在 [ADR 0013](../../adr/0013-asymmetric-trust-three-lanes.md) 中失效。
 
 ---
 

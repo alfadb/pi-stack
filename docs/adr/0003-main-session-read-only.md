@@ -1,5 +1,7 @@
 # ADR 0003 — 主会话只读，sediment 单写
 
+> ⚠️ PARTIALLY HISTORICAL：核心原则“主会话只读 / sediment 单写”仍是 current invariant；旧 gbrain CLI、postgres role、bash regex guard 实现只作为历史参考。
+
 - **状态**: Accepted。**Guard 实现已过时**（2026-05-07）— memory-architecture.md §6.1 定义了新的读工具 `memory_search/get/list/neighbors` 替代 `gbrain_search/get/query`。Guard 的拦截目标从 gbrain CLI/bash 变为 memory write tools（仅 sediment 可见）。读写分离核心原则不变。
 - **2026-05-09 补充**（由 [ADR 0014 v1.3](0014-abrain-as-personal-brain.md) 带入）：主会话只读原则**不取消**，但补充为两层：
   - **层 1 mechanic**：LLM tool call surface 中**没有**定制 brain mutation tool——没有 `vault_write`/`brain_write` 这类专门入口。Lane V 的 `/secret` 是用户物理键入 TUI 命令触发 main pi 进程内 vaultWriter library 同步调用（不进 LLM tool surface）。Lane G `/about-me` 仍走 sediment 异步。sediment 仍为记忆类写入的唯一 dedicated writer。

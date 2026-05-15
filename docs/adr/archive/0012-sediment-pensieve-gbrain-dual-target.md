@@ -1,9 +1,12 @@
-# ADR 0012: sediment reverts to pensieve+gbrain dual-target after gbrain multi-source isolation proves unimplemented
+# ADR 0012: sediment reverts to pensieve+gbrain dual-target after gbrain multi-source isolation proves unimplemented（ARCHIVED ORIGINAL）
 
-- **Status:** **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）— 本 ADR 的 pensieve+gbrain 双 target 被 memory-architecture.md 整体取代。新架构转向纯 markdown+git：项目级走 `<project>/.pensieve/`（md+git），世界级走 `~/.abrain/`（独立 git repo）。gbrain 被完全去除（memory-architecture.md 决策 2）。
+> ⚠️ ARCHIVED ORIGINAL：本文保留历史原文；当前 ADR 阅读入口见 [../INDEX.md](../INDEX.md)。
+
+
+- **Status:** **Superseded by [memory-architecture.md](../../memory-architecture.md)**（2026-05-07）— 本 ADR 的 pensieve+gbrain 双 target 被 memory-architecture.md 整体取代。新架构转向纯 markdown+git：项目级走 `<project>/.pensieve/`（md+git），世界级走 `~/.abrain/`（独立 git repo）。gbrain 被完全去除（memory-architecture.md 决策 2）。
 - **Date:** 2026-05-06 (accepted), 2026-05-07 (superseded)
 - **Supersedes:** ADR 0002 (gbrain as sole memory store), ADR 0005 (pensieve-deprecated), ADR 0008 (pi dotfiles dual-role / .gbrain-source routing), ADR 0011 (two-track via gbrain sources)
-- **Superseded by:** [memory-architecture.md](../memory-architecture.md) § 2 决策 2 + 附录 B.2
+- **Superseded by:** [memory-architecture.md](../../memory-architecture.md) § 2 决策 2 + 附录 B.2
 - **Implements:** the proven dual-target sediment architecture from
   garrytan/pi-sediment, lifted verbatim into pi-astack/extensions/sediment/
 - **Related:** ADR 0002 (gbrain as sole memory store — REVISED, now superseded by this ADR), ADR 0010
@@ -178,7 +181,7 @@ context-budget) stays for the same reason.
    restore single dual-target structure
 5. Update settings.json to remove `pensieve-context` confusion (still active)
 6. Update `docs/memory-architecture.md`, `docs/directory-layout.md`,
-   `docs/migration/steps.md`, `README.md`
+   `docs/archive/migration/steps-v7-roadmap.md`（historical）, `README.md`
 7. Update ADR 0002 and ADR 0005 with `Superseded by ADR 0012` headers
 
 ## Backout plan

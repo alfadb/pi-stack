@@ -1,5 +1,7 @@
 # ADR 0009 - multi-agent 作为基础能力,调用模式作为模板参考
 
+> ⚠️ PARTIALLY HISTORICAL：原则“dispatch 是基础能力”仍有效；旧 `dispatch_agents`、`multi_dispatch`、`extensions/multi-agent/`、templates cookbook 细节只作为历史设计动机。
+
 - **状态**: Accepted (revised 2026-05-11)
 - **日期**: 2026-05-05
 - **决策者**: alfadb
@@ -342,7 +344,7 @@ runner.ts 默认让所有并发 task 指向同一个父 AbortSignal(`rctx.signal
 
 验证代价极低:dispatch.log 已在 task:start 打时间戳,看 3 行 task:start 时间差 < 1s 就行。
 
-详见 `migration/steps.md` P3 验收标准:
+详见历史 `archive/migration/steps-v7-roadmap.md` P3 验收标准:
 ```bash
 # P3.x 运行 voter 并发性验证
 node extensions/sediment/test/voter-concurrency.ts

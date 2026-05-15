@@ -1,6 +1,9 @@
-# 待澄清问题（v7）
+# 待澄清问题（v7，ARCHIVED）
 
-基于 [memory-architecture.md](../memory-architecture.md) 重新评估。旧 v6.5 问题中大量 gbrain 相关问题已作废。
+> ⚠️ ARCHIVED：大部分问题已被 ADR 0014-0018 或实现决策关闭；剩余方向移入 [../../roadmap.md](../../roadmap.md)。
+
+
+基于 [memory-architecture.md](../../memory-architecture.md) 重新评估。旧 v6.5 问题中大量 gbrain 相关问题已作废。
 
 ---
 
@@ -33,7 +36,7 @@
 
 世界级知识库从零开始，还是从 gbrain default 145 页中提取有价值的跨项目准则？
 
-> **2026-05-11 更新**：拓扑已由 [ADR 0014](../adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](../brain-redesign-spec.md) 重新确定为七区结构（identity / skills / habits / workflows / projects / knowledge / vault）；`brain-layout.ts` 会在 extension activate 时 `ensureBrainLayout()` 创建顶层七个目录（0o700）。原『world knowledge 库』内容需重新考虑在哪些区。
+> **2026-05-11 更新**：拓扑已由 [ADR 0014](../../adr/0014-abrain-as-personal-brain.md) + [brain-redesign-spec.md](../../brain-redesign-spec.md) 重新确定为七区结构（identity / skills / habits / workflows / projects / knowledge / vault）；`brain-layout.ts` 会在 extension activate 时 `ensureBrainLayout()` 创建顶层七个目录（0o700）。原『world knowledge 库』内容需重新考虑在哪些区。
 
 **建议**: 从零开始。等各个 lane writer（特别是 Lane G `/about-me` + identity 区，sediment world lane）逐个落地，自然积累。旧 gbrain 数据保留为历史档案，不自动迁移。
 

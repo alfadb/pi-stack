@@ -1,6 +1,9 @@
-# ADR 0002 — gbrain 作为唯一记忆存储
+# ADR 0002 — gbrain 作为唯一记忆存储（ARCHIVED ORIGINAL）
 
-- **状态**: **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）— gbrain 被整体替换为纯 markdown+git 架构。项目级走 `<project>/.pensieve/`，世界级走 `~/.abrain/`。gbrain 的 timeline/图谱方法论被借鉴到 markdown 格式中（决策 5）。
+> ⚠️ ARCHIVED ORIGINAL：本文保留历史原文；当前 ADR 阅读入口见 [../INDEX.md](../INDEX.md)。
+
+
+- **状态**: **Superseded by [memory-architecture.md](../../memory-architecture.md)**（2026-05-07）— gbrain 被整体替换为纯 markdown+git 架构。项目级走 `<project>/.pensieve/`，世界级走 `~/.abrain/`。gbrain 的 timeline/图谱方法论被借鉴到 markdown 格式中（决策 5）。
 - **历史链**：原被 ADR 0012 取代 → ADR 0012 被 memory-architecture.md 附录 B.2 宣布取代。
 - **日期**: 2026-05-05
 - **决策者**: alfadb

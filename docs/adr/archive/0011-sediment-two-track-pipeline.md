@@ -1,6 +1,9 @@
-# ADR 0011 — sediment 双轨沉淀（项目级 + 世界级）
+# ADR 0011 — sediment 双轨沉淀（项目级 + 世界级）（ARCHIVED ORIGINAL）
 
-- **状态**: **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）— 本 ADR 的 gbrain 双轨在 gbrain v0.27 无法实现 → 被 ADR 0012 取代 → ADR 0012 被 memory-architecture.md 整体取代。新架构回到纯 markdown+git，不再使用 gbrain sources。双轨语义被 Facade 模式（project boost + world 混合排序）和 promotion gates 替代。
+> ⚠️ ARCHIVED ORIGINAL：本文保留历史原文；当前 ADR 阅读入口见 [../INDEX.md](../INDEX.md)。
+
+
+- **状态**: **Superseded by [memory-architecture.md](../../memory-architecture.md)**（2026-05-07）— 本 ADR 的 gbrain 双轨在 gbrain v0.27 无法实现 → 被 ADR 0012 取代 → ADR 0012 被 memory-architecture.md 整体取代。新架构回到纯 markdown+git，不再使用 gbrain sources。双轨语义被 Facade 模式（project boost + world 混合排序）和 promotion gates 替代。
 - **历史链**：ADR 0011 → ADR 0012 → memory-architecture.md
 - **日期**: 2026-05-06
 - **决策者**: alfadb

@@ -1,6 +1,9 @@
-# Phase 2.3 — Promotion Gates 设计稿
+# Phase 2.3 — Promotion Gates 设计稿（ARCHIVED）
 
-> ⚠️ **SUPERSEDED by [ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D3（2026-05-09）**。abrain 七区拓扑下不再有 "project → world promotion" 概念——sediment writer 直接将条目路由到 `identity` / `skills` / `habits` / `workflows` / `projects` / `knowledge` / `vault` 中一个。Lane B（manual promote）与 Lane D（auto-promote）在 ADR 0013 中同期被标记为 "失效"。Promotion gates 1–5 不在路线图上，本文档仅作为设计动机记录保留。
+> ⚠️ ARCHIVED：project→world promotion 已被 ADR 0014 七区路由取代。本文仅保留历史动机。
+
+
+> ⚠️ **SUPERSEDED by [ADR 0014](../../adr/0014-abrain-as-personal-brain.md) §D3（2026-05-09）**。abrain 七区拓扑下不再有 "project → world promotion" 概念——sediment writer 直接将条目路由到 `identity` / `skills` / `habits` / `workflows` / `projects` / `knowledge` / `vault` 中一个。Lane B（manual promote）与 Lane D（auto-promote）在 ADR 0013 中同期被标记为 "失效"。Promotion gates 1–5 不在路线图上，本文档仅作为设计动机记录保留。
 >
 > **原状态**：DRAFT，2026-05-08。等 Phase 1.4 burn-in 数周稳定后再实施。
 >
@@ -36,7 +39,7 @@
 
 ## 1. Asymmetric Trust（从 Phase 1.4 burn-in 学到）
 
-> 本节原则已升为正式架构决策：[ADR 0013 — Asymmetric Trust 三段式](../adr/0013-asymmetric-trust-three-lanes.md)。本设计稿是 ADR 0013 中 **Lane B (manual promote)** 的详细实施展开。
+> 本节原则已升为正式架构决策：[ADR 0013 — Asymmetric Trust 三段式](../../adr/0013-asymmetric-trust-three-lanes.md)。本设计稿是 ADR 0013 中 **Lane B (manual promote)** 的详细实施展开。
 
 | Lane | 触发 | 信任度 | 闸门 |
 |---|---|---|---|

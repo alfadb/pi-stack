@@ -1,4 +1,7 @@
-# Phase 1 migration completion record (2026-05-08)
+# Phase 1 migration completion record (2026-05-08，ARCHIVED)
+
+> ⚠️ ARCHIVED：per-file migration substrate 和 `/sediment migrate-one` 命令已删除。当前迁移路径见 [../../migration/abrain-pensieve-migration.md](../../migration/abrain-pensieve-migration.md)。
+
 
 > 本文件是 `.pensieve/` legacy → schema v1 迁移完成的里程碑记录。原 step-by-step
 > apply checklist 已于 2026-05-12 随 per-file 迁移基底剥离而废止——它教读者使用的
@@ -7,7 +10,7 @@
 >
 > 后续 per-repo 迁移走 ADR 0014 `/memory migrate --go`（✅ 2026-05-12 shipped
 > via commits `cc40792` + `a819302` + `37f03a6` + `122c0b2`；spec 见
-> [abrain-pensieve-migration.md](./abrain-pensieve-migration.md)）。
+> [abrain-pensieve-migration.md](../../migration/abrain-pensieve-migration.md)）。
 
 ## 完成数据（~/.pi 父仓）
 
@@ -43,6 +46,6 @@
 
 ## 引用
 
-- 后续 per-repo 迁移：[abrain-pensieve-migration.md](./abrain-pensieve-migration.md)
+- 后续 per-repo 迁移：[abrain-pensieve-migration.md](../../migration/abrain-pensieve-migration.md)
 - ADR 0014「待实施」表：`workflows lane writer` (B1, ✅ shipped 2026-05-12, commit `b6a4a49`) → `一次性 per-repo 迁移` (B4, ✅ shipped 2026-05-12, commits `cc40792` + `a819302` + `37f03a6` + `122c0b2`) → `B5 writeProjectEntry cutover` (✅ shipped 2026-05-13, commit `da4bf65`) → 接下来是 Lane G `/about-me` + identity / skills / habits writer (pending)
 - open-questions.md `Q1` 已 ✅ 结案

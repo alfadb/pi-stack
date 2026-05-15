@@ -1,5 +1,7 @@
 # ADR 0006 — 组件合并清单
 
+> ⚠️ PARTIALLY HISTORICAL：A/B/C 上游关系与组件合并思想仍有效；具体目录、扩展清单和 gbrain/sediment 路径以 [../directory-layout.md](../directory-layout.md) 与 [../../UPSTREAM.md](../../UPSTREAM.md) 为准。2026-05-15 起 current vendor 参考源为 `vendor/gstack/` 与 `vendor/pensieve/` 两个 read-only submodules；正文中“vendor/pensieve 不建”等旧结论仅作历史记录。
+
 - **状态**: Accepted。**sediment/gbrain 相关描述已过时**（2026-05-07）— 组件合并清单中的 gbrain/cache/pending queue 等描述基于旧架构。新架构（[memory-architecture.md](../memory-architecture.md)）下 sediment 组件需重新设计，但扩展/skills/prompts 的归并清单不变。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
@@ -122,4 +124,4 @@ UPSTREAM.md 按以下三类组织。
 - ADR 0007: offline 降级与 gbrain 部署边界
 - ADR 0008: ~/.pi 双重身份与 source 路由
 - ADR 0009: multi-agent 作为基础能力
-- 迁移文档: `docs/migration/steps.md`
+- 历史迁移文档: `docs/archive/migration/steps-v7-roadmap.md`；当前迁移手册: `docs/migration/abrain-pensieve-migration.md`

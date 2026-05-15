@@ -1,7 +1,7 @@
 {
   "name": "@alfadb/pi-astack",
   "version": "0.1.0",
-  "description": "alfadb's personal pi workflow + memory infrastructure: extensions, skills, prompts built specifically for pi (similar to how gstack is built for claude-code). Memory architecture: pure markdown+git (project-level .pensieve/, world-level ~/.abrain/); main session read-only via memory_search/get/list/neighbors; sediment sidecar is the sole writer via internal create/update/merge/archive/supersede/delete/skip substrate. gbrain entirely removed (2026-05-07, memory-architecture.md). Vendors garrytan/gstack as port reference; consolidates alfadb-native dispatch / model-curator / model-fallback.",
+  "description": "alfadb's personal pi workflow + memory infrastructure. Current architecture: pure markdown+git in ~/.abrain (project memory under projects/<id>, world knowledge under knowledge/, legacy .pensieve read-only for migration); main session reads via memory_search/get/list/neighbors; sediment is the dedicated writer; abrain provides strict project binding and vault; vendor/gstack and vendor/pensieve are read-only methodology references; gbrain is retired.",
   "keywords": [
     "pi-package",
     "alfadb",

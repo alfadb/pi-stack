@@ -1,6 +1,9 @@
-# ADR 0007 — Offline 降级模式与 gbrain 部署边界
+# ADR 0007 — Offline 降级模式与 gbrain 部署边界（ARCHIVED ORIGINAL）
 
-- **状态**: **Superseded by [memory-architecture.md](../memory-architecture.md)**（2026-05-07）——原描述用 "改变前提"，2026-05-11 统一为与 ADR 0002/0005/0011/0012 一致的 "Superseded" 术语。本 ADR 的核心论据 "gbrain = postgres 离线代价大" 在新架构中不再成立：新架构采用纯 markdown+git（决策 2），天然离线可用。ADR 中的两件套兜底（markdown export + read fallback）被 git clone/pull 替代。保留本 ADR 作为离线设计思维的历史档案。
+> ⚠️ ARCHIVED ORIGINAL：本文保留历史原文；当前 ADR 阅读入口见 [../INDEX.md](../INDEX.md)。
+
+
+- **状态**: **Superseded by [memory-architecture.md](../../memory-architecture.md)**（2026-05-07）——原描述用 "改变前提"，2026-05-11 统一为与 ADR 0002/0005/0011/0012 一致的 "Superseded" 术语。本 ADR 的核心论据 "gbrain = postgres 离线代价大" 在新架构中不再成立：新架构采用纯 markdown+git（决策 2），天然离线可用。ADR 中的两件套兜底（markdown export + read fallback）被 git clone/pull 替代。保留本 ADR 作为离线设计思维的历史档案。
 - **日期**: 2026-05-05
 - **决策者**: alfadb
 - **依赖**: ADR 0002（gbrain 唯一记忆存储）

@@ -1,7 +1,7 @@
 # Migration — Vault Bootstrap（age 加密 + portable identity）
 
-> **状态**：P0a-P0c shipped（2026-05-11）；P0d/P0e 待实施
-> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D4 / [brain-redesign-spec.md](../brain-redesign-spec.md) §6
+> **状态**：ACTIVE RUNBOOK（2026-05-15）——P0a-P0c shipped；P0d/P1（wizard / `.env` import / backend migration UX）待实施。
+> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D4 / [brain-redesign-spec.md](../brain-redesign-spec.md) / [architecture/vault.md](../architecture/vault.md)
 > **关联**：本文件解决 Round 3 复核 P0-B2（OS keychain 跨平台承诺不成立）
 >
 > **v1.4 重写**（2026-05-09）：v1.0-1.3 矩阵假设用户在 macOS / Linux desktop 上跑 pi，把 "CI / 容器" 划成 "不支持 vault"。**实际上 alfadb 主开发环境就是容器**——这是 design-from-stereotype 错误。v1.4 矩阵改为 portable-identity 优先（ssh-key / gpg-file / passphrase 三选一覆盖几乎所有用户），desktop keychain (mac/secret-service/pass) 降为 optional optimization。容器从 "不支持" 升 first-class。
