@@ -20,6 +20,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { readBackendFile, type BackendFile, type ExecFn } from "./keychain";
+import { VAULT_IDENTITY_SECRET } from "./backend-detect";
 import { validateKey, vaultDirForScope, type VaultScope } from "./vault-writer";
 
 const VAULT_MASTER = ".vault-master.age";
@@ -104,6 +105,21 @@ function parseMasterKey(raw: Buffer, backend: BackendFile["backend"]): MasterKey
 async function readMasterEnvelope(abrainHome: string, info: BackendFile, exec: ExecFn): Promise<Buffer> {
   const masterPath = path.join(abrainHome, VAULT_MASTER);
   switch (info.backend) {
+    case "abrain-age-key": {
+      // ADR 0019: single-layer keypair. The on-disk identity secret IS the
+      // master — no encryption envelope, no subprocess. Pure fs read.
+      // Future P0d enhancement may wrap this file in age scrypt; loader
+      // will then sniff for the scrypt header and unwrap with passphrase.
+      const identityPath = path.join(abrainHome, VAULT_IDENTITY_SECRET);
+      if (!fs.existsSync(identityPath)) {
+        throw new Error(
+          `abrain identity secret missing at ${identityPath}. ` +
+          `If this is a fresh clone on a new device, copy it from your other machine: ` +
+          `scp <other-host>:~/.abrain/${VAULT_IDENTITY_SECRET} ~/.abrain/${VAULT_IDENTITY_SECRET} && chmod 0600 ~/.abrain/${VAULT_IDENTITY_SECRET}`,
+        );
+      }
+      return fs.readFileSync(identityPath);
+    }
     case "ssh-key": {
       if (!info.identity) throw new Error("ssh-key backend missing identity in .vault-backend");
       if (!fs.existsSync(masterPath)) throw new Error(`${VAULT_MASTER} missing`);
@@ -133,6 +149,17 @@ export async function loadMasterKey(
   abrainHome: string = path.join(os.homedir(), ".abrain"),
   exec: ExecFn = defaultExec,
 ): Promise<MasterKey | null> {
+  // Three legitimate "not loaded" reasons return null without an error:
+  // sub-pi disabled, user opted out via flag, or vault was never init'd.
+  // Anything else — missing identity file, age subprocess failure,
+  // corrupted envelope — propagates so the caller can surface an
+  // actionable message. Self-audit 2026-05-15 (opus-4-7 external audit
+  // catch): the previous unconditional `try { … } catch { return null }`
+  // swallowed readMasterEnvelope's abrain-age-key "copy identity from
+  // your other machine via scp …" error and surfaced a generic "vault
+  // locked or not initialized" instead, breaking ADR 0019's cross-host
+  // UX promise. Errors now bubble; only the three legitimate null cases
+  // above stay silent.
   if (process.env[PI_ABRAIN_DISABLED] === "1") return null;
   const disabledFlag = path.join(abrainHome, ".state", "vault-disabled");
   if (fs.existsSync(disabledFlag)) return null;
@@ -140,12 +167,8 @@ export async function loadMasterKey(
   const info = readBackendFile(abrainHome);
   if (!info) return null;
 
-  try {
-    const raw = await readMasterEnvelope(abrainHome, info, exec);
-    return parseMasterKey(raw, info.backend);
-  } catch {
-    return null;
-  }
+  const raw = await readMasterEnvelope(abrainHome, info, exec);
+  return parseMasterKey(raw, info.backend);
 }
 
 function makeIdentityTempDir(abrainHome: string): string {

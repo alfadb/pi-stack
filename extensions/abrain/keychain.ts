@@ -23,6 +23,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import type { Backend } from "./backend-detect";
+import { VAULT_IDENTITY_DIR, VAULT_IDENTITY_SECRET, VAULT_IDENTITY_PUBKEY } from "./backend-detect";
 
 // ── exec dependency (injected) ──────────────────────────────────
 
@@ -57,21 +58,26 @@ export interface EncryptOptions {
 }
 
 /**
- * Encrypt the generated master key according to the selected backend.
+ * Persist the generated master key according to the selected backend.
  *
- * Per backend, this runs the v1.4 §3 command:
+ * Per backend (ADR 0019):
  *
- *   ssh-key         age -R <pub> -o <out> <input>
- *   gpg-file        gpg --encrypt --batch --recipient <id> --output <out> <input>
- *   passphrase-only age -p -o <out> <input>            (REQUIRES /dev/tty; caller
- *                                                       must use stdio: 'inherit')
- *   macos           security add-generic-password -s alfadb-abrain-master -a <user>
- *                                                  -w <plaintext> -U
- *                   (KNOWN inv2 exception: argv exposure ~100ms)
- *   secret-service  secret-tool store --label=... service abrain key master
- *                   (plaintext via stdin)
- *   pass            pass insert -m abrain/master
- *                   (plaintext via stdin)
+ *   abrain-age-key   copy install-tmp secret → ~/.abrain/.vault-identity/master.age (0600);
+ *                    write public key → ~/.abrain/.vault-identity/master.age.pub (0644).
+ *                    NO subprocess; the secret IS the master.
+ *                    `vaultMasterEncryptedPath` (.vault-master.age) is NOT written
+ *                    — single-layer keypair (ADR 0019 invariant 6).
+ *
+ *   ssh-key          age -R <pub> -o <out> <input>     (Tier 3, explicit-only)
+ *   gpg-file         gpg --encrypt --batch --recipient <id> --output <out> <input>
+ *   passphrase-only  age -p -o <out> <input>           (REQUIRES /dev/tty)
+ *   macos            security add-generic-password -s alfadb-abrain-master -a <user>
+ *                                                   -w <plaintext> -U
+ *                    (KNOWN inv2 exception: argv exposure ~100ms)
+ *   secret-service   secret-tool store --label=... service abrain key master
+ *                    (plaintext via stdin)
+ *   pass             pass insert -m abrain/master
+ *                    (plaintext via stdin)
  *
  * Throws on any non-zero exit code with stderr in the message.
  */
@@ -81,6 +87,54 @@ export async function encryptMasterKey(
   exec: ExecFn,
 ): Promise<void> {
   switch (backend) {
+    case "abrain-age-key": {
+      // ADR 0019: abrain self-managed identity. The generated age secret
+      // IS the vault master (single-layer keypair). We copy it to its
+      // canonical location with strict 0600 mode and write the public
+      // key alongside. No encryption subprocess — the on-disk identity
+      // is the trust anchor; protection is the 0600 file mode + .gitignore.
+      //
+      // P0d will add an optional passphrase wrap that re-encrypts this
+      // file with age scrypt, allowing the secret to enter git. For now
+      // (P0c.write/read MVP) the secret stays gitignored and crosses
+      // devices via user-managed secure transport.
+      const abrainHome = path.dirname(opts.vaultMasterEncryptedPath);
+      const identityDir = path.join(abrainHome, VAULT_IDENTITY_DIR);
+      fs.mkdirSync(identityDir, { recursive: true, mode: 0o700 });
+      // Tighten the dir mode in case mkdirSync was a no-op (existing dir
+      // with looser perms).
+      try { fs.chmodSync(identityDir, 0o700); } catch { /* best-effort */ }
+
+      const identitySecretPath = path.join(abrainHome, VAULT_IDENTITY_SECRET);
+      const identityPubkeyPath = path.join(abrainHome, VAULT_IDENTITY_PUBKEY);
+
+      // Atomic copy via tmp + rename so a partial write never leaves a
+      // half-written secret file.
+      const tmpSecret = `${identitySecretPath}.tmp.${process.pid}`;
+      try {
+        // Read source fully then write with explicit 0600 (avoids umask).
+        const secretBuf = fs.readFileSync(opts.masterSecretPath);
+        fs.writeFileSync(tmpSecret, secretBuf, { mode: 0o600 });
+        fs.renameSync(tmpSecret, identitySecretPath);
+        // Belt-and-suspenders: enforce 0600 even if rename target had wider perms.
+        fs.chmodSync(identitySecretPath, 0o600);
+      } catch (e) {
+        try { fs.unlinkSync(tmpSecret); } catch { /* best-effort */ }
+        throw e;
+      }
+
+      // Public key file: plain text, group/world readable is fine (not a secret).
+      const tmpPub = `${identityPubkeyPath}.tmp.${process.pid}`;
+      try {
+        fs.writeFileSync(tmpPub, opts.masterPublicKey + "\n", { mode: 0o644 });
+        fs.renameSync(tmpPub, identityPubkeyPath);
+      } catch (e) {
+        try { fs.unlinkSync(tmpPub); } catch { /* best-effort */ }
+        throw e;
+      }
+      return;
+    }
+
     case "ssh-key": {
       if (!opts.identity) throw new Error("ssh-key backend requires identity (path to ssh secret key)");
       const sshPub = `${opts.identity}.pub`;
@@ -184,6 +238,12 @@ const PUBKEY_FILE = ".vault-pubkey";
  * Write ~/.abrain/.vault-backend in `key=value\n` format. Mode 0600.
  * Atomic: writes to .vault-backend.tmp then renames, so partial writes
  * never leave a malformed file.
+ *
+ * ADR 0019: for `abrain-age-key` backend, `identity` is intentionally
+ * omitted because the path is fixed (`.vault-identity/master.age`). For
+ * legacy ssh-key / gpg-file the absolute identity path is still recorded
+ * for backwards compatibility, but those backends are also recommended
+ * for re-init via /vault init (default abrain-age-key).
  */
 export function writeBackendFile(abrainHome: string, info: BackendFile): void {
   const lines = [`backend=${info.backend}`];
@@ -214,7 +274,7 @@ export function readBackendFile(abrainHome: string): BackendFile | null {
   if (!obj.backend) return null;
   // Validate backend value
   const valid: ReadonlySet<string> = new Set([
-    "ssh-key", "gpg-file", "passphrase-only", "macos", "secret-service", "pass",
+    "abrain-age-key", "ssh-key", "gpg-file", "passphrase-only", "macos", "secret-service", "pass",
   ]);
   if (!valid.has(obj.backend)) return null;
   return {

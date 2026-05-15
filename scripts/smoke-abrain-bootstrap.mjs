@@ -80,11 +80,14 @@ function setupModules() {
   const detectCompiled = transpile(path.join(repoRoot, "extensions/abrain/backend-detect.ts"));
   const bootstrapCompiled = transpile(path.join(repoRoot, "extensions/abrain/bootstrap.ts"));
   let keychainCompiled = transpile(path.join(repoRoot, "extensions/abrain/keychain.ts"));
-  // keychain imports "./backend-detect" (type-only at TS level — no JS emit, so nothing to rewrite)
+  // ADR 0019: keychain.ts now imports runtime constants (VAULT_IDENTITY_*)
+  // from ./backend-detect, not just types. Provide an extensionless .js
+  // companion so the compiled CJS resolves the relative require.
 
   fs.writeFileSync(path.join(tmpDir, "backend-detect.cjs"), detectCompiled);
   fs.writeFileSync(path.join(tmpDir, "bootstrap.cjs"), bootstrapCompiled);
   fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), keychainCompiled);
+  fs.copyFileSync(path.join(tmpDir, "backend-detect.cjs"), path.join(tmpDir, "backend-detect.js"));
 
   return {
     bootstrap: require(path.join(tmpDir, "bootstrap.cjs")),

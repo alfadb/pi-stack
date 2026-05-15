@@ -1,12 +1,95 @@
-# Migration — Vault Bootstrap（age 加密 + portable identity）
+# Migration — Vault Bootstrap（age 加密 + abrain self-managed identity）
 
-> **状态**：ACTIVE RUNBOOK（2026-05-15）——P0a-P0c shipped；P0d/P1（wizard / `.env` import / backend migration UX）待实施。
-> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D4 / [brain-redesign-spec.md](../brain-redesign-spec.md) / [architecture/vault.md](../architecture/vault.md)
+> **状态**：ACTIVE RUNBOOK（2026-05-15 v1.5）——P0a-P0c shipped；P0d（wizard / `.env` import / backend migration UX / abrain-age-key passphrase wrap）待实施。
+> **依赖**：[ADR 0014](../adr/0014-abrain-as-personal-brain.md) §D4 / [ADR 0019](../adr/0019-abrain-self-managed-vault-identity.md) / [architecture/vault.md](../architecture/vault.md)
 > **关联**：本文件解决 Round 3 复核 P0-B2（OS keychain 跨平台承诺不成立）
 >
-> **v1.4 重写**（2026-05-09）：v1.0-1.3 矩阵假设用户在 macOS / Linux desktop 上跑 pi，把 "CI / 容器" 划成 "不支持 vault"。**实际上 alfadb 主开发环境就是容器**——这是 design-from-stereotype 错误。v1.4 矩阵改为 portable-identity 优先（ssh-key / gpg-file / passphrase 三选一覆盖几乎所有用户），desktop keychain (mac/secret-service/pass) 降为 optional optimization。容器从 "不支持" 升 first-class。
+> ---
+>
+> **⚠ v1.5 重大更新（2026-05-15，[ADR 0019](../adr/0019-abrain-self-managed-vault-identity.md)）**：
+>
+> v1.4 以 `ssh-key` 为 Tier 1 默认 backend。实际对不成立：每台设备的 `~/.ssh/id_*` 是**各自独立生成的不同 key**，跨设备解锁需要物理复制 ssh 私钥。v1.5 引入 `abrain-age-key` backend：abrain 自管 age keypair，identity 路径固定 `~/.abrain/.vault-identity/master.age`，跨设备即复即用。
+>
+> **读者导航**：
+> - 新装机器：看 §1.0 · §3.0 · §6 跨设备同步（v1.5 ADR 0019 路径）
+> - 现有 ssh-key/gpg-file/passphrase-only 用户：你的路径仍能工作（fail-soft），但被降为 Tier 3 explicit-only；v1.4 原文（§1.1-§3.x）作为 Tier 3 详情保留。推荐重 init。
+> - dogfood / migration 该看什么：§“v1.4 → v1.5 迁移手本”（§0）
+>
+> v1.4 原文不删除（作为 Tier 3 backend 的权威实现说明），但 Tier 1 默认以本顶部 v1.5 banner + §1.0 + §3.0 为准。
+>
+> ---
+>
+> **v1.4 重写**（2026-05-09）：v1.0-1.3 矩阵假设用户在 macOS / Linux desktop 上跑 pi，把 "CI / 容器" 划成 "不支持 vault"。**实际上 alfadb 主开发环境就是容器**——这是 design-from-stereotype 错误。v1.4 矩阵改为 portable-identity 优先（ssh-key / gpg-file / passphrase 三选一覆盖几乎所有用户），desktop keychain (mac/secret-service/pass) 降为 optional optimization。容器从 "不支持" 升 first-class。**v1.5 进一步将 Tier 1 从 ssh-key 换为 abrain-age-key，解决跨设备 ssh 私钥不一致问题。**
 
-## 1. 平台支持矩阵（v1.4 重写）
+## 0. v1.5 路径（ADR 0019）
+
+### 0.1 算上哪类用户
+
+- **新装机器**：走 abrain-age-key（仅需 `age` v1.0+ 在 PATH）
+- **原 ssh-key / gpg-file / passphrase-only 用户**：现有安装 fail-soft 继续工作；推荐迁移到 abrain-age-key。迁移路径见 §0.3。
+
+### 0.2 安装 abrain-age-key（默认路径）
+
+```bash
+# 1. 确认 age 可用
+age --version    # 需要 v1.0+
+
+# 2. 运行
+run pi
+/vault init      # 默认 backend=abrain-age-key。产出：
+#   ~/.abrain/.vault-identity/master.age      (0600、自动加入 .gitignore、不进 git)
+#   ~/.abrain/.vault-identity/master.age.pub  (进 git)
+#   ~/.abrain/.vault-pubkey                   (与 master.age.pub 同内容，进 git)
+#   ~/.abrain/.vault-backend                  (backend=abrain-age-key，无 identity= 路径)
+
+# 3. 验证
+/vault status    # 应显示 backend=abrain-age-key、identity 可读 0600
+
+# 4. 设个 secret 试试
+/secret set --global GITHUB_TOKEN=ghp_xxxxxxxxxxxxx
+```
+
+### 0.3 v1.4 → v1.5 迁移手本
+
+现有 ssh-key / gpg-file / passphrase-only 用户现阶段不被强制迁移（fail-soft）。`/vault status` 会显示 deprecation 提示。主动迁移：
+
+```bash
+# 1. 宝贵 secret 手动记下来（以下清除会丢掉全部加密文件）
+/secret list --all-projects   # 看你有哪些 key
+# 对于每个你要保留的 key：
+/secret get <key>             # （该命令未实现；实际走 vault_release）
+
+# 2. 清除旧 vault
+cd ~/.abrain
+rm -rf .vault-backend .vault-pubkey .vault-master.age vault/ projects/*/vault/
+
+# 3. 重初始化走 abrain-age-key
+pi
+/vault init                   # 默认就是 abrain-age-key
+
+# 4. 重新写入 secret
+/secret set --global GITHUB_TOKEN=...
+```
+
+未来 `/vault migrate-backend` (P0d) 将提供无损 migration（自动 unlock 旧 master → 重加密所有 secret 到新 backend → 丢弃旧 envelope）。
+
+### 0.4 跨设备（v1.5）
+
+§6 原 v1.4 手动 rsync 流程仍适用；唯一区别是现在**transport 的是 abrain 专属 identity，不是系统 ssh 私钥**：
+
+```bash
+# 设备 A（已 init）→ 设备 B（新）
+scp -p ~/.abrain/.vault-identity/master.age user@B:.abrain/.vault-identity/master.age
+ssh user@B 'chmod 0600 ~/.abrain/.vault-identity/master.age'
+# B 机 git pull abrain 进来的 .vault-identity/master.age.pub 与 A 机一致，仅私钥需要 secure transport。
+# B 机启动 pi → /vault status 应显示 unlocked。
+```
+
+跨设备变动后（e.g. A 机 `/secret set` 了个新 key）需要 A `git push abrain` 后 B `git pull abrain` 才能拿到加密文件。identity 本身不变不需重传。
+
+错误诊断：忘了 transport identity 时 `decryptSecret` 会报 actionable error（含 `scp` 与 `chmod 0600` 提示），不会 silent 返 generic "vault locked"。
+
+## 1. v1.4 平台支持矩阵（v1.5 后为 Tier 3 explicit-only 依据，需 `--backend=...` flag）
 
 **核心转变**：vault unlock 不再依赖 OS keychain（受限于 desktop session），而是依赖**用户已有的便携加密 identity**——大多数 dev 用户都有 ssh key 或 GPG identity（git push 已经用上），age 原生支持这两者作 recipient，零额外 glue。
 

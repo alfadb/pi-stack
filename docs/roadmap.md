@@ -10,7 +10,8 @@
 |---|---|---|
 | Lane G / about-me | `/about-me` 或 `MEMORY-ABOUT-ME` 写入 `identity/skills/habits/` | 需要明确 identity/habit/skill classifier 与 writer。 |
 | Vault P0d | masked input、`.env` import、`/vault migrate-backend` wizard | 保持 fail-closed，不引入 plaintext fallback。Vault P1（active project resolver + `/secret` scope 路由 + `$PVAULT_/$GVAULT_`）已 ship。 |
-| Vault passphrase-only reader tty channel | `vault-reader.ts:loadMasterKey` 调 `age -d` 时 `stdin: "ignore"`，passphrase backend 实际无法 unlock。 | 当前 reader 只能 init 落盘、不能解锁；要么加 tty pass-through，要么把 passphrase-only 从 Tier 1 fallback 降为 init-only stub backend。doc 已暂记缺口，待决策。 |
+| `abrain-age-key` identity passphrase wrap | 让 `~/.abrain/.vault-identity/master.age` 能用 passphrase 加密后进 git，实现跨设备仅 `git clone abrain` + 输一次 passphrase。详见 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md) §"P0d 增强"。 | 技术依赖未定：(Y2) `age-encryption` JS lib in-process unwrap · (Y1) `node-pty` 模拟 pseudo-tty 。合并 P0d ADR 决策。 |
+| Tier 3 legacy backends reader UX | `ssh-key` / `gpg-file` / `passphrase-only` 在 ADR 0019 后是 explicit-only。`passphrase-only` reader 仍不能解锁（同一 tty pass-through 问题）。 | 上项 abrain-age-key passphrase wrap 落地后该 gap 自动关闭（同一 unwrap 路径）；在那之前 `/vault status` 仍会在旧 backend init 后显示 deprecation 提示。 |
 | Curator scope binding（create 分支） | Curator `create` 操作的 scope 判断仍是 prompt-only；非 create 操作（update/merge/archive/supersede/delete）已 runtime enforce。 | 防止 LLM 把 project-specific 内容 create 到 world scope。 |
 | Sediment update/merge 路径的 unknown frontmatter preservation 验证 | migrate-go 已保留 raw frontmatter；sediment update path 通过 `{...frontmatter, ...patch}` + `PROTECTED_FRONTMATTER_KEYS` 也基本保留，但**系统化覆盖测试**仍缺。 | 加 smoke fixture：随机 unknown 字段 round-trip update 不丢。 |
 

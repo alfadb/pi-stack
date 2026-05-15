@@ -13,6 +13,7 @@
 | [0016 Sediment as LLM Curator](./0016-sediment-as-llm-curator.md) | Accepted | 从 gate-heavy extractor 转为 LLM curator；删除大部分机械 gate。 |
 | [0017 Project Binding Strict Mode](./0017-project-binding-strict-mode.md) | Accepted | `.abrain-project.json` + `_project.json` + local-map 三件套。 |
 | [0018 Curator Defense Layers](./0018-sediment-curator-defense-layers.md) | Accepted with partial revert | Layer 1 prompt discipline + trigger phrase preservation；body shrink/section loss gates 已历史化。 |
+| [0019 Abrain Self-Managed Vault Identity](./0019-abrain-self-managed-vault-identity.md) | Accepted | abrain 自管 age keypair 为 Tier 1 vault backend；ssh-key/gpg-file/passphrase-only 降为 Tier 3 explicit-only；detection 末档 disabled。取代 v1.4 vault-bootstrap §1 的跨设备同步假设。 |
 
 ## 2. 仍有基础价值但主体部分过时
 
@@ -56,6 +57,7 @@ graph TD
   A0013 --> A0016
   A0014 --> A0017[0017 strict binding]
   A0014 --> A0015[0015 LLM retrieval]
+  A0014 --> A0019[0019 abrain self-managed vault identity]
   A0016 --> A0018[0018 curator defenses]
 ```
 
@@ -70,6 +72,6 @@ graph TD
 
 1. `docs/current-state.md`
 2. `docs/architecture/overview.md`
-3. ADR 0014 → 0017 → 0015 → 0016 → 0018
+3. ADR 0014 → 0017 → 0019 → 0015 → 0016 → 0018
 4. 需要理解前史时再读 0001/0003/0006/0009/0010/0013
 5. 只有做考古/审计时才读 archive 原文：0002/0004/0005/0007/0008/0011/0012

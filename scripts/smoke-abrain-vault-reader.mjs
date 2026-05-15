@@ -48,11 +48,13 @@ function transpile(srcPath) {
 }
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-vr-"));
-for (const file of ["vault-reader", "vault-writer", "keychain"]) {
+// ADR 0019: vault-reader.ts + keychain.ts now import runtime constants from
+// ./backend-detect, so include it in the load set.
+for (const file of ["backend-detect", "vault-reader", "vault-writer", "keychain"]) {
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));
 }
 // Relative imports in transpiled CommonJS keep the original .ts-free names.
-for (const file of ["vault-reader", "vault-writer", "keychain"]) {
+for (const file of ["backend-detect", "vault-reader", "vault-writer", "keychain"]) {
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
 

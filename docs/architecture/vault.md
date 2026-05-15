@@ -12,32 +12,47 @@ Vault stores secrets inside the abrain substrate without making plaintext part o
 |---|---|---|
 | Global vault | `~/.abrain/vault/<key>.age` | cross-project secrets |
 | Project vault | `~/.abrain/projects/<id>/vault/<key>.age` | active project only |
-| Master key | `~/.abrain/.vault-master.age` | encrypted by backend identity |
-| Public key | `~/.abrain/.vault-pubkey` | enough for write/encrypt path |
+| Abrain identity (ADR 0019) | `~/.abrain/.vault-identity/master.age` (secret, 0600, **gitignored**) + `master.age.pub` (public key, enters git) | Tier 1 default backend; abrain self-managed age keypair |
+| Master key envelope | `~/.abrain/.vault-master.age` | **Tier 3 only** (ssh-key / gpg-file / passphrase-only). NOT written by abrain-age-key (single-layer keypair, ADR 0019 invariant 6). |
+| Public key alias | `~/.abrain/.vault-pubkey` | always written; for abrain-age-key this is a duplicate of `.vault-identity/master.age.pub` (invariant 6). vault-writer reads this. |
 | Audit/state | `~/.abrain/.state/vault-events.jsonl` and related state | no plaintext intended |
 
 Project vault scope uses ADR 0017 active project binding. Other projects' vaults are not visible to the current session unless explicitly supported by a metadata-only command such as all-project listing.
 
-## 3. Backend detection
+## 3. Backend detection (ADR 0019)
 
-`/vault init` chooses a portable identity backend. Priority:
+`/vault init` chooses a backend. The chain (`extensions/abrain/backend-detect.ts:detectBackend`) is reorganized around **abrain-managed identity** so cross-device behavior is consistent:
 
 1. `SECRETS_BACKEND` env override (invalid values are silently ignored and detection continues; see `extensions/abrain/backend-detect.ts:161-174`).
-2. `ssh-key`
-3. `gpg-file`
-4. `macos`
-5. `secret-service`
-6. `pass`
-7. `passphrase-only` — **final fallback** of automatic detection. `disabled` is no longer reached via auto-detection: in v1.4 `passphrase-only` catches everyone, even bare environments.
 
-`disabled` only becomes the active backend through one of two **explicit** opt-outs:
+**Tier 1 default — abrain self-managed:**
+
+2. `abrain-age-key` — if `~/.abrain/.vault-identity/master.age` already exists (initialized) OR `age-keygen` is on PATH (init target). Identity is an age keypair owned by abrain; secret 0600 + gitignored; pubkey enters git.
+
+**Tier 2 keychain optimization (wraps abrain identity):**
+
+3. `macos` — platform=darwin + `security` CLI.
+4. `secret-service` — Linux + `$DISPLAY`/`$WAYLAND_DISPLAY` + `secret-tool`.
+5. `pass` — `pass` CLI + `~/.password-store/abrain/`.
+
+**Tier 3 explicit-only (legacy):**
+
+- `ssh-key` — reuses `~/.ssh/id_*`. **Not auto-detected**; requires `--backend=ssh-key` and produces a stderr warning. Cross-device unlock requires copying the ssh secret key to every device, which usually conflicts with per-device default ssh keys.
+- `gpg-file` — reuses GPG identity. **Not auto-detected**; requires `--backend=gpg-file` and produces a stderr warning. Same cross-device caveat.
+- `passphrase-only` — age scrypt mode. **Not auto-detected**; requires `--backend=passphrase-only` and produces a stderr warning. Reader path requires tty pass-through which is not yet implemented (roadmap P0d), so the next pi restart will silently fail to unlock.
+
+**Tier 4 final:**
+
+6. `disabled` — no abrain-age-key prerequisite (no `age-keygen`) and no keychain backend detected. `/vault init` refuses; vault is off. ADR 0019 made this the auto-detect terminator (was `passphrase-only` in v1.4) so bare environments fail loudly with an actionable install hint, not silently into a backend that can't unlock.
+
+`disabled` also becomes active through two **explicit** opt-outs:
 
 - `SECRETS_BACKEND=disabled` env override, or
 - `~/.abrain/.state/vault-disabled` flag file present.
 
-The current design intentionally treats container/devbox environments as first-class: ssh-key / gpg-file / passphrase are primary, desktop keychains are optimizations.
+Container scenario (alfadb main dev): `abrain-age-key` wins because `age-keygen` is on PATH (already a dependency for the legacy ssh-key path).
 
-> **Reader-side gap** (tracked in roadmap): `extensions/abrain/vault-reader.ts:113-118` invokes `age -d` with `stdin: "ignore"`, so `passphrase-only` backend cannot prompt for a passphrase at unlock time and `loadMasterKey()` silently returns `null` (caught at `vault-reader.ts:142-148`). Today `passphrase-only` is effectively **init-only**; reader-side unlock requires either a tty pass-through implementation or a decision to demote `passphrase-only` from "Tier 1 fallback" to "init-only stub backend". See [../migration/vault-bootstrap.md §5](../migration/vault-bootstrap.md) for the runbook context.
+Why this ordering: previous v1.4 chain prioritized ssh-key for containers. Multi-model audit + dogfood (2026-05-15) found three root problems with that: (1) default ssh keys at `~/.ssh/id_*` are usually different per device, (2) `.vault-backend` hardcoded the absolute identity path which breaks on path-different machines, (3) passphrase-only could `init` but not `unlock` (reader stdin: 'ignore'). See [ADR 0019](../adr/0019-abrain-self-managed-vault-identity.md) for the full reasoning.
 
 ## 4. Commands and tools
 
@@ -118,8 +133,12 @@ Dispatch sub-agents run independent pi processes. By default they receive `PI_AB
 | bash env injection | shipped |
 | output withheld + redaction | shipped |
 | startup reconcile/cleanup | shipped |
-| masked TUI wizard | pending |
-| `.env` import | pending |
-| backend migration wizard | pending |
+| `abrain-age-key` backend (ADR 0019, Tier 1 default) | shipped |
+| `ssh-key` / `gpg-file` backends (Tier 3 explicit-only) | shipped, deprecated for new users (`/vault status` shows deprecation notice; reader stays fail-soft) |
+| `passphrase-only` backend init | shipped (init writes file); **unlock unimplemented** (reader needs tty pass-through, roadmap P0d) |
+| Cross-device identity transport | manual (user `scp ~/.abrain/.vault-identity/master.age` between devices); P0d will add passphrase wrap so identity can enter git |
+| masked TUI wizard | pending (roadmap P0d) |
+| `.env` import | pending (roadmap P0d) |
+| backend migration wizard | pending (roadmap P0d) |
 
 Operational runbook: [../migration/vault-bootstrap.md](../migration/vault-bootstrap.md). Historical decision: [../adr/0014-abrain-as-personal-brain.md](../adr/0014-abrain-as-personal-brain.md).

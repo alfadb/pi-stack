@@ -104,10 +104,12 @@ Entry 写锁统一在 `~/.abrain/.state/sediment/locks/`，因为多个项目会
 
 ## 7. Vault 状态
 
+Backend 架构按 [ADR 0019](./adr/0019-abrain-self-managed-vault-identity.md)：abrain 自管 age keypair 为 Tier 1 默认，ssh-key / gpg-file / passphrase-only 降为 Tier 3 explicit-only。
+
 已实现：
 
 - `/vault status`
-- `/vault init [--backend=<backend>]`
+- `/vault init [--backend=<backend>]` — 不传 flag 默认走 `abrain-age-key`（`age-keygen` 生成专属 keypair，不复用系统 ssh key）。明示 `--backend=ssh-key/gpg-file/passphrase-only` 仍可用，但 stderr warning 提示跨设备负担。
 - `/secret set/list/forget`（global/project scope，默认 active project）
 - `vault_release(key, scope?, reason?)`（plaintext 进入 LLM 前要求用户授权；prompt 经当前 session model 翻译为用户语言）
 - `$VAULT_<key>`：project → global fallback
@@ -117,15 +119,24 @@ Entry 写锁统一在 `~/.abrain/.state/sediment/locks/`，因为多个项目会
 - tool_call inject 错误 `block:true`；tool_result authorization/redaction throw 全 withhold + audit `bash_inject_block`/`bash_output_withhold`（2026-05-14 R6 audit fix）
 - sub-pi 默认无 vault 工具/权限（三层：dispatch spawn env override + abrain extension activate guard + vault-reader 二次 guard）
 
+**abrain-age-key 路径详情**（ADR 0019）：
+
+- `~/.abrain/.vault-identity/master.age`：abrain 专属私钥、0600、**gitignore**。2026-05-15 后不再寄生 `~/.ssh/id_*`。
+- `~/.abrain/.vault-identity/master.age.pub`：公钥，进 git。
+- `~/.abrain/.vault-pubkey`：与 `master.age.pub` 同内容，保留以兼容 vault-writer（ADR 0019 invariant 6）。
+- `~/.abrain/.vault-master.age`：**abrain-age-key 不生成此文件**（单层 keypair）；仅 Tier 3 backend 使用。
+- 跨设备同步：用户手动 `scp ~/.abrain/.vault-identity/master.age …` + `chmod 0600`。误操作失败时 reader 报 actionable error（含 `scp` / `chmod 0600` 提示）而不是 silent "vault locked"。
+
+**旧 backend 用户**（如果 `.vault-backend` 是 `ssh-key`/`gpg-file`/`passphrase-only`）：reader 仍 fail-soft 正常解锁；`/vault status` 显示 deprecation 提示建议重 init 到 `abrain-age-key`。
+
 未实现/roadmap：
 
-- P0d：masked input、`.env` import、`/vault migrate-backend` wizard（P1 的 active project resolver + `/secret` scope 路由 + `$PVAULT_/$GVAULT_` 已 ship）
-- Passphrase-only backend reader 路径无 tty channel：当前 `age -d` 调用 `stdin: "ignore"`，`loadMasterKey()` 会 silent 返回 null。待决：加 tty pass-through 或降为 init-only stub backend。
+- P0d：`abrain-age-key` identity passphrase wrap（让 `.vault-identity/master.age` 可进 git，跨设备仅 `git clone abrain` + 输一次 passphrase）、masked input、`.env` import、`/vault migrate-backend` wizard。技术依赖选型（`age-encryption` JS lib vs `node-pty`）未定。
 - Lane G：`/about-me` 与 identity/skills/habits writer
 
 ## 8. 当前测试入口
 
-`package.json#scripts` 是 smoke 列表 live truth。当前 15 个：
+`package.json#scripts` 是 smoke 列表 live truth。当前 16 个：
 
 ```text
 smoke:memory
@@ -140,6 +151,7 @@ smoke:abrain-bootstrap
 smoke:abrain-vault-writer
 smoke:abrain-vault-reader
 smoke:abrain-vault-bash
+smoke:abrain-vault-identity
 smoke:abrain-active-project
 smoke:abrain-secret-scope
 smoke:abrain-i18n

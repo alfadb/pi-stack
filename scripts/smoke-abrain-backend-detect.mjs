@@ -75,11 +75,12 @@ const detectModule = loadModuleFromString(
 );
 const { detectBackend, formatStatus } = detectModule;
 
-console.log("abrain P0a — v1.4 backend detection (portable identity primary)");
+console.log("abrain backend detection — ADR 0019 (abrain self-managed vault identity)");
 
 // ── Helper: build a deps object with sensible defaults ──────────
-// Default = "headless container with nothing" → should select passphrase-only
-// in v1.4 (no ssh-key, no gpg, no desktop, no pass).
+// Default = "headless container with nothing, no age-keygen installed" →
+// should select disabled in ADR 0019 (no abrain-age-key prereq, no keychain).
+// Set commandExists(c)=>c==="age-keygen" to simulate alfadb dev environment.
 function deps(overrides = {}) {
   const base = {
     commandExists: () => false,
@@ -92,88 +93,69 @@ function deps(overrides = {}) {
   return { ...base, ...overrides, env: { ...base.env, ...(overrides.env || {}) } };
 }
 
-// ── 1. Tier 1 primary: ssh-key (the alfadb main scenario) ───────
+// ── 1. Tier 1 default: abrain-age-key (ADR 0019) ──────────────
 
-check("ssh-key (ed25519): both id_ed25519 + .pub exist → backend=ssh-key", () => {
+check("abrain-age-key: identity secret already on disk → backend=abrain-age-key (initialized)", () => {
+  const info = detectBackend(deps({
+    fileExists: (p) => p === "/home/test/.abrain/.vault-identity/master.age",
+  }));
+  if (info.backend !== "abrain-age-key") throw new Error(`expected abrain-age-key, got ${info.backend}`);
+  if (info.identity !== "/home/test/.abrain/.vault-identity/master.age") throw new Error(`expected fixed identity path, got ${info.identity}`);
+  if (!info.capabilities.autoUnlock) throw new Error("abrain-age-key reports autoUnlock=true (file 0600, no agent needed)");
+  if (!info.reason.includes("already initialized")) throw new Error("reason should cite already initialized");
+});
+
+check("abrain-age-key: age-keygen on PATH (not yet initialized) → backend=abrain-age-key (init target)", () => {
+  const info = detectBackend(deps({
+    commandExists: (c) => c === "age-keygen",
+  }));
+  if (info.backend !== "abrain-age-key") throw new Error(`expected abrain-age-key, got ${info.backend}`);
+  if (info.identity) throw new Error("reason path expects identity unset until init runs");
+  if (!info.reason.includes("age-keygen")) throw new Error("reason should cite age-keygen availability");
+  if (!info.reason.includes("ADR 0019")) throw new Error("reason should reference ADR 0019");
+});
+
+check("abrain-age-key: identity file beats age-keygen-only (already-init wins over not-yet-init)", () => {
+  const info = detectBackend(deps({
+    fileExists: (p) => p === "/home/test/.abrain/.vault-identity/master.age",
+    commandExists: (c) => c === "age-keygen",
+  }));
+  if (info.backend !== "abrain-age-key") throw new Error(`expected abrain-age-key, got ${info.backend}`);
+  if (!info.reason.includes("already initialized")) throw new Error("on-disk branch should fire first");
+});
+
+// ── 2. Tier 3 legacy backends NEVER auto-detect (ADR 0019) ────────────
+
+check("ADR 0019: ssh-key is NO LONGER auto-detected (must be explicit)", () => {
+  // Old v1.4: both id_ed25519 + .pub exist → backend=ssh-key auto.
+  // ADR 0019: ssh keys ignored by detection; user must --backend=ssh-key explicitly.
   const info = detectBackend(deps({
     fileExists: (p) => p === "/home/test/.ssh/id_ed25519" || p === "/home/test/.ssh/id_ed25519.pub",
   }));
-  if (info.backend !== "ssh-key") throw new Error(`expected ssh-key, got ${info.backend}`);
-  if (info.identity !== "/home/test/.ssh/id_ed25519") throw new Error(`expected identity=id_ed25519, got ${info.identity}`);
-  if (!info.capabilities.autoUnlock) throw new Error("ssh-key should report autoUnlock=true (ssh-agent cache)");
-  if (!info.reason.includes("ed25519")) throw new Error("reason should cite ed25519");
+  if (info.backend === "ssh-key") throw new Error("ADR 0019: ssh-key auto-detect must be removed");
+  if (info.backend !== "disabled") throw new Error(`bare env should hit disabled, got ${info.backend}`);
 });
 
-check("ssh-key (rsa fallback): only id_rsa exists → backend=ssh-key with rsa identity", () => {
-  const info = detectBackend(deps({
-    fileExists: (p) => p === "/home/test/.ssh/id_rsa" || p === "/home/test/.ssh/id_rsa.pub",
-  }));
-  if (info.backend !== "ssh-key") throw new Error(`expected ssh-key, got ${info.backend}`);
-  if (info.identity !== "/home/test/.ssh/id_rsa") throw new Error(`expected identity=id_rsa, got ${info.identity}`);
-  if (!info.reason.includes("rsa")) throw new Error("reason should cite rsa");
-});
-
-check("ssh-key: ed25519 takes priority over rsa when both exist", () => {
-  const info = detectBackend(deps({
-    fileExists: () => true, // both ed25519 and rsa "exist"
-  }));
-  if (info.identity !== "/home/test/.ssh/id_ed25519") throw new Error(`ed25519 should win; got ${info.identity}`);
-});
-
-check("ssh-key: secret without .pub → falls through (age needs .pub to encrypt)", () => {
-  const info = detectBackend(deps({
-    fileExists: (p) => p === "/home/test/.ssh/id_ed25519", // no .pub
-  }));
-  if (info.backend === "ssh-key") throw new Error("must require BOTH secret and pub");
-});
-
-check("ssh-key: .pub without secret → falls through (no decrypt path)", () => {
-  const info = detectBackend(deps({
-    fileExists: (p) => p === "/home/test/.ssh/id_ed25519.pub", // no secret
-  }));
-  if (info.backend === "ssh-key") throw new Error("must require BOTH pub and secret");
-});
-
-// ── 2. Tier 1 primary: gpg-file ─────────────────────────────────
-
-check("gpg-file: gpg cmd + secret key in keyring → backend=gpg-file", () => {
+check("ADR 0019: gpg-file is NO LONGER auto-detected (must be explicit)", () => {
   const info = detectBackend(deps({
     commandExists: (c) => c === "gpg",
     gpgFirstSecretKey: () => "ABCD1234EF567890",
   }));
-  if (info.backend !== "gpg-file") throw new Error(`expected gpg-file, got ${info.backend}`);
-  if (info.gpgRecipient !== "ABCD1234EF567890") throw new Error(`expected recipient ABCD..., got ${info.gpgRecipient}`);
-  if (!info.capabilities.autoUnlock) throw new Error("gpg-file should report autoUnlock=true (gpg-agent cache)");
+  if (info.backend === "gpg-file") throw new Error("ADR 0019: gpg-file auto-detect must be removed");
 });
 
-check("gpg-file: gpg cmd but empty keyring → falls through to passphrase-only", () => {
-  // The v1.3 bug: "user has gpg installed" was conflated with "user has GPG identity".
-  // v1.4 splits these.
+check("abrain-age-key wins over ssh keys on disk (ssh keys ignored entirely)", () => {
+  // Even with full ssh keypair + age-keygen, detection picks abrain-age-key.
   const info = detectBackend(deps({
-    commandExists: (c) => c === "gpg",
-    gpgFirstSecretKey: () => null, // no secret keys
+    fileExists: (p) => p.includes(".ssh/id_ed25519"),
+    commandExists: (c) => c === "age-keygen",
   }));
-  if (info.backend === "gpg-file") throw new Error("gpg without secret keys should NOT select gpg-file");
-  if (info.backend !== "passphrase-only") throw new Error(`expected fallback to passphrase-only, got ${info.backend}`);
+  if (info.backend !== "abrain-age-key") throw new Error(`ADR 0019: abrain-age-key default; got ${info.backend}`);
 });
 
-// ── 3. Priority: ssh-key beats gpg-file (Tier 1 ordering) ───────
+// ── 3. Tier 2 keychain optimization paths ──────────────────────────────
 
-check("priority: ssh-key + gpg both available → ssh-key wins (alfadb container)", () => {
-  // This is the realistic alfadb container scenario: user has ssh key for git
-  // push AND has gpg installed for commit signing. ssh-key wins because it's
-  // friendlier in the container (ssh-agent already unlocked from git push).
-  const info = detectBackend(deps({
-    fileExists: () => true,
-    commandExists: () => true,
-    gpgFirstSecretKey: () => "FFEE1122",
-  }));
-  if (info.backend !== "ssh-key") throw new Error(`ssh-key should beat gpg-file in priority; got ${info.backend}`);
-});
-
-// ── 4. Tier 2 optimization paths ────────────────────────────────
-
-check("macOS: platform=darwin + security cmd → backend=macos", () => {
+check("macOS: platform=darwin + security cmd (no age-keygen) → backend=macos", () => {
   const info = detectBackend(deps({
     platform: "darwin",
     commandExists: (c) => c === "security",
@@ -182,15 +164,17 @@ check("macOS: platform=darwin + security cmd → backend=macos", () => {
   if (!info.capabilities.autoUnlock) throw new Error("macOS should report autoUnlock=true");
 });
 
-check("macOS: darwin but no security cmd → falls through (impossible in practice but be safe)", () => {
+check("abrain-age-key beats macOS keychain when age-keygen is available", () => {
+  // ADR 0019: Tier 1 > Tier 2. abrain-age-key covers cross-device uniformly;
+  // keychain is session-local optimization, useful only when Tier 1 is missing.
   const info = detectBackend(deps({
     platform: "darwin",
-    commandExists: () => false,
+    commandExists: (c) => c === "age-keygen" || c === "security",
   }));
-  if (info.backend === "macos") throw new Error("must require security CLI on PATH");
+  if (info.backend !== "abrain-age-key") throw new Error(`Tier 1 beats Tier 2 macos; got ${info.backend}`);
 });
 
-check("Linux + DISPLAY + secret-tool → backend=secret-service (Tier 2)", () => {
+check("Linux + DISPLAY + secret-tool (no age-keygen) → backend=secret-service (Tier 2)", () => {
   const info = detectBackend(deps({
     env: { DISPLAY: ":0" },
     commandExists: (c) => c === "secret-tool",
@@ -216,7 +200,7 @@ check("Linux desktop without secret-tool → falls through (CLI required)", () =
   if (info.backend === "secret-service") throw new Error("must not select secret-service without secret-tool");
 });
 
-check("pass + ~/.password-store/abrain → backend=pass (Tier 2)", () => {
+check("pass + ~/.password-store/abrain (no age-keygen) → backend=pass (Tier 2)", () => {
   const info = detectBackend(deps({
     commandExists: (c) => c === "pass",
     fileExists: (p) => p === "/home/test/.password-store/abrain",
@@ -233,42 +217,40 @@ check("pass: cmd without password-store dir → falls through", () => {
   if (info.backend === "pass") throw new Error("must require ~/.password-store/abrain/");
 });
 
-// ── 5. Tier 1 priority over Tier 2 ──────────────────────────────
+// ── 4. Tier 1 priority over Tier 2 (abrain-age-key vs keychain) ──────
 
-check("priority: ssh-key beats macos (Tier 1 > Tier 2)", () => {
-  // macOS user with ssh key still gets ssh-key as default (more portable
-  // across machines). User can $SECRETS_BACKEND=macos override if desired.
+check("priority: abrain-age-key beats secret-service when age-keygen available", () => {
   const info = detectBackend(deps({
-    platform: "darwin",
-    fileExists: () => true,
-    commandExists: () => true,
-  }));
-  if (info.backend !== "ssh-key") throw new Error(`Tier 1 ssh-key should beat Tier 2 macos; got ${info.backend}`);
-});
-
-check("priority: ssh-key beats secret-service (Tier 1 > Tier 2)", () => {
-  const info = detectBackend(deps({
-    fileExists: () => true,
-    commandExists: () => true,
+    commandExists: (c) => c === "age-keygen" || c === "secret-tool",
     env: { DISPLAY: ":0" },
   }));
-  if (info.backend !== "ssh-key") throw new Error(`Tier 1 ssh-key should beat Tier 2 secret-service`);
+  if (info.backend !== "abrain-age-key") throw new Error(`Tier 1 beats Tier 2; got ${info.backend}`);
 });
 
-// ── 6. Tier 1 fallback: passphrase-only ─────────────────────────
-
-check("v1.4: nothing available → passphrase-only (NOT disabled like v1.3)", () => {
-  // The big v1.4 change: container with nothing now gets passphrase-only,
-  // not disabled. CI/container scenarios fall here. v1.3 returned 'disabled'.
-  const info = detectBackend(deps({}));
-  if (info.backend !== "passphrase-only") throw new Error(`v1.4 default fallback should be passphrase-only, not ${info.backend}`);
-  if (!info.reason.includes("scrypt")) throw new Error("reason should mention age scrypt");
+check("priority: abrain-age-key beats pass when age-keygen available", () => {
+  const info = detectBackend(deps({
+    commandExists: (c) => c === "age-keygen" || c === "pass",
+    fileExists: (p) => p === "/home/test/.password-store/abrain",
+  }));
+  if (info.backend !== "abrain-age-key") throw new Error(`Tier 1 beats Tier 2; got ${info.backend}`);
 });
 
-check("passphrase-only: explicit 'will prompt on each pi start' wording", () => {
+// ── 5. Tier 4 final: disabled (ADR 0019 — no more passphrase-only fallback) ──
+
+check("ADR 0019: bare env (no age-keygen, no keychain) → disabled (NOT passphrase-only)", () => {
+  // Big ADR 0019 change: auto-detect terminator is `disabled`, not `passphrase-only`.
+  // passphrase-only had a reader-side gap (tty pass-through unimplemented), so
+  // falling into it silently broke unlock. Now bare envs stay disabled and the
+  // reason tells the user how to recover.
   const info = detectBackend(deps({}));
-  if (!info.reason.includes("prompt")) throw new Error("reason should warn about prompt UX");
-  if (info.capabilities.autoUnlock) throw new Error("passphrase-only must report autoUnlock=false");
+  if (info.backend !== "disabled") throw new Error(`ADR 0019: bare env should hit disabled, not ${info.backend}`);
+  if (!info.reason.includes("age-keygen")) throw new Error("reason should hint installing age fixes this");
+});
+
+check("disabled reason: actionable error message references install hints", () => {
+  const info = detectBackend(deps({}));
+  if (!info.reason.match(/apt install|brew install/)) throw new Error("reason should suggest concrete install command");
+  if (!info.reason.includes("Tier 3")) throw new Error("reason should mention Tier 3 explicit-backend escape hatch");
 });
 
 // ── 7. $SECRETS_BACKEND env override ────────────────────────────
@@ -282,10 +264,19 @@ check("$SECRETS_BACKEND=ssh-key forces ssh-key (overrides auto)", () => {
   if (info.overrideTarget !== "ssh-key") throw new Error(`expected overrideTarget=ssh-key, got ${info.overrideTarget}`);
 });
 
-check("$SECRETS_BACKEND=passphrase-only is honored (was 'disabled' in v1.3)", () => {
+check("$SECRETS_BACKEND=passphrase-only is honored (explicit opt-in, despite reader gap)", () => {
+  // Tier 3 explicit-only: user must knowingly opt in despite the reader
+  // tty-pass-through gap (roadmap P0d). detectBackend still returns the
+  // override; handleInit shows a stderr warning.
   const info = detectBackend(deps({ env: { SECRETS_BACKEND: "passphrase-only" } }));
   if (info.backend !== "env-override") throw new Error(`expected env-override`);
   if (info.overrideTarget !== "passphrase-only") throw new Error(`expected overrideTarget=passphrase-only`);
+});
+
+check("$SECRETS_BACKEND=abrain-age-key is honored (explicit pick of new default)", () => {
+  const info = detectBackend(deps({ env: { SECRETS_BACKEND: "abrain-age-key" } }));
+  if (info.backend !== "env-override") throw new Error(`expected env-override`);
+  if (info.overrideTarget !== "abrain-age-key") throw new Error(`expected overrideTarget=abrain-age-key`);
 });
 
 check("$SECRETS_BACKEND=disabled forces disabled (no overrideTarget)", () => {
@@ -296,12 +287,19 @@ check("$SECRETS_BACKEND=disabled forces disabled (no overrideTarget)", () => {
 
 check("$SECRETS_BACKEND=garbage falls through to auto-detect (security)", () => {
   // Critical: typo'd override must NOT silently do anything weird.
-  // In v1.4 fall-through hits passphrase-only (not disabled).
+  // ADR 0019: fall-through in a bare env hits `disabled` (was passphrase-only).
+  // With age-keygen available it would hit abrain-age-key — verify both branches.
   const info = detectBackend(deps({
     env: { SECRETS_BACKEND: "totally-fake-backend" },
   }));
   if (info.backend === "env-override") throw new Error("garbage override should NOT be honored");
-  if (info.backend !== "passphrase-only") throw new Error(`fall-through should hit passphrase-only, got ${info.backend}`);
+  if (info.backend !== "disabled") throw new Error(`bare-env fall-through should hit disabled, got ${info.backend}`);
+
+  const info2 = detectBackend(deps({
+    env: { SECRETS_BACKEND: "totally-fake-backend" },
+    commandExists: (c) => c === "age-keygen",
+  }));
+  if (info2.backend !== "abrain-age-key") throw new Error(`age-keygen-avail fall-through should hit abrain-age-key, got ${info2.backend}`);
 });
 
 check("$SECRETS_BACKEND case-insensitive (SSH-KEY honored)", () => {
@@ -314,33 +312,31 @@ check("$SECRETS_BACKEND case-insensitive (SSH-KEY honored)", () => {
 
 // ── State B: not initialized (initialized=null) ─────────────────
 
-check("formatStatus B (not initialized, ssh-key detected): shows 'ready to init' + identity", () => {
+check("formatStatus B (not initialized, abrain-age-key detected): shows 'ready to init'", () => {
   const info = detectBackend(deps({
-    fileExists: (p) => p.includes("id_ed25519"),
+    commandExists: (c) => c === "age-keygen",
   }));
   const out = formatStatus(info, false, null);
   if (!out.includes("not initialized")) throw new Error("output missing 'not initialized'");
-  if (!out.includes("ssh-key")) throw new Error("output missing 'ssh-key'");
-  if (!out.includes("/home/test/.ssh/id_ed25519")) throw new Error("output missing identity path");
+  if (!out.includes("abrain-age-key")) throw new Error("output missing 'abrain-age-key'");
   if (!out.includes("to init:")) throw new Error("output missing 'to init:' hint");
 });
 
-check("formatStatus B (gpg-file detected) shows gpg recipient + 'ready to init'", () => {
+check("formatStatus B (abrain-age-key, already initialized) shows fixed identity path", () => {
   const info = detectBackend(deps({
-    commandExists: (c) => c === "gpg",
-    gpgFirstSecretKey: () => "DEADBEEF12345678",
+    fileExists: (p) => p === "/home/test/.abrain/.vault-identity/master.age",
   }));
   const out = formatStatus(info, false, null);
-  if (!out.includes("not initialized")) throw new Error("output missing 'not initialized'");
-  if (!out.includes("gpg recipient")) throw new Error("output missing gpg recipient line");
-  if (!out.includes("0xDEADBEEF12345678")) throw new Error("output missing recipient id");
+  if (!out.includes("abrain-age-key")) throw new Error("output missing 'abrain-age-key'");
+  if (!out.includes("/home/test/.abrain/.vault-identity/master.age")) throw new Error("output missing canonical identity path");
 });
 
-check("formatStatus B (passphrase-only fall-through) renders unlock UX warning", () => {
+check("formatStatus B (bare env / disabled detected) renders disabled message", () => {
   const info = detectBackend(deps({}));
   const out = formatStatus(info, false, null);
-  if (!out.includes("passphrase-only")) throw new Error("output missing 'passphrase-only'");
-  if (!out.includes("manual unlock")) throw new Error("output should warn about manual unlock");
+  if (!out.includes("disabled") && !out.includes("no backend")) {
+    throw new Error(`bare env should render disabled or no-backend message:\n${out}`);
+  }
 });
 
 // ── State C: user-disabled flag set ─────────────────────────────
@@ -440,6 +436,10 @@ check("formatStatus A states shipped P0c read/write + project routing", () => {
 
 const detectFile = path.join(tmpDir, "backend-detect.cjs");
 fs.writeFileSync(detectFile, detectCompiled);
+// ADR 0019: keychain.ts and vault-reader.ts now import from ./backend-detect.
+// Provide an extensionless .js companion so their compiled CJS can resolve
+// the relative require (./backend-detect → backend-detect.js in tmpDir).
+fs.copyFileSync(detectFile, path.join(tmpDir, "backend-detect.js"));
 
 // index.ts imports ./bootstrap, ./keychain, ./vault-writer, ./vault-reader.
 // Relative imports must be rewritten to .cjs paths so the transpiled CJS

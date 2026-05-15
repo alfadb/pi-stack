@@ -925,11 +925,10 @@ export default function activate(pi: ExtensionAPI): void {
 
 // ── /vault init ─────────────────────────────────────────────────
 //
-// P0b non-interactive form: `/vault init --backend=<name>`. Picks the
-// first auto-detected backend if no --backend flag, but only if that
-// backend is in {ssh-key, gpg-file} (we don't auto-pick passphrase-only
-// or keychain backends — those need explicit user choice).
-// Full TUI onboarding wizard (vault-bootstrap §4) is P0d.
+// ADR 0019 non-interactive form: `/vault init` defaults to abrain-age-key.
+// Explicit `--backend=<name>` opts into Tier 3 legacy backends with a
+// stderr warning about cross-device implications. Full TUI onboarding
+// wizard (vault-bootstrap §4) is P0d.
 
 interface InitOptions {
   backend?: EncryptableBackend;
@@ -942,6 +941,7 @@ function parseInitArgs(args: string): InitOptions {
     if (m) {
       const v = m[1] as EncryptableBackend;
       const valid: ReadonlySet<string> = new Set([
+        "abrain-age-key",
         "ssh-key", "gpg-file", "passphrase-only",
         "macos", "secret-service", "pass",
       ]);
@@ -991,29 +991,55 @@ async function handleInit(rawArgs: string, ui: { notify(message: string, type?: 
   let identity: string | undefined;
   if (opts.backend) {
     backend = opts.backend;
-    // For ssh-key / gpg-file, fill identity from detection if user didn't override
-    const detected = detectBackend(buildRealDeps());
+    // ADR 0019: explicit Tier 3 legacy backends — warn about cross-device burden
     if (backend === "ssh-key") {
-      if (detected.backend === "ssh-key") identity = detected.identity;
-      else if (detected.backend === "env-override" && detected.overrideTarget === "ssh-key") identity = detected.identity;
-      else identity = `${os.homedir()}/.ssh/id_ed25519`; // best guess
+      ui.notify(
+        `⚠ ssh-key backend reuses your system ssh key. Cross-device unlock requires you to copy that ssh secret key (~/.ssh/id_*) to every device, which usually conflicts with per-device default ssh keys. Prefer the default abrain-age-key backend unless you specifically need ssh-key reuse.`,
+        "warning",
+      );
     } else if (backend === "gpg-file") {
-      if (detected.backend === "gpg-file") identity = detected.gpgRecipient;
-      else throw new Error("gpg-file requested but no GPG secret key detected. install / import GPG identity first.");
+      ui.notify(
+        `⚠ gpg-file backend reuses your system GPG identity. Cross-device unlock requires the same GPG private key on every device. Prefer the default abrain-age-key backend unless you specifically need GPG identity reuse.`,
+        "warning",
+      );
+    } else if (backend === "passphrase-only") {
+      ui.notify(
+        `⚠ passphrase-only backend: init writes ~/.abrain/.vault-master.age but the reader path does NOT yet support tty pass-through (roadmap P0d). The next pi restart will fail to unlock. Prefer the default abrain-age-key backend.`,
+        "warning",
+      );
     }
+    if (backend === "ssh-key") {
+      // ssh-key is no longer auto-detected (ADR 0019); pick best guess from ~/.ssh/.
+      const home = os.homedir();
+      if (fs.existsSync(`${home}/.ssh/id_ed25519`) && fs.existsSync(`${home}/.ssh/id_ed25519.pub`)) {
+        identity = `${home}/.ssh/id_ed25519`;
+      } else if (fs.existsSync(`${home}/.ssh/id_rsa`) && fs.existsSync(`${home}/.ssh/id_rsa.pub`)) {
+        identity = `${home}/.ssh/id_rsa`;
+      } else {
+        throw new Error("ssh-key backend requires ~/.ssh/id_ed25519 or ~/.ssh/id_rsa with matching .pub; neither found.");
+      }
+    } else if (backend === "gpg-file") {
+      const probe = buildRealDeps();
+      if (probe.commandExists("gpg") && probe.gpgFirstSecretKey) {
+        identity = probe.gpgFirstSecretKey() ?? undefined;
+      }
+      if (!identity) throw new Error("gpg-file requested but no GPG secret key detected. install / import GPG identity first.");
+    }
+    // abrain-age-key: identity field stays undefined; path is fixed (~/.abrain/.vault-identity/master.age)
   } else {
-    // No --backend flag: auto-pick from detection, but only ssh-key or gpg-file
+    // ADR 0019: no --backend flag → default to abrain-age-key.
+    // detectBackend returns abrain-age-key when age-keygen is available
+    // (or already initialized); only surface a friendly error when even
+    // that prerequisite is missing.
     const detected = detectBackend(buildRealDeps());
-    if (detected.backend === "ssh-key") {
-      backend = "ssh-key";
-      identity = detected.identity;
-    } else if (detected.backend === "gpg-file") {
-      backend = "gpg-file";
-      identity = detected.gpgRecipient;
+    if (detected.backend === "abrain-age-key") {
+      backend = "abrain-age-key";
+      // identity intentionally undefined; encryptMasterKey fills it at the canonical path
     } else {
       ui.notify(
         `/vault init: cannot auto-pick backend (detected '${detected.backend}'). ` +
-        `Pass --backend=<name> explicitly. P0b non-interactive form supports ssh-key / gpg-file auto-pick.`,
+        `Default abrain-age-key needs age-keygen on PATH. Install age (\`apt install age\` / \`brew install age\`) and retry, ` +
+        `or pass --backend=<name> explicitly for a Tier 3 backend with the documented caveats.`,
         "warning",
       );
       return;
@@ -1059,7 +1085,38 @@ export async function runInit(
       );
     }
 
-    ui.notify(`encrypting master key via backend=${backend}...`, "info");
+    // ADR 0019: same defense for abrain-age-key identity secret
+    if (backend === "abrain-age-key") {
+      const identitySecretPath = path.join(abrainHome, ".vault-identity", "master.age");
+      if (fs.existsSync(identitySecretPath)) {
+        throw new Error(
+          `${identitySecretPath} already exists. Refusing to overwrite. ` +
+          `Run \`rm -rf ${path.join(abrainHome, ".vault-identity")}\` first if you really want to re-init.`,
+        );
+      }
+
+      // ADR 0019 invariant 2 — defense in depth (self-review MAJOR-2 fix,
+      // 2026-05-15): write the .gitignore guard BEFORE the identity secret
+      // lands on disk, not after. Encrypting first then patching gitignore
+      // leaves a (millisecond, but real) window where the secret exists on
+      // disk without gitignore protection. Self-review judged the window's
+      // practical risk near zero because init is a synchronous flow and the
+      // user is not going to `git add` mid-init — but defense-in-depth costs
+      // nothing and forecloses every "what if someone scripts init then
+      // immediately git-adds" edge case.
+      ensureAbrainGitignoreLines(abrainHome, [
+        "# ADR 0019: abrain-age-key identity secret — never enter git",
+        ".vault-identity/master.age",
+        ".vault-identity/master.age.tmp.*",
+      ]);
+    }
+
+    ui.notify(
+      backend === "abrain-age-key"
+        ? `installing abrain identity (backend=abrain-age-key, ADR 0019)...`
+        : `encrypting master key via backend=${backend}...`,
+      "info",
+    );
     await encryptMasterKey(backend, {
       masterSecretPath: secretKeyPath,
       masterPublicKey: publicKey,
@@ -1068,7 +1125,9 @@ export async function runInit(
       user: process.env.USER,
     }, exec);
 
-    // (3) write .vault-pubkey + .vault-backend (atomic, both files)
+    // (3) write .vault-pubkey + .vault-backend (atomic, both files).
+    // For abrain-age-key, .vault-pubkey duplicates .vault-identity/master.age.pub
+    // (ADR 0019 invariant 6) so existing vault-writer code stays unchanged.
     writePubkeyFile(abrainHome, publicKey);
     writeBackendFile(abrainHome, { backend, identity });
   } finally {
@@ -1085,6 +1144,43 @@ export async function runInit(
 const realExec: ExecFn = async (cmd, args, opts) => {
   return execCapture(cmd, args, opts);
 };
+
+/**
+ * Append the given lines to ~/.abrain/.gitignore if not already present.
+ * Idempotent: each line is checked individually; only missing ones are
+ * appended. Creates the file if absent.
+ *
+ * ADR 0019 invariant 2 enforcement: vault identity secret must never
+ * enter git. Called from runInit BEFORE the identity secret is written
+ * (defense in depth — see runInit's (2)-before-(3) ordering).
+ *
+ * Exported so smoke tests can validate the gitignore patch behavior
+ * directly without spinning up the full runInit pipeline.
+ */
+export function ensureAbrainGitignoreLines(abrainHome: string, lines: string[]): void {
+  const gi = path.join(abrainHome, ".gitignore");
+  let existing = "";
+  if (fs.existsSync(gi)) existing = fs.readFileSync(gi, "utf8");
+
+  const existingLines = new Set(existing.split(/\r?\n/).map((l) => l.trim()));
+  const toAppend: string[] = [];
+  for (const ln of lines) {
+    if (!existingLines.has(ln.trim())) toAppend.push(ln);
+  }
+  if (toAppend.length === 0) return;
+
+  const sep = existing.length > 0 && !existing.endsWith("\n") ? "\n\n" : "\n";
+  const next = existing + sep + toAppend.join("\n") + "\n";
+  // Atomic write via tmp + rename so a partial write never leaves a malformed gitignore.
+  const tmp = `${gi}.tmp.${process.pid}`;
+  fs.writeFileSync(tmp, next, { mode: 0o644 });
+  try {
+    fs.renameSync(tmp, gi);
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* best-effort */ }
+    throw e;
+  }
+}
 
 // ── /secret command handler ─────────────────────────────────────
 //
@@ -1406,12 +1502,23 @@ function readInitializedState(abrainHome: string): InitializedState | null {
     }
   } catch { /* ignore */ }
 
-  // .vault-master.age existence + mode (file backends only)
+  // .vault-master.age existence + mode (Tier 3 file backends only)
   try {
     const mkPath = path.join(abrainHome, ".vault-master.age");
     if (fs.existsSync(mkPath)) {
       result.vaultMasterPresent = true;
       result.vaultMasterMode = fs.statSync(mkPath).mode;
+    }
+  } catch { /* ignore */ }
+
+  // .vault-identity/master.age existence + mode (ADR 0019, abrain-age-key)
+  try {
+    const idPath = path.join(abrainHome, ".vault-identity", "master.age");
+    if (fs.existsSync(idPath)) {
+      result.identitySecretPresent = true;
+      result.identitySecretMode = fs.statSync(idPath).mode;
+    } else {
+      result.identitySecretPresent = false;
     }
   } catch { /* ignore */ }
 

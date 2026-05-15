@@ -64,6 +64,8 @@ Sediment writing normally happens on `agent_end`; these commands are diagnostics
 /secret forget [--global|--project=<id>] <key>
 ```
 
+`/vault init` defaults to `--backend=abrain-age-key` ([ADR 0019](../adr/0019-abrain-self-managed-vault-identity.md)): abrain self-managed age keypair, identity gitignored, no reuse of `~/.ssh/id_*`. Explicit `--backend=ssh-key | gpg-file | passphrase-only` selects a Tier 3 legacy backend and produces a stderr warning about cross-device transport burden (or, for `passphrase-only`, the unimplemented reader tty pass-through).
+
 `/secret` defaults to active project scope when bound; `--global` opts into global vault.
 
 ### `/compaction-tuner`

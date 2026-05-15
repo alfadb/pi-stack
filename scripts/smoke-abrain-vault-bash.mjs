@@ -48,7 +48,8 @@ function transpile(srcPath) {
 }
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-vault-bash-"));
-for (const file of ["vault-bash", "vault-reader", "vault-writer", "keychain"]) {
+// ADR 0019: vault-reader.ts + keychain.ts now import from ./backend-detect.
+for (const file of ["backend-detect", "vault-bash", "vault-reader", "vault-writer", "keychain"]) {
   fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
