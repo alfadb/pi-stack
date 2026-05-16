@@ -264,6 +264,47 @@ export function abrainProjectWorkflowsDir(abrainHome: string, projectId: string)
   return path.join(abrainProjectDir(abrainHome, projectId), "workflows");
 }
 
+// ── Lane G zones (ADR 0021): identity / skills / habits ───────────────────────────
+// Three top-level zones under ~/.abrain/ that hold about-me declarations
+// routed by sediment from `MEMORY-ABOUT-ME:` fences / `/about-me` slash.
+// All three sit directly under abrainHome (not under projects/), because
+// Lane G writes are *about alfadb*, cross-project.
+//   - identity/   — stable self-description (values / cognitive profile)
+//   - skills/     — technical / meta-capability inventory
+//   - habits/     — observed recurring behavioral patterns
+// Slug uniqueness is enforced ACROSS the three zones (identity+skills+
+// habits) by writeAbrainAboutMe's dedupe scan; staging entries are NOT
+// in the slug-collision space because they're date+pid+epoch-keyed,
+// not slug-keyed. See ADR 0021 invariant #1.
+export function abrainIdentityDir(abrainHome: string): string {
+  return path.join(path.resolve(abrainHome), "identity");
+}
+export function abrainSkillsDir(abrainHome: string): string {
+  return path.join(path.resolve(abrainHome), "skills");
+}
+export function abrainHabitsDir(abrainHome: string): string {
+  return path.join(path.resolve(abrainHome), "habits");
+}
+/**
+ * Resolve the Lane G writer target directory by region.
+ * Throws on unknown region — caller MUST validate the region via
+ * validateRouteDecision (ADR 0014 §3.5) before invoking the writer.
+ */
+export function abrainAboutMeDirByRegion(
+  abrainHome: string,
+  region: "identity" | "skills" | "habits",
+): string {
+  switch (region) {
+    case "identity": return abrainIdentityDir(abrainHome);
+    case "skills": return abrainSkillsDir(abrainHome);
+    case "habits": return abrainHabitsDir(abrainHome);
+    default: {
+      const r: never = region;
+      throw new Error(`abrainAboutMeDirByRegion: unknown region ${String(r)}`);
+    }
+  }
+}
+
 // ── abrain-side sediment bookkeeping ──────────────────────────────
 // Mirrors project-side `.pi-astack/sediment/{audit.jsonl, locks/}` layout under
 // `<abrainHome>/.state/sediment/` so abrain workflow writer can reuse the same
@@ -393,6 +434,26 @@ async function atomicWriteText(file: string, content: string): Promise<void> {
   } finally {
     await fsPromises.unlink(tmp).catch(() => {});
   }
+}
+
+// ── .state/ gitignore shared logic ────────────────────────────────────
+//
+// P1-2 audit fix 2026-05-16 (round 4 opus-4-7 + deepseek-v4-pro):
+// two earlier rounds had .state/ gitignore inserted in two places:
+//   (a) bindAbrainProject (this file, async, atomicWriteText)
+//   (b) ensureAbrainStateGitignored (abrain/brain-layout.ts, sync,
+//       fs.writeFileSync + renameSync)
+// Both used the same regex but as independent literals — a regex tweak
+// in one would silently diverge from the other. The constants below are
+// the single source of truth; both call sites now compose them.
+export const ABRAIN_STATE_GITIGNORE_LINE = ".state/\n";
+export const ABRAIN_STATE_GITIGNORE_REGEX: RegExp = /(^|\n)\.state\/?(\n|$)/;
+
+/** Returns the gitignore content with `.state/` ensured, or null if no
+ *  change is needed (line already present). Pure: no I/O. */
+export function computeAbrainStateGitignoreNext(raw: string): string | null {
+  if (ABRAIN_STATE_GITIGNORE_REGEX.test(raw)) return null;
+  return `${raw}${raw && !raw.endsWith("\n") ? "\n" : ""}${ABRAIN_STATE_GITIGNORE_LINE}`;
 }
 
 export interface FileLockOptions {
@@ -627,12 +688,15 @@ export async function bindAbrainProject(opts: {
     }
     localMap.projects[projectId!] = entry;
 
+    // P1-2 audit fix 2026-05-16 (round 4): use the shared pure helper
+    // computeAbrainStateGitignoreNext() instead of duplicating the
+    // regex and append logic inline. activate()'s
+    // ensureAbrainStateGitignored() composes the same helper from
+    // brain-layout.ts; both paths now share one source of truth.
     const abrainGitignorePath = path.join(path.resolve(opts.abrainHome), ".gitignore");
     const gitignoreRaw = exists(abrainGitignorePath) ? read(abrainGitignorePath, "utf-8") : "";
-    const abrainGitignoreUpdated = !/(^|\n)\.state\/?(\n|$)/.test(gitignoreRaw);
-    const gitignoreToWrite = abrainGitignoreUpdated
-      ? `${gitignoreRaw}${gitignoreRaw && !gitignoreRaw.endsWith("\n") ? "\n" : ""}.state/\n`
-      : null;
+    const gitignoreToWrite = computeAbrainStateGitignoreNext(gitignoreRaw);
+    const abrainGitignoreUpdated = gitignoreToWrite !== null;
 
     if (gitignoreToWrite !== null) {
       await atomicWriteText(abrainGitignorePath, gitignoreToWrite);

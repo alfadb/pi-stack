@@ -455,7 +455,14 @@ fs.writeFileSync(path.join(tmpDir, "keychain.cjs"), transpileTsToCjs(keychainSrc
 fs.writeFileSync(path.join(tmpDir, "vault-writer.cjs"), transpileTsToCjs(vaultWriterSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-reader.cjs"), transpileTsToCjs(vaultReaderSrc));
 fs.writeFileSync(path.join(tmpDir, "vault-bash.cjs"), transpileTsToCjs(vaultBashSrc));
-fs.writeFileSync(path.join(tmpDir, "brain-layout.cjs"), transpileTsToCjs(brainLayoutSrc));
+// brain-layout.ts now imports `../_shared/runtime` (P1-2 audit fix 2026-05-16
+// round 4: computeAbrainStateGitignoreNext helper). Mirror the same
+// require-path rewrite we apply to index.ts so brain-layout.cjs can
+// resolve the shared helper from `<tmpDir>/_shared/runtime.cjs`.
+fs.writeFileSync(
+  path.join(tmpDir, "brain-layout.cjs"),
+  transpileTsToCjs(brainLayoutSrc).replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")'),
+);
 fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts")));
 fs.writeFileSync(path.join(tmpDir, "git-sync.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/git-sync.ts")));
 // vault-reader.cjs keeps its own relative imports (./keychain, ./vault-writer),

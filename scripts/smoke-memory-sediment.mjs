@@ -182,7 +182,9 @@ async function main() {
     const { bindAbrainProject } = req("./_shared/runtime.js");
     const { runDoctorLite, formatDoctorLiteReport } = req("./memory/doctor.js");
     const { DEFAULT_SETTINGS } = req("./memory/settings.js");
-    const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow } = req("./sediment/writer.js");
+    const { archiveProjectEntry, deleteProjectEntry, mergeProjectEntries, supersedeProjectEntry, writeProjectEntry, updateProjectEntry, writeAbrainWorkflow, writeAbrainAboutMe } = req("./sediment/writer.js");
+    const { parseExplicitAboutMeBlocks, previewAboutMeExtraction } = req("./sediment/extractor.js");
+    const { validateRouteDecision, applyStagingDowngrade, RouterError, LANE_G_ALLOWED_REGIONS, ROUTING_CONFIDENCE_THRESHOLD } = req("./sediment/about-me-router.js");
     const { DEFAULT_SEDIMENT_SETTINGS } = req("./sediment/settings.js");
     // P2 fix (2026-05-14): smoke tests don't use real git repos, so disable
     // gitCommit by default. Tests that need git (migration tests) override
@@ -1923,6 +1925,632 @@ exports.streamSimple = function streamSimple(_model, opts, _config) {
       const gitLog = execFileSync("git", ["-C", wfHome, "log", "--pretty=%s"], { encoding: "utf-8" });
       const workflowCommits = gitLog.split("\n").filter((s) => s.startsWith("workflow: ")).length;
       assert(workflowCommits >= 2, `expected ≥2 workflow commits in abrain git log, got ${workflowCommits}:\n${gitLog}`);
+    }
+
+    // === Lane G writer (ADR 0021 G1: writeAbrainAboutMe + router + fence extractor) =====
+    // Strategy: fresh abrain home (git inited). Exercise writeAbrainAboutMe
+    // for the 3 happy regions + validation + router rules + sanitize +
+    // dedupe + git rollback + audit + fence extractor.
+    {
+      const amHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-am-"));
+      execFileSync("git", ["-C", amHome, "init", "-q"]);
+      execFileSync("git", ["-C", amHome, "config", "user.email", "smoke@pi-astack.local"]);
+      execFileSync("git", ["-C", amHome, "config", "user.name", "pi-astack smoke"]);
+      execFileSync("git", ["-C", amHome, "config", "commit.gpgsign", "false"]);
+      // staging needs a project dir to land observations/staging/ under
+      fs.mkdirSync(path.join(amHome, "projects", "smoke-project"), { recursive: true });
+      const amSettings = { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: true };
+
+      // ---- router: pure unit checks first (no I/O) ----------------------
+      assert(Array.isArray(LANE_G_ALLOWED_REGIONS) && LANE_G_ALLOWED_REGIONS.includes("identity") && LANE_G_ALLOWED_REGIONS.includes("skills") && LANE_G_ALLOWED_REGIONS.includes("habits") && LANE_G_ALLOWED_REGIONS.includes("staging"), "LANE_G_ALLOWED_REGIONS must include 4 regions");
+      assert(ROUTING_CONFIDENCE_THRESHOLD === 0.6, `threshold must be 0.6 per ADR 0014 §3.5, got ${ROUTING_CONFIDENCE_THRESHOLD}`);
+      // valid decision passes
+      validateRouteDecision({ lane: "about_me", chosen_region: "identity", route_candidates: ["identity"], routing_reason: "r", routing_confidence: 0.9 });
+      // rule 4: hard exclusion
+      let r4err = null;
+      try { validateRouteDecision({ lane: "about_me", chosen_region: "knowledge", route_candidates: ["knowledge"], routing_reason: "r", routing_confidence: 0.9 }); }
+      catch (e) { r4err = e; }
+      assert(r4err && r4err.name === "RouterError" && r4err.rule === 4, `rule 4 must reject knowledge: ${r4err}`);
+      // rule 1: not in allowlist (synthetic invalid region)
+      let r1err = null;
+      try { validateRouteDecision({ lane: "about_me", chosen_region: "observations", route_candidates: ["observations"], routing_reason: "r", routing_confidence: 0.9 }); }
+      catch (e) { r1err = e; }
+      assert(r1err && r1err.rule === 1, `rule 1 must reject 'observations'`);
+      // rule 2: chosen not in candidates
+      let r2err = null;
+      try { validateRouteDecision({ lane: "about_me", chosen_region: "identity", route_candidates: ["skills"], routing_reason: "r", routing_confidence: 0.9 }); }
+      catch (e) { r2err = e; }
+      assert(r2err && r2err.rule === 2, `rule 2 must reject chosen∉candidates`);
+      // rule 3: low confidence + non-staging
+      let r3err = null;
+      try { validateRouteDecision({ lane: "about_me", chosen_region: "identity", route_candidates: ["identity"], routing_reason: "r", routing_confidence: 0.4 }); }
+      catch (e) { r3err = e; }
+      assert(r3err && r3err.rule === 3, `rule 3 must reject low confidence into non-staging`);
+      // rule 6: missing reason
+      let r6err = null;
+      try { validateRouteDecision({ lane: "about_me", chosen_region: "identity", route_candidates: ["identity"], routing_reason: "", routing_confidence: 0.9 }); }
+      catch (e) { r6err = e; }
+      assert(r6err && r6err.rule === 6, `rule 6 must reject empty reason`);
+      // applyStagingDowngrade: low conf → staging, preserves original in candidates
+      const downgraded = applyStagingDowngrade({ lane: "about_me", chosen_region: "identity", route_candidates: ["identity", "habits"], routing_reason: "sample", routing_confidence: 0.3 });
+      assert(downgraded.chosen_region === "staging", `low conf should downgrade to staging, got ${downgraded.chosen_region}`);
+      assert(downgraded.route_candidates.includes("identity"), `downgrade must preserve original choice in candidates`);
+      assert(/downgraded:/.test(downgraded.routing_reason), `downgrade reason must annotate the downgrade`);
+      // applyStagingDowngrade: high conf passes through unchanged
+      const passed = applyStagingDowngrade({ lane: "about_me", chosen_region: "identity", route_candidates: ["identity"], routing_reason: "r", routing_confidence: 0.9 });
+      assert(passed.chosen_region === "identity" && passed.routing_confidence === 0.9, `high conf must pass through unchanged`);
+
+      // ---- writer: identity happy path ----------------------------------
+      const am1 = await writeAbrainAboutMe(
+        {
+          title: "I prefer fail-closed designs",
+          body: "I consistently choose designs that refuse to operate on missing inputs rather than silently degrading. Examples: vault unlock, sediment write rejection.",
+          region: "identity",
+          routingConfidence: 0.95,
+          routeCandidates: ["identity"],
+          routingReason: "strong-self-narrative-signal",
+          triggerPhrases: ["fail-closed", "fail-open"],
+          tags: ["design", "values"],
+          sessionId: "smoke-am-1",
+        },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(am1.status === "created", `identity happy path: ${JSON.stringify(am1)}`);
+      assert(am1.lane === "about_me", `lane must be about_me, got ${am1.lane}`);
+      assert(am1.region === "identity", `region must be identity, got ${am1.region}`);
+      assert(am1.path === path.join(amHome, "identity", "i-prefer-fail-closed-designs.md"), `unexpected identity path: ${am1.path}`);
+      assert(fs.existsSync(am1.path), `identity file must exist`);
+      const am1Text = fs.readFileSync(am1.path, "utf-8");
+      assert(/^id: about-me:identity:i-prefer-fail-closed-designs$/m.test(am1Text), `identity id missing:\n${am1Text}`);
+      // P0-1 audit fix 2026-05-15: scope MUST be the canonical "world"
+      // (memory/types.ts Scope binary), not "about_me" — the read-side
+      // parseEntry only accepts world|project and would silently drop
+      // any other value. region carries the Lane G sub-classification.
+      assert(/^scope: world$/m.test(am1Text), `Lane G non-staging entries must have scope: world (P0-1):\n${am1Text}`);
+      assert(!/^scope: about_me$/m.test(am1Text), `legacy scope: about_me must NOT appear (P0-1 regression)`);
+      assert(/^kind: maxim$/m.test(am1Text), `identity should map to kind=maxim`);
+      assert(/^lane: about_me$/m.test(am1Text), `lane: about_me missing in frontmatter`);
+      assert(/^region: identity$/m.test(am1Text), `region: identity missing in frontmatter`);
+      // P1-5 audit fix: routing_confidence is float-shaped 2dp, not
+      // "0.95" / "1" / "0.5" inconsistency.
+      assert(/^routing_confidence: 0\.95$/m.test(am1Text), `routing_confidence must be 0.95 (2dp float):\n${am1Text}`);
+      assert(/^routing_reason: strong-self-narrative-signal$/m.test(am1Text), `routing_reason missing`);
+      assert(/## Timeline\s*\n- .* smoke-am-1/.test(am1Text), `timeline session missing`);
+
+      // ---- writer: skills happy path → kind=fact ----
+      const am2 = await writeAbrainAboutMe(
+        {
+          title: "I am proficient in TypeScript",
+          body: "Daily driver for 4 years; comfortable with conditional types, mapped types, and complex generic constraints. Faster than Python or Go for me on most tasks.",
+          region: "skills",
+          routingConfidence: 0.85,
+          routeCandidates: ["skills"],
+          routingReason: "explicit-skill-inventory",
+          sessionId: "smoke-am-2",
+        },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(am2.status === "created" && am2.region === "skills", `skills happy: ${JSON.stringify(am2)}`);
+      const am2Text = fs.readFileSync(am2.path, "utf-8");
+      assert(/^kind: fact$/m.test(am2Text), `skills should map to kind=fact`);
+      assert(am2.path === path.join(amHome, "skills", "i-am-proficient-in-typescript.md"), `unexpected skills path: ${am2.path}`);
+
+      // ---- writer: habits happy path → kind=pattern ----
+      const am3 = await writeAbrainAboutMe(
+        {
+          title: "I run smoke before commit",
+          body: "After every code change I run the affected smoke script before staging the commit; I treat smoke pass as the minimum gate, not lint.",
+          region: "habits",
+          routingConfidence: 0.7,
+          routeCandidates: ["habits"],
+          routingReason: "observed-pattern-recurrent",
+          sessionId: "smoke-am-3",
+        },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(am3.status === "created" && am3.region === "habits", `habits happy: ${JSON.stringify(am3)}`);
+      const am3Text = fs.readFileSync(am3.path, "utf-8");
+      assert(/^kind: pattern$/m.test(am3Text), `habits should map to kind=pattern`);
+
+      // ---- writer: validation_error (short body) ----
+      const amVE = await writeAbrainAboutMe(
+        { title: "x", body: "short", region: "identity", routingConfidence: 0.9, routeCandidates: ["identity"], routingReason: "r" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amVE.status === "rejected" && amVE.reason === "validation_error", `short body must reject: ${JSON.stringify(amVE)}`);
+      assert(amVE.validationErrors.some((e) => e.field === "body"), `validationErrors must include body field`);
+
+      // ---- writer: validation_error (staging missing project) ----
+      const amVS = await writeAbrainAboutMe(
+        { title: "staging without project", body: "x".repeat(50), region: "staging", routingConfidence: 0.5, routeCandidates: ["staging"], routingReason: "low-conf-sample" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amVS.status === "rejected" && amVS.validationErrors.some((e) => e.field === "stagingProjectId"), `staging w/o project must reject`);
+
+      // ---- writer: Lane G must reject writing to knowledge ----
+      // After P0-2 audit fix (2026-05-15) the validateAboutMeDraft region
+      // enum check fires BEFORE the router, so attempts to write to
+      // knowledge/workflows/projects/vault are rejected as
+      // validation_error (fail-fast) instead of route_rejected. The
+      // router's rule 4 (LANE_G_HARD_EXCLUDED_REGIONS) is still tested
+      // directly via validateRouteDecision in the router unit checks
+      // above, so we have defense-in-depth: two independent guards.
+      const amRR = await writeAbrainAboutMe(
+        { title: "abusing knowledge as region", body: "x".repeat(50), region: "knowledge", routingConfidence: 0.9, routeCandidates: ["knowledge"], routingReason: "attempt-to-leak" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amRR.status === "rejected" && amRR.reason === "validation_error", `Lane G must reject knowledge as validation_error (P0-2): ${JSON.stringify(amRR)}`);
+      assert(amRR.validationErrors.some((e) => e.field === "region"), `validation must flag region field`);
+
+      // ---- writer: route_rejected (rule 2: chosen ∉ candidates) ----
+      // After P0-2 region enum is enforced upstream, the writer can only
+      // route_reject via the router's rule 2 (the rule 3 confidence gate
+      // is auto-resolved by applyStagingDowngrade). Synthetic case where
+      // chosen=identity but candidates only contains skills — simulates
+      // a malformed router decision (future G3 LLM output bug). The
+      // staging anchor (stagingProjectId + epoch) is supplied so the
+      // route_rejected sample lands in projects/<id>/staging/rejected/.
+      const amR2 = await writeAbrainAboutMe(
+        { title: "chosen not in candidates", body: "x".repeat(50), region: "identity", routingConfidence: 0.9, routeCandidates: ["skills"], routingReason: "synthetic-malformed", stagingProjectId: "smoke-project", stagingSessionEpoch: 1700000000000 },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amR2.status === "rejected" && amR2.reason === "route_rejected", `chosen∉candidates must route_reject: ${JSON.stringify(amR2)}`);
+      assert(amR2.routeRejected && amR2.routeRejected.rule === 2, `routeRejected.rule must be 2, got ${JSON.stringify(amR2.routeRejected)}`);
+
+      // P2-A audit fix 2026-05-16: rejected sample filename must contain
+      // the 4-segment shape `<date>--<pid>--<epoch>--<Date.now()>.md`.
+      // The earlier P0-3 fix relies on Date.now() suffix to defeat same
+      // pid+epoch+date collisions; regressing to a 3-segment filename
+      // would silently overwrite.
+      const rejectedDir = path.join(amHome, "projects", "smoke-project", "observations", "staging", "rejected");
+      assert(fs.existsSync(rejectedDir), `rejected dir must exist after route_rejected with stagingProjectId: ${rejectedDir}`);
+      const rejectedFiles = fs.readdirSync(rejectedDir).filter((f) => f.endsWith(".md"));
+      assert(rejectedFiles.length >= 1, `rejected dir must hold ≥1 file, got ${rejectedFiles.length}`);
+      // Pattern: YYYY-MM-DD--<pid>--<epoch>--<ms>.md (4 `--` segments).
+      // P1-B audit fix 2026-05-16 round 3 regression: filename ends with
+      // an 8-hex crypto suffix (`--${randomBytes(4).toString("hex")}.md`)
+      // so concurrent same-ms writes don't collide.
+      assert(
+        rejectedFiles.every((f) => /^\d{4}-\d{2}-\d{2}--\d+--\d+--\d+--[0-9a-f]{8}\.md$/.test(f)),
+        `rejected filenames must have 5-segment shape <date>--<pid>--<epoch>--<ms>--<hex8>.md (P0-3 + P1-B), got: ${rejectedFiles.join(", ")}`,
+      );
+
+      // P1-E audit fix 2026-05-16 regression: route_rejected without
+      // stagingProjectId must land in <abrainHome>/.state/sediment/
+      // orphan-rejects/ rather than silently dropping the input.
+      const amR2Orphan = await writeAbrainAboutMe(
+        { title: "chosen not in candidates orphan", body: "x".repeat(50), region: "identity", routingConfidence: 0.9, routeCandidates: ["skills"], routingReason: "synthetic-orphan" /* no stagingProjectId */ },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amR2Orphan.status === "rejected" && amR2Orphan.reason === "route_rejected", `orphan route_reject expected: ${JSON.stringify(amR2Orphan)}`);
+      const orphanDir = path.join(amHome, ".state", "sediment", "orphan-rejects");
+      assert(fs.existsSync(orphanDir), `orphan-rejects dir must be created when stagingProjectId absent (P1-E): ${orphanDir}`);
+      const orphanFiles = fs.readdirSync(orphanDir).filter((f) => f.endsWith(".md"));
+      assert(orphanFiles.length >= 1, `orphan-rejects must hold ≥1 sample, got ${orphanFiles.length}`);
+
+      // P1-C audit fix 2026-05-16 regression: out-of-range / non-finite
+      // routingConfidence must fail-fast as validation_error — symmetric
+      // with the region enum gate, so the router doesn't burn a sample.
+      const amBadConf1 = await writeAbrainAboutMe(
+        { title: "conf out of range", body: "x".repeat(50), region: "identity", routingConfidence: 1.5, routeCandidates: ["identity"], routingReason: "r" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amBadConf1.status === "rejected" && amBadConf1.reason === "validation_error", `conf=1.5 must validation_error (P1-C): ${JSON.stringify(amBadConf1)}`);
+      assert(amBadConf1.validationErrors.some((e) => e.field === "routingConfidence"), `validationErrors must flag routingConfidence field`);
+      const amBadConf2 = await writeAbrainAboutMe(
+        { title: "conf nan", body: "x".repeat(50), region: "identity", routingConfidence: NaN, routeCandidates: ["identity"], routingReason: "r" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amBadConf2.status === "rejected" && amBadConf2.reason === "validation_error", `conf=NaN must validation_error (P1-C): ${JSON.stringify(amBadConf2)}`);
+
+      // P2-D audit fix 2026-05-16: ADR 0021 invariant #4 — Lane G never
+      // writes vault. Region="vault" is now blocked by region enum, but
+      // a direct positive smoke pins the contract so future loosening
+      // of the enum can't silently re-enable it.
+      const amVaultReject = await writeAbrainAboutMe(
+        { title: "sneak vault into about-me", body: "x".repeat(50), region: "vault", routingConfidence: 0.9, routeCandidates: ["vault"], routingReason: "attempt-vault-leak" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amVaultReject.status === "rejected" && amVaultReject.reason === "validation_error" && amVaultReject.validationErrors.some((e) => e.field === "region"), `region=vault must reject (ADR 0021 inv #4): ${JSON.stringify(amVaultReject)}`);
+
+      // P0-A audit fix 2026-05-16 regression: staging happy path must
+      // include Date.now() in the filename. Two staging writes with the
+      // SAME pid + sessionEpoch + date land in DIFFERENT files (not
+      // silent overwrite). Previously the filename was
+      // `<date>--<pid>--<epoch>.md` and the second write would rename
+      // over the first via atomicWrite.
+      const stagingDir = path.join(amHome, "projects", "smoke-project", "observations", "staging");
+      const stagingBefore = fs.existsSync(stagingDir) ? fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md")).length : 0;
+      const amStg1 = await writeAbrainAboutMe(
+        { title: "first low-conf sample", body: "x".repeat(50), region: "identity", routingConfidence: 0.3, routeCandidates: ["identity", "habits"], routingReason: "first-ambiguous", stagingProjectId: "smoke-project", stagingSessionEpoch: 1700000000099 },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      const amStg2 = await writeAbrainAboutMe(
+        { title: "second low-conf sample", body: "y".repeat(50), region: "identity", routingConfidence: 0.3, routeCandidates: ["identity", "habits"], routingReason: "second-ambiguous", stagingProjectId: "smoke-project", stagingSessionEpoch: 1700000000099 /* same epoch! */ },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amStg1.status === "created" && amStg2.status === "created", `both staging writes must succeed: ${JSON.stringify({a:amStg1, b:amStg2})}`);
+      assert(amStg1.path !== amStg2.path, `P0-A: same-epoch staging writes MUST have distinct paths, got identical: ${amStg1.path}`);
+      const stagingAfter = fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md")).length;
+      assert(stagingAfter - stagingBefore >= 2, `staging dir must hold both writes (no silent overwrite): before=${stagingBefore} after=${stagingAfter}`);
+      // Both must match 5-segment filename shape (P1-B regression: hex suffix).
+      const stgFiles = fs.readdirSync(stagingDir).filter((f) => f.endsWith(".md"));
+      assert(
+        stgFiles.every((f) => /^\d{4}-\d{2}-\d{2}--\d+--\d+--\d+--[0-9a-f]{8}\.md$/.test(f)),
+        `staging filenames must be 5-segment <date>--<pid>--<epoch>--<ms>--<hex8>.md (P0-A + P1-B): ${stgFiles.join(", ")}`,
+      );
+
+      // P0-1 audit fix 2026-05-16 round 3 regression: router downgrade
+      // to staging when caller did NOT supply stagingProjectId must be
+      // returned as a validation_error (NOT an unhandled throw). G2
+      // wire-up triggers this on every low-confidence fence because the
+      // extractor doesn't supply stagingProjectId.
+      let amDowngradeCrash = null;
+      let amDowngradeRes = null;
+      try {
+        amDowngradeRes = await writeAbrainAboutMe(
+          {
+            title: "low conf without project anchor",
+            body: "x".repeat(50),
+            region: "identity",
+            routingConfidence: 0.3,  // < threshold → router downgrades to staging
+            routeCandidates: ["identity"],
+            routingReason: "ambiguous-no-project",
+            /* no stagingProjectId, no stagingSessionEpoch — G2 fence path */
+          },
+          { abrainHome: amHome, settings: amSettings },
+        );
+      } catch (e) {
+        amDowngradeCrash = e;
+      }
+      assert(amDowngradeCrash === null, `P0-1: router-downgrade path with missing stagingProjectId MUST return result, not throw: ${amDowngradeCrash && amDowngradeCrash.message}`);
+      assert(amDowngradeRes && amDowngradeRes.status === "rejected" && amDowngradeRes.reason === "validation_error", `P0-1: downgrade-missing-project must be validation_error: ${JSON.stringify(amDowngradeRes)}`);
+      assert(amDowngradeRes.validationErrors && amDowngradeRes.validationErrors.some((e) => e.field === "stagingProjectId"), `P0-1: validationErrors must flag stagingProjectId field`);
+
+      // ---- writer: low confidence → auto-downgrade to staging ----
+      const amLC = await writeAbrainAboutMe(
+        {
+          title: "I might prefer functional style sometimes",
+          body: "This is a wobbly signal: I write FP-ish code on Tuesdays and OOP on Fridays. Could be situational, could be identity, sediment isn't sure.",
+          region: "identity",
+          routingConfidence: 0.4,
+          routeCandidates: ["identity", "habits"],
+          routingReason: "ambiguous-aboutness",
+          stagingProjectId: "smoke-project",
+          stagingSessionEpoch: 1700000000000,
+          sessionId: "smoke-am-lc",
+        },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amLC.status === "created", `low-conf downgrade to staging should create: ${JSON.stringify(amLC)}`);
+      assert(amLC.region === "staging", `region must be staging after downgrade, got ${amLC.region}`);
+      assert(/observations\/staging\//.test(amLC.path) || /observations\\staging\\/.test(amLC.path), `staging path must contain observations/staging/: ${amLC.path}`);
+      const stagingText = fs.readFileSync(amLC.path, "utf-8");
+      // P0-1 audit fix: staging entries are physically under projects/<id>/
+      // so they're project-scoped (so review-staging walker / facade can
+      // filter them out from facade results per spec §3.5).
+      assert(/^scope: project$/m.test(stagingText), `staging frontmatter must have scope: project (P0-1):\n${stagingText}`);
+      assert(/^region: staging$/m.test(stagingText), `staging frontmatter region missing`);
+      // route_candidates must preserve original choice for downstream review
+      assert(/route_candidates:\s*\n\s*-\s*identity/m.test(stagingText), `staging entry must preserve original 'identity' in candidates`);
+
+      // ---- writer: dedupe across zones (identity slug vs skills same slug) ----
+      const amD1 = await writeAbrainAboutMe(
+        { title: "Cross-zone slug collision sample", body: "x".repeat(50), region: "identity", routingConfidence: 0.9, routeCandidates: ["identity"], routingReason: "r" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amD1.status === "created", `first cross-zone write should create`);
+      const amD2 = await writeAbrainAboutMe(
+        { title: "Cross-zone slug collision sample", body: "x".repeat(50), region: "skills", routingConfidence: 0.9, routeCandidates: ["skills"], routingReason: "r" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amD2.status === "rejected" && amD2.reason === "duplicate_slug", `same slug across zones must reject: ${JSON.stringify(amD2)}`);
+
+      // ---- writer: sanitize secret in body → redacted + created ----
+      const fakeKey = "AKIA" + "IOSFODNN7EXAMPLE";
+      const amSec = await writeAbrainAboutMe(
+        {
+          title: "I keep my AWS creds in env vars",
+          body: `As a rule I never commit raw access keys; example pattern to avoid: ${fakeKey} in source code.`,
+          region: "habits",
+          routingConfidence: 0.9,
+          routeCandidates: ["habits"],
+          routingReason: "explicit-security-habit",
+        },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amSec.status === "created", `sanitize should redact + create: ${JSON.stringify(amSec)}`);
+      const amSecText = fs.readFileSync(amSec.path, "utf-8");
+      assert(amSecText.includes("[SECRET:aws_access_key]") && !amSecText.includes(fakeKey), `body secret must be redacted`);
+
+      // ---- P0-2 audit fix 2026-05-15: writer rejects region=undefined ----
+      // ExtractedAboutMeDraft.region is `?: AboutMeRegion` (optional),
+      // so the G2 fence-extractor wire-up could feed region=undefined.
+      // validateAboutMeDraft must catch this with a clear validation_error
+      // instead of letting kindByRegion[undefined] silently produce a
+      // frontmatter `kind: undefined` literal.
+      const amBadRegion = await writeAbrainAboutMe(
+        { title: "missing region", body: "x".repeat(50), /* region: */ routingConfidence: 0.9, routeCandidates: ["identity"], routingReason: "r" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amBadRegion.status === "rejected" && amBadRegion.reason === "validation_error", `missing region must reject as validation_error, got: ${JSON.stringify(amBadRegion)}`);
+      assert(amBadRegion.validationErrors.some((e) => e.field === "region"), `validationErrors must include region field`);
+      // Also reject a region=string-but-not-in-enum (e.g. lowercase typo
+      // that bypassed the extractor by being injected programmatically).
+      const amBadRegion2 = await writeAbrainAboutMe(
+        { title: "bad region literal", body: "x".repeat(50), region: "projects", routingConfidence: 0.9, routeCandidates: ["projects"], routingReason: "r" },
+        { abrainHome: amHome, settings: amSettings },
+      );
+      assert(amBadRegion2.status === "rejected" && amBadRegion2.reason === "validation_error", `bogus region must reject as validation_error before router, got: ${JSON.stringify(amBadRegion2)}`);
+
+      // ---- writer: dry-run does not write ----
+      const amDR = await writeAbrainAboutMe(
+        { title: "dry run sample", body: "x".repeat(50), region: "identity", routingConfidence: 0.9, routeCandidates: ["identity"], routingReason: "r" },
+        { abrainHome: amHome, settings: amSettings, dryRun: true },
+      );
+      assert(amDR.status === "dry_run", `dry-run status mismatch: ${JSON.stringify(amDR)}`);
+      assert(!fs.existsSync(amDR.path), `dry-run must not write file: ${amDR.path}`);
+
+      // ---- audit: lane=about_me, git commits with 'about-me:' prefix ----
+      const amAuditPath = path.join(amHome, ".state", "sediment", "audit.jsonl");
+      assert(fs.existsSync(amAuditPath), `about-me audit jsonl missing`);
+      const amAuditRows = fs.readFileSync(amAuditPath, "utf-8").trim().split("\n").map((l) => JSON.parse(l));
+      assert(amAuditRows.every((r) => r.lane === "about_me"), `every Lane G audit row must be lane=about_me, got: ${[...new Set(amAuditRows.map((r) => r.lane))].join(",")}`);
+      const ops = new Set(amAuditRows.map((r) => r.operation));
+      assert(ops.has("create") && ops.has("reject") && ops.has("route_rejected") && ops.has("dry_run"), `audit must cover create/reject/route_rejected/dry_run, got: ${[...ops].join(",")}`);
+      const amGitLog = execFileSync("git", ["-C", amHome, "log", "--pretty=%s"], { encoding: "utf-8" });
+      const aboutMeCommits = amGitLog.split("\n").filter((s) => s.startsWith("about-me: ")).length;
+      assert(aboutMeCommits >= 3, `expected ≥3 about-me commits, got ${aboutMeCommits}:\n${amGitLog}`);
+
+      // ---- fence extractor: parse MEMORY-ABOUT-ME blocks ----
+      const transcript = [
+        "Some pre-amble text.",
+        "",
+        "MEMORY-ABOUT-ME:",
+        "title: I prefer explicit over implicit",
+        "region: identity",
+        "confidence: 0.9",
+        "trigger_phrases: explicit, implicit",
+        "tags: design, taste",
+        "---",
+        "# I prefer explicit over implicit",
+        "",
+        "In every code review I default to flagging implicit coercion / implicit type widening / implicit error swallowing.",
+        "END_MEMORY",
+        "",
+        "More transcript.",
+        "",
+        "```",
+        "MEMORY-ABOUT-ME:",
+        "title: this is inside a fenced block",
+        "region: identity",
+        "---",
+        "this should NOT be extracted as a fence is open",
+        "END_MEMORY",
+        "```",
+        "",
+        "MEMORY-ABOUT-ME:",
+        "title: bad region typo",
+        "region: identitiy", // typo, should be skipped
+        "---",
+        "should be dropped by region whitelist guard",
+        "END_MEMORY",
+      ].join("\n");
+      const fences = parseExplicitAboutMeBlocks(transcript);
+      assert(fences.length === 1, `should extract exactly 1 valid fence (other 2 dropped): got ${fences.length}\n${JSON.stringify(fences, null, 2)}`);
+      assert(fences[0].title === "I prefer explicit over implicit", `title mismatch: ${fences[0].title}`);
+      assert(fences[0].region === "identity", `region mismatch: ${fences[0].region}`);
+      assert(fences[0].routingConfidence === 0.9, `confidence mismatch: ${fences[0].routingConfidence}`);
+      assert(Array.isArray(fences[0].triggerPhrases) && fences[0].triggerPhrases.includes("explicit"), `triggerPhrases parse failed`);
+      assert(Array.isArray(fences[0].tags) && fences[0].tags.includes("design"), `tags parse failed`);
+      const fencePreview = previewAboutMeExtraction(fences);
+      assert(fencePreview.count === 1 && fencePreview.drafts[0].headerFields.includes("region"), `preview shape mismatch`);
+
+      // ---- fence extractor: empty input + only-fenced-code input → 0 fences ----
+      assert(parseExplicitAboutMeBlocks("").length === 0, `empty input should yield 0 fences`);
+      assert(parseExplicitAboutMeBlocks("```\nMEMORY-ABOUT-ME:\ntitle: x\nregion: identity\n---\nbody\nEND_MEMORY\n```\n").length === 0, `only-fenced-code should yield 0 fences`);
+
+      // ---- P2-11 audit fix 2026-05-15: parseEntry round-trip ----
+      // The Lane G writer produces frontmatter that the memory/parser.ts
+      // read-side must understand. Previously this gap let P0-1 (scope:
+      // about_me silently dropped) slip past G1 fixture. Round-trip the
+      // identity / skills / habits entries we just wrote and assert the
+      // parsed view exposes:
+      //   - canonical scope ("world" for identity/skills/habits)
+      //   - canonical kind (maxim/fact/pattern — from kindByRegion)
+      //   - region preserved in entry.frontmatter (Lane G sub-class)
+      //   - routing_confidence reads back as a float (string-typed in
+      //     frontmatter dict because parseFrontmatter doesn't coerce,
+      //     but should round-trip the 2dp shape).
+      const { parseEntry } = req("./memory/parser.js");
+      const worldStore = { scope: "world", root: amHome, label: "world" };
+      const projectStore = { scope: "project", root: path.join(amHome, "projects", "smoke-project"), label: "abrain-project" };
+
+      const am1Parsed = await parseEntry(am1.path, worldStore, amHome);
+      assert(am1Parsed, `parseEntry must yield identity entry: ${am1.path}`);
+      assert(am1Parsed.scope === "world", `identity entry must read back as scope:world, got ${am1Parsed.scope}`);
+      assert(am1Parsed.kind === "maxim", `identity entry must read back as kind=maxim, got ${am1Parsed.kind}`);
+      assert(am1Parsed.slug === "i-prefer-fail-closed-designs", `identity slug mismatch: ${am1Parsed.slug}`);
+      assert(am1Parsed.frontmatter && am1Parsed.frontmatter.region === "identity", `parseEntry must surface region=identity in frontmatter dict, got: ${JSON.stringify(am1Parsed.frontmatter && am1Parsed.frontmatter.region)}`);
+      assert(am1Parsed.frontmatter && am1Parsed.frontmatter.lane === "about_me", `parseEntry must surface lane=about_me, got: ${JSON.stringify(am1Parsed.frontmatter && am1Parsed.frontmatter.lane)}`);
+      assert(!am1Parsed.legacyKind, `identity entry must NOT have legacyKind (kind=maxim is canonical), got: ${am1Parsed.legacyKind}`);
+
+      const am2Parsed = await parseEntry(am2.path, worldStore, amHome);
+      assert(am2Parsed && am2Parsed.scope === "world" && am2Parsed.kind === "fact", `skills entry round-trip mismatch: ${JSON.stringify(am2Parsed)}`);
+      assert(am2Parsed.frontmatter.region === "skills", `skills entry frontmatter.region mismatch`);
+
+      const am3Parsed = await parseEntry(am3.path, worldStore, amHome);
+      assert(am3Parsed && am3Parsed.scope === "world" && am3Parsed.kind === "pattern", `habits entry round-trip mismatch: ${JSON.stringify(am3Parsed)}`);
+      assert(am3Parsed.frontmatter.region === "habits", `habits entry frontmatter.region mismatch`);
+
+      // Staging entry: project-scoped (lives under projects/<id>/observations/staging/)
+      const amLCParsed = await parseEntry(amLC.path, projectStore, amHome);
+      assert(amLCParsed, `staging entry must parse: ${amLC.path}`);
+      assert(amLCParsed.scope === "project", `staging entry must read back as scope:project, got ${amLCParsed.scope}`);
+      assert(amLCParsed.frontmatter.region === "staging", `staging entry must have region: staging in frontmatter`);
+
+      // ---- P2-B + P2-C audit fix 2026-05-16: full-pipeline scanStore ----
+      // Pin ADR 0021 invariants #6 (Lane G entries discoverable in
+      // world walker) + #7 (staging excluded from facade). Without
+      // these, a future regression of WORLD_EXTRA_IGNORE_DIRS or
+      // STAGING_IGNORE_REL_PATHS would slip past the per-component
+      // smoke layers.
+      const { scanStore } = req("./memory/parser.js");
+      const memSettings = { includeWorld: true, defaultLimit: 20, maxLimit: 50, maxEntries: 2000, projectBoost: 1.5, shortTermTtlDays: 30, search: { stagePool: 8, stage1Limit: 4, stage2Limit: 4, model: undefined } };
+
+      // P2-C: world walker must surface identity/skills/habits entries.
+      const worldEntries = await scanStore({ scope: "world", root: amHome, label: "world" }, amHome, memSettings);
+      const worldSlugs = new Set(worldEntries.map((e) => e.slug));
+      assert(worldSlugs.has("i-prefer-fail-closed-designs"), `world scan MUST surface identity entry slug (ADR 0021 inv #6): got ${[...worldSlugs].join(", ")}`);
+      assert(worldSlugs.has("i-am-proficient-in-typescript"), `world scan MUST surface skills entry slug`);
+      assert(worldSlugs.has("i-run-smoke-before-commit"), `world scan MUST surface habits entry slug`);
+      // P2-B: world scan MUST NOT include staging entries (they live
+      // under projects/<id>/ which is in WORLD_EXTRA_IGNORE_DIRS).
+      assert(
+        !worldEntries.some((e) => e.frontmatter && e.frontmatter.region === "staging"),
+        `world scan MUST NOT include staging entries: ${worldEntries.filter((e) => e.frontmatter && e.frontmatter.region === "staging").map((e) => e.slug).join(", ")}`,
+      );
+
+      // P2-B: project walker MUST exclude observations/staging/ entries.
+      // (Project store root = ~/.abrain/projects/<id>/; staging entries
+      // are at observations/staging/. Without STAGING_IGNORE_REL_PATHS
+      // they'd land in memory_search rerank candidates.)
+      const projectEntries = await scanStore({ scope: "project", root: path.join(amHome, "projects", "smoke-project"), label: "abrain-project" }, amHome, memSettings);
+      // P2-C audit fix 2026-05-16 round 3: dual-layer detection. Original
+      // check used `entry.frontmatter.region === "staging"` which would
+      // false-negative if parseEntry returned null (degraded frontmatter
+      // → silent pass). Path-based check catches walker leaks even when
+      // parsing failed downstream.
+      const stagingByFrontmatter = projectEntries.filter((e) => e.frontmatter && e.frontmatter.region === "staging");
+      assert(
+        stagingByFrontmatter.length === 0,
+        `project scan MUST exclude staging entries by frontmatter (ADR 0021 inv #7): found ${stagingByFrontmatter.length}: ${stagingByFrontmatter.map((e) => e.slug).join(", ")}`,
+      );
+      const stagingByPath = projectEntries.filter((e) => /[/\\]observations[/\\]staging[/\\]/.test(e.sourcePath || ""));
+      assert(
+        stagingByPath.length === 0,
+        `project scan MUST exclude staging entries by sourcePath (P2-C dual-layer): found ${stagingByPath.length}: ${stagingByPath.map((e) => e.sourcePath).join(", ")}`,
+      );
+      // Sanity: at least amStg1/amStg2 staging files are on disk in this
+      // store root, so a 0-result scan really proves the exclusion (not
+      // "there are no files to find").
+      const projectStagingDirNow = path.join(amHome, "projects", "smoke-project", "observations", "staging");
+      const onDiskStagingMd = fs.readdirSync(projectStagingDirNow).filter((f) => f.endsWith(".md")).length;
+      assert(onDiskStagingMd >= 2, `precondition: at least 2 staging .md must exist on disk to make exclusion test meaningful (got ${onDiskStagingMd})`);
+
+      // P1-A audit fix 2026-05-16 round 3 regression: listFilesWithRg is
+      // a GENERIC markdown enumerator (lint.ts / migrate.ts also use it).
+      // staging exclusion must be opt-in via opts.excludeStaging — NOT
+      // hardcoded. Verify by calling listFilesWithRg WITHOUT excludeStaging
+      // on the project root; staging files MUST appear in the result
+      // (because lint / migrate / future review-staging need them).
+      const { listFilesWithRg } = req("./memory/parser.js");
+      const projectRoot = path.join(amHome, "projects", "smoke-project");
+      const filesAll = await listFilesWithRg(projectRoot);
+      // listFilesWithRg may return null if rg is unavailable; smoke env
+      // has rg so we expect a list. If rg missing, skip this assertion
+      // (walker fallback path is separately tested above).
+      if (Array.isArray(filesAll)) {
+        const stagingInAll = filesAll.filter((f) => /observations\/staging\//.test(f.replace(/\\/g, "/")));
+        assert(stagingInAll.length >= 1, `P1-A: listFilesWithRg without excludeStaging MUST include staging files (generic enumerator not polluted), got 0 staging files out of ${filesAll.length}`);
+        const filesExcl = await listFilesWithRg(projectRoot, undefined, { excludeStaging: true });
+        if (Array.isArray(filesExcl)) {
+          const stagingInExcl = filesExcl.filter((f) => /observations\/staging\//.test(f.replace(/\\/g, "/")));
+          assert(stagingInExcl.length === 0, `P1-A: listFilesWithRg with excludeStaging MUST drop staging files, got ${stagingInExcl.length}`);
+        }
+      }
+
+      // P1-C audit fix 2026-05-16 round 3 regression: ensureAbrainState­
+      // Gitignored must write `.state/` to abrainHome/.gitignore when
+      // missing, and be idempotent on subsequent calls. brain-layout.ts
+      // is not in transpileExtensions dirs (abrain extension transpile
+      // has separate smoke files), but it has zero external deps EXCEPT
+      // for `../_shared/runtime` (P1-2 round 4 audit: helper moved to
+      // shared layer for single source of truth). We write the ad-hoc
+      // .js at <outRoot>/abrain/brain-layout.js so the relative
+      // `../_shared/runtime` import resolves to the already-transpiled
+      // _shared/runtime.js (from transpileExtensions).
+      const brainLayoutTsPath = path.join(repoRoot, "extensions", "abrain", "brain-layout.ts");
+      const brainLayoutOutDir = path.join(outRoot, "abrain");
+      fs.mkdirSync(brainLayoutOutDir, { recursive: true });
+      const brainLayoutOutPath = path.join(brainLayoutOutDir, "brain-layout.js");
+      const blSrc = fs.readFileSync(brainLayoutTsPath, "utf-8");
+      const blOut = ts.transpileModule(blSrc, {
+        compilerOptions: {
+          target: ts.ScriptTarget.ES2022,
+          module: ts.ModuleKind.CommonJS,
+          moduleResolution: ts.ModuleResolutionKind.NodeNext,
+          esModuleInterop: true,
+          skipLibCheck: true,
+        },
+      }).outputText;
+      fs.writeFileSync(brainLayoutOutPath, blOut, "utf-8");
+      const { ensureAbrainStateGitignored } = require(brainLayoutOutPath);
+      // Fresh abrain home (writable .gitignore guaranteed not to contain .state/).
+      const giHome = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-gi-"));
+      const r1 = ensureAbrainStateGitignored(giHome);
+      assert(r1.updated === true, `P1-C: first call must update .gitignore: ${JSON.stringify(r1)}`);
+      const giContent1 = fs.readFileSync(path.join(giHome, ".gitignore"), "utf-8");
+      assert(/(^|\n)\.state\/?(\n|$)/.test(giContent1), `P1-C: .gitignore must contain .state/ line:\n${giContent1}`);
+      const r2 = ensureAbrainStateGitignored(giHome);
+      assert(r2.updated === false, `P1-C: second call must be no-op (idempotent): ${JSON.stringify(r2)}`);
+      const giContent2 = fs.readFileSync(path.join(giHome, ".gitignore"), "utf-8");
+      assert(giContent1 === giContent2, `P1-C: idempotent call must not change file content`);
+      // Pre-existing non-empty .gitignore must be appended, not overwritten.
+      const giHome2 = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-gi-"));
+      fs.writeFileSync(path.join(giHome2, ".gitignore"), "node_modules/\n", "utf-8");
+      ensureAbrainStateGitignored(giHome2);
+      const giContent3 = fs.readFileSync(path.join(giHome2, ".gitignore"), "utf-8");
+      assert(giContent3.includes("node_modules/") && /(^|\n)\.state\/?(\n|$)/.test(giContent3), `P1-C: must preserve existing content + append .state/:\n${giContent3}`);
+
+      // P1-1 audit fix 2026-05-16 (round 4 deepseek-v4-pro): about-me
+      // git rollback path has identical code to writeAbrainWorkflow's
+      // orphan-cleanup (writer.ts:~2411-2433) but NO smoke fixture forced
+      // gitCommit to fail. Without this regression test, a future bug in
+      // the rollback path (wrong path.relative arg, mis-typed fs.unlink
+      // target, etc.) would silently slip through. Mirrors the workflow
+      // orphan-cleanup smoke at ~L4790 of this file.
+      //
+      // Strategy: write to a tmpdir that is NOT git-inited; gitCommit:
+      // true forces gitCommitAbrainAboutMe's `git -C <abrainHome> add`
+      // to fail → git === null → rollback branch fires.
+      const amFailRoot = fs.mkdtempSync(path.join(os.tmpdir(), "pi-astack-smoke-am-orphan-"));
+      // do NOT git init: gitCommitAbrainAboutMe's `git add` will fail
+      // because amFailRoot is not a git repo.
+      const amFailSettings = { ...DEFAULT_SEDIMENT_SETTINGS, gitCommit: true };
+      const amOrphan = await writeAbrainAboutMe(
+        {
+          title: "Orphan Cleanup Probe AboutMe",
+          body: "this body is long enough for about-me validation gate (≥20 chars)",
+          region: "identity",
+          routingConfidence: 0.9,
+          routeCandidates: ["identity"],
+          routingReason: "orphan-test",
+          sessionId: "smoke-am-orphan",
+        },
+        { abrainHome: amFailRoot, settings: amFailSettings },
+      );
+      assert(
+        amOrphan.status === "rejected" && amOrphan.reason === "git_commit_failed",
+        `P1-1: gitCommit-null path must reject + cleanup, got: ${JSON.stringify(amOrphan)}`,
+      );
+      // File must be unlinked (no orphan on disk).
+      const amOrphanTarget = path.join(amFailRoot, "identity", "orphan-cleanup-probe-aboutme.md");
+      assert(
+        !fs.existsSync(amOrphanTarget),
+        `P1-1: orphan file must be cleaned, but still exists: ${amOrphanTarget}`,
+      );
+      // Audit row must record the orphan cleanup with about_me lane.
+      const amOrphanAuditPath = path.join(amFailRoot, ".state", "sediment", "audit.jsonl");
+      assert(fs.existsSync(amOrphanAuditPath), `P1-1: audit jsonl must exist after orphan cleanup`);
+      const amOrphanRows = fs.readFileSync(amOrphanAuditPath, "utf-8").trim().split("\n").filter(Boolean).map(JSON.parse);
+      const amOrphanRow = amOrphanRows.find((r) => r.reason === "git_commit_failed_orphan_cleaned");
+      assert(
+        amOrphanRow,
+        `P1-1: audit must contain git_commit_failed_orphan_cleaned row, got: ${amOrphanRows.map((r) => r.operation + "/" + (r.reason || "")).join(",")}`,
+      );
+      assert(amOrphanRow.lane === "about_me", `P1-1: rollback audit row must carry lane=about_me, got: ${amOrphanRow.lane}`);
+      fs.rmSync(amFailRoot, { recursive: true, force: true });
     }
 
     // === per-repo migration --go (B4) ====================================

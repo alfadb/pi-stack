@@ -28,6 +28,20 @@ const IGNORE_DIRS = new Set([
 // rg is missing/timeout/failed.
 const WORLD_EXTRA_IGNORE_DIRS = new Set(["projects", "vault"]);
 
+// Project store STAGING exclusion (ADR 0021 invariant #7 + ADR 0014 §3.5
+// staging lifecycle): the Lane G router downgrades low-confidence about-me
+// samples into `projects/<id>/observations/staging/`, where they wait for
+// G4 `review-staging` triage. Until reviewed they MUST NOT enter
+// memory_search rerank candidates — they're unclassified noise from the
+// LLM-facing view. `observations/staging` + `observations/staging/rejected`
+// are both relpath-anchored under the project store root. Matched in two
+// layers: listFilesWithRg --glob (primary path), walkMarkdownFiles
+// opts.ignoreRelPaths (fallback when rg missing).
+const STAGING_IGNORE_REL_PATHS = new Set<string>([
+  "observations/staging",
+  "observations/staging/rejected",
+]);
+
 // Canonical kind/status enum guard (read side). The write side
 // (sediment/validation.ts::ENTRY_KINDS / ENTRY_STATUSES) is the source of
 // truth; we mirror it here ONLY for normalization so the LLM-facing card
@@ -613,8 +627,26 @@ export async function parseEntry(file: string, store: StoreRef, cwd: string): Pr
 export async function listFilesWithRg(
   root: string,
   signal?: AbortSignal,
-  opts: { includeIgnored?: boolean } = {},
+  opts: { includeIgnored?: boolean; excludeStaging?: boolean } = {},
 ): Promise<string[] | null> {
+  // P1-A audit fix 2026-05-16 (round 3, gpt-5.5): staging exclusion is
+  // now opt-in. Previously it was hardcoded — but listFilesWithRg is a
+  // GENERIC markdown enumerator used by lint.ts::markdownFilesForTarget,
+  // migrate.ts, and migrate-go.ts. Hardcoding facade policy here
+  // polluted lint / migrate enumeration: `pi memory lint <target>`
+  // would skip any observations/staging/ subtree even when the user
+  // wants to lint them (G4 review-staging will need this). Caller in
+  // scanStore (project store) explicitly opts in; other callers don't.
+  const stagingGlobs = opts.excludeStaging
+    ? [
+        // Defense-in-depth (P2-B audit note 2026-05-16): the second
+        // pattern is a strict subset of the first (** is recursive), so
+        // technically redundant; kept as an explicit declaration for
+        // grep-ability when readers search for "rejected".
+        "!**/observations/staging/**",
+        "!**/observations/staging/rejected/**",
+      ]
+    : [];
   try {
     const { stdout } = await execFileAsync(
       "rg",
@@ -631,6 +663,7 @@ export async function listFilesWithRg(
         // curator neighbor pool.
         "--glob", "!**/projects/**",
         "--glob", "!**/vault/**",
+        ...stagingGlobs.flatMap((g) => ["--glob", g]),
         root,
       ],
       { signal, timeout: 3_000, maxBuffer: 2 * 1024 * 1024 },
@@ -645,14 +678,25 @@ export async function walkMarkdownFiles(
   root: string,
   maxEntries: number,
   signal?: AbortSignal,
-  opts: { extraIgnoreDirs?: Set<string> } = {},
+  opts: { extraIgnoreDirs?: Set<string>; ignoreRelPaths?: ReadonlySet<string> } = {},
 ): Promise<string[]> {
   const out: string[] = [];
   const extraIgnore = opts.extraIgnoreDirs;
+  const ignoreRelPaths = opts.ignoreRelPaths;
 
   async function walk(dir: string) {
     throwIfAborted(signal);
     if (out.length >= maxEntries) return;
+
+    // Relpath-anchored skip (ADR 0021 invariant #7 mirror of rg --glob
+    // staging exclusion). Different from `extraIgnoreDirs` (basename-only)
+    // because basename `"staging"` would over-match any directory called
+    // "staging" anywhere; we want only `observations/staging` under the
+    // store root.
+    if (ignoreRelPaths) {
+      const rel = path.relative(root, dir).replace(/\\/g, "/");
+      if (ignoreRelPaths.has(rel)) return;
+    }
 
     let entries: fsSync.Dirent[];
     try {
@@ -687,13 +731,23 @@ export async function scanStore(
   signal?: AbortSignal,
 ): Promise<MemoryEntry[]> {
   throwIfAborted(signal);
-  const rgFiles = await listFilesWithRg(store.root, signal);
+  // P1-A audit fix 2026-05-16 (round 3): only project store opts into
+  // staging exclusion. World store doesn't need it (staging lives under
+  // projects/ which is already in WORLD_EXTRA_IGNORE_DIRS).
+  const rgFiles = await listFilesWithRg(store.root, signal, {
+    excludeStaging: store.scope === "project",
+  });
   // World walker MUST exclude `projects/` and `vault/` to mirror the rg
   // --glob exclusions. Without this, an `rg`-missing host would leak
   // other projects' sediment writes and encrypted vault material into
   // memory_search results. (gpt-5.5 audit, 2026-05-15)
   const extraIgnoreDirs = store.scope === "world" ? WORLD_EXTRA_IGNORE_DIRS : undefined;
-  const files = (rgFiles ?? await walkMarkdownFiles(store.root, settings.maxEntries, signal, { extraIgnoreDirs }))
+  // Project walker MUST exclude observations/staging/* per ADR 0021
+  // invariant #7. World store needs no staging exclusion because
+  // staging entries live under projects/<id>/ which is already excluded
+  // by WORLD_EXTRA_IGNORE_DIRS above. (Lane G P0-B audit fix 2026-05-16)
+  const ignoreRelPaths = store.scope === "project" ? STAGING_IGNORE_REL_PATHS : undefined;
+  const files = (rgFiles ?? await walkMarkdownFiles(store.root, settings.maxEntries, signal, { extraIgnoreDirs, ignoreRelPaths }))
     .filter((file) => path.basename(file) !== "_index.md")
     .slice(0, settings.maxEntries);
 

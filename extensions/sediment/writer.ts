@@ -1,4 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
@@ -22,11 +23,15 @@ import type { Jsonish } from "../memory/types";
 // always slugify titles directly.
 import { slugify } from "../memory/utils";
 import {
+  abrainAboutMeDirByRegion,
+  abrainHabitsDir,
+  abrainIdentityDir,
   abrainKnowledgeDir,
   abrainProjectDir,
   abrainProjectWorkflowsDir,
   abrainSedimentAuditPath,
   abrainSedimentLocksDir,
+  abrainSkillsDir,
   acquireFileLock,
   abrainWorkflowsDir,
   ensureProjectGitignoredOnce,
@@ -35,6 +40,14 @@ import {
   sedimentAuditPath,
   validateAbrainProjectId,
 } from "../_shared/runtime";
+import {
+  applyStagingDowngrade,
+  LANE_G_ALLOWED_REGIONS,
+  type AboutMeRegion,
+  type RouteDecision,
+  RouterError,
+  validateRouteDecision,
+} from "./about-me-router";
 
 const AUDIT_SCHEMA_VERSION = 2;
 
@@ -1763,6 +1776,707 @@ export async function writeAbrainWorkflow(
       auditPath,
       crossProject,
       projectId,
+      ...resultCtx,
+    };
+  } finally {
+    await lock?.release();
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────────
+// Lane G writer: writeAbrainAboutMe (ADR 0021)
+// ───────────────────────────────────────────────────────────────────────────────
+// G1 scope per ADR 0021 §"实施 phase":
+//   - writer + sanitizer/lint/lock/audit/git commit substrate
+//   - validateRouteDecision enforcer (from about-me-router.ts)
+//   - smoke fixture covering: three regions happy / validation_error /
+//     sanitizer reject / router rule violations / git rollback / dedupe
+//
+// Mirrors writeAbrainWorkflow's substrate (lock + atomic write + audit +
+// git commit + git rollback). Region selects the target dir:
+//   identity  -> ~/.abrain/identity/<slug>.md
+//   skills    -> ~/.abrain/skills/<slug>.md
+//   habits    -> ~/.abrain/habits/<slug>.md
+//   staging   -> ~/.abrain/projects/<active>/observations/staging/
+//                 <YYYY-MM-DD>--<pid>--<sessionStartEpoch>.md
+//
+// Slug uniqueness is enforced ACROSS identity+skills+habits (3-zone scan);
+// staging entries are date+pid+epoch-keyed and out of slug-collision scope.
+
+export interface AboutMeDraft {
+  title: string;
+  body: string;
+  region: AboutMeRegion;
+  routingConfidence: number;
+  routeCandidates: AboutMeRegion[];
+  routingReason: string;
+  /** Mirrors WorkflowDraft semantics: optional trigger phrases (retrieval anchors), tags, slug override. */
+  triggerPhrases?: string[];
+  tags?: string[];
+  status?: EntryStatus;
+  slug?: string;
+  timelineNote?: string;
+  sessionId?: string;
+  /** When region==="staging", these locate the staging file path. Required for staging writes. */
+  stagingProjectId?: string;
+  stagingSessionEpoch?: number;
+}
+
+export interface WriteAboutMeOptions {
+  abrainHome: string;
+  settings: SedimentSettings;
+  dryRun?: boolean;
+  auditContext?: WriterAuditContext;
+}
+
+export interface WriteAboutMeResult {
+  slug: string;
+  path: string;
+  status: "created" | "skipped" | "dry_run" | "rejected";
+  reason?: string;
+  region?: AboutMeRegion;
+  lintErrors?: number;
+  lintWarnings?: number;
+  gitCommit?: string | null;
+  auditPath?: string;
+  sanitizedReplacements?: string[];
+  validationErrors?: Array<{ field: string; message: string }>;
+  routeRejected?: { rule: number; message: string };
+  lane?: string;
+  sessionId?: string;
+  correlationId?: string;
+  candidateId?: string;
+}
+
+function validateAboutMeDraft(draft: AboutMeDraft): Array<{ field: string; message: string }> {
+  const issues: Array<{ field: string; message: string }> = [];
+  if (typeof draft.title !== "string" || draft.title.trim().length === 0) {
+    issues.push({ field: "title", message: "title is required" });
+  } else if (draft.title.length > 200) {
+    issues.push({ field: "title", message: "title must be ≤ 200 characters" });
+  }
+  if (typeof draft.body !== "string" || draft.body.trim().length < 20) {
+    issues.push({ field: "body", message: "body must be at least 20 characters" });
+  }
+  // Region enum gate (P0-2 audit fix 2026-05-15, refactored 2026-05-16 P1-A).
+  // TypeScript narrows the signature to AboutMeRegion, but in production the
+  // fence extractor returns ExtractedAboutMeDraft with `region?: AboutMeRegion`
+  // (optional), and G2 transcript-injected fences can carry region: undefined.
+  // Without this guard, the writer falls through kindByRegion[undefined] ===
+  // undefined and writes a frontmatter `kind: undefined` literal. The router's
+  // validateRouteDecision rule 1 catches it later, but only AFTER we'd already
+  // passed validation — routing the failure as route_rejected instead of
+  // validation_error and burning a sample file. Catch it here.
+  // Single source of truth: LANE_G_ALLOWED_REGIONS in about-me-router.ts.
+  if (typeof draft.region !== "string" || !LANE_G_ALLOWED_REGIONS.includes(draft.region as AboutMeRegion)) {
+    issues.push({ field: "region", message: `region must be one of: ${LANE_G_ALLOWED_REGIONS.join(", ")}` });
+  }
+  // Routing-confidence gate (P1-C audit fix 2026-05-16). Symmetric with the
+  // region gate above: garbage input should fail-fast as validation_error
+  // before the router (which would otherwise charge it a route_rejected
+  // + a sample file). Router rule 6 still runs as defense-in-depth.
+  if (typeof draft.routingConfidence !== "number" || !Number.isFinite(draft.routingConfidence)) {
+    issues.push({ field: "routingConfidence", message: "routingConfidence must be a finite number" });
+  } else if (draft.routingConfidence < 0 || draft.routingConfidence > 1) {
+    issues.push({ field: "routingConfidence", message: "routingConfidence must be in [0, 1]" });
+  }
+  // Status enum check (ENTRY_STATUSES) mirrors validateWorkflowDraft (Round 8 P1).
+  if (draft.status !== undefined) {
+    if (typeof draft.status !== "string" || !(ENTRY_STATUSES as readonly string[]).includes(draft.status)) {
+      issues.push({ field: "status", message: `status must be one of: ${ENTRY_STATUSES.join(", ")}` });
+    }
+  }
+  // Staging requires a project id + session epoch to land in the right
+  // staging file (per ADR 0014 §3.5: <YYYY-MM-DD>--<pid>--<sessionEpoch>.md).
+  if (draft.region === "staging") {
+    if (typeof draft.stagingProjectId !== "string" || draft.stagingProjectId.length === 0) {
+      issues.push({ field: "stagingProjectId", message: "stagingProjectId is required when region=staging" });
+    } else {
+      try { validateAbrainProjectId(draft.stagingProjectId); }
+      catch (e) { issues.push({ field: "stagingProjectId", message: (e as Error).message }); }
+    }
+    if (typeof draft.stagingSessionEpoch !== "number" || !Number.isFinite(draft.stagingSessionEpoch)) {
+      issues.push({ field: "stagingSessionEpoch", message: "stagingSessionEpoch (number) is required when region=staging" });
+    }
+  }
+  return issues;
+}
+
+/** Build markdown for Lane G entry. Frontmatter shape per ADR 0021 D5. */
+function buildAboutMeMarkdown(draft: AboutMeDraft, slug: string): string {
+  const timestamp = nowIso();
+  const status = draft.status ?? "active";
+  // ENTRY_KINDS-canonical mapping per ADR 0021 Q1:
+  //   identity → maxim   (stable self-description, high-trust)
+  //   skills   → fact    (declarative inventory)
+  //   habits   → pattern (recurring behavioral pattern)
+  //   staging  → fact    (defer classification until reviewed)
+  // Falling back to a deterministic kind keeps memory_search rerank +
+  // doctor enums happy without inventing new EntryKind values.
+  const kindByRegion: Record<AboutMeRegion, EntryKind> = {
+    identity: "maxim" as EntryKind,
+    skills: "fact" as EntryKind,
+    habits: "pattern" as EntryKind,
+    staging: "fact" as EntryKind,
+  };
+  const kind = kindByRegion[draft.region];
+  const id = `about-me:${draft.region}:${slug}`;
+  const tags = (draft.tags ?? []).map((t) => t.trim()).filter(Boolean);
+  const timelineSession = draft.sessionId || "sediment";
+  const timelineNote = draft.timelineNote || "created by sediment about-me writer (Lane G)";
+
+  // routing_confidence is normalized to 2-decimal-place float (P1-5 audit
+  // fix 2026-05-15). Without toFixed, node template literals render 1.0
+  // as "1" (int) and 0.95 as "0.95" (float); a YAML parser then types
+  // them differently on round-trip. Forcing 2dp keeps the field strictly
+  // float-shaped for downstream consumers (frontmatter parser, doctor,
+  // future G3 router replay).
+  const conf2dp = (draft.routingConfidence).toFixed(2);
+
+  const fmLines: string[] = [];
+  fmLines.push("---");
+  fmLines.push(`id: ${yamlString(id)}`);
+  fmLines.push(`title: ${yamlString(draft.title)}`);
+  // scope is the canonical memory-architecture binary (world|project), per
+  // memory/types.ts Scope type. Lane G entries are world-scoped ("about
+  // alfadb", cross-project). Region is a Lane-G-specific sub-classification
+  // carried separately below. Previously this field was `scope: about_me`
+  // which the read-side parseEntry silently dropped (parser.ts §scopeRaw
+  // check only accepts "world" / "project") — P0-1 audit fix 2026-05-15.
+  // Exception: staging entries are physically under projects/<id>/
+  // observations/staging/, so their scope is project; they're picked up
+  // by the project-scope walker for review-staging (G4) tooling.
+  fmLines.push(`scope: ${draft.region === "staging" ? "project" : "world"}`);
+  fmLines.push(`kind: ${yamlString(kind)}`);
+  fmLines.push(`status: ${yamlString(status)}`);
+  fmLines.push(`confidence: 5`);
+  fmLines.push(...yamlList("trigger_phrases", draft.triggerPhrases));
+  fmLines.push(...yamlList("tags", tags));
+  fmLines.push(`created: ${yamlString(timestamp)}`);
+  fmLines.push(`updated: ${yamlString(timestamp)}`);
+  fmLines.push(`schema_version: 1`);
+  // Lane G-specific (ADR 0021 D5).
+  fmLines.push(`lane: about_me`);
+  fmLines.push(`region: ${yamlString(draft.region)}`);
+  fmLines.push(...yamlList("route_candidates", draft.routeCandidates));
+  fmLines.push(`routing_reason: ${yamlString(draft.routingReason)}`);
+  fmLines.push(`routing_confidence: ${conf2dp}`);
+  fmLines.push("---");
+
+  // Body normalization: ensure `# <title>` heading; escape bare `---`
+  // lines so they don't accidentally close frontmatter on round-trip.
+  let body = draft.body.trim();
+  body = body.replace(/^##\s+Timeline\s*[\s\S]*$/m, "").trim();
+  body = body.replace(/^---$/gm, " ---");
+  if (!/^#\s+/m.test(body)) body = `# ${draft.title}\n\n${body}`;
+
+  const timeline = `## Timeline\n- ${timestamp} | ${timelineSession} | created | ${timelineNote}`;
+  return `${fmLines.join("\n")}\n\n${body.trim()}\n\n${timeline}\n`;
+}
+
+async function acquireAbrainAboutMeLock(abrainHome: string, timeoutMs: number): Promise<LockHandle> {
+  // Independent from workflow.lock so Lane G writes don't block on a
+  // concurrent workflow write and vice versa.
+  const lockPath = path.join(abrainSedimentLocksDir(abrainHome), "about-me.lock");
+  const handle = await acquireFileLock(lockPath, {
+    timeoutMs,
+    staleMs: SEDIMENT_LOCK_STEAL_AFTER_MS,
+    retryMs: 100,
+    label: "abrain about-me",
+  });
+  return { release: handle.release };
+}
+
+async function appendAbrainAboutMeAudit(abrainHome: string, event: Record<string, unknown>): Promise<string> {
+  return appendAbrainAudit(abrainHome, "about_me", event);
+}
+
+async function gitCommitAbrainAboutMe(
+  abrainHome: string,
+  filePath: string,
+  slug: string,
+  region: AboutMeRegion,
+): Promise<string | null> {
+  try {
+    const rel = path.relative(abrainHome, filePath);
+    await execFileAsync("git", ["-C", abrainHome, "add", "--", rel], { timeout: 5_000, maxBuffer: 512 * 1024 });
+    await execFileAsync("git", ["-C", abrainHome, "commit", "-m", `about-me: ${slug} [${region}] (lane=about_me)`], { timeout: 20_000, maxBuffer: 1024 * 1024 });
+    const { stdout } = await execFileAsync("git", ["-C", abrainHome, "rev-parse", "HEAD"], { timeout: 5_000, maxBuffer: 128 * 1024 });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve target file path for given draft. Staging path is
+ *  date+pid+epoch keyed per ADR 0014 §3.5. */
+function resolveAboutMeTarget(abrainHome: string, draft: AboutMeDraft, slug: string): { dir: string; file: string } {
+  if (draft.region === "staging") {
+    const projectId = draft.stagingProjectId!;
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const stagingDir = path.join(
+      abrainProjectDir(abrainHome, projectId),
+      "observations",
+      "staging",
+    );
+    // P0-A audit fix 2026-05-16: include Date.now() in the filename so
+    // two staging writes within the same pi session (same epoch) on the
+    // same day from the same pid land in distinct files.
+    //
+    // P1-B audit fix 2026-05-16 (round 3 opus-4-6): add an 8-hex-char
+    // crypto-random suffix because Date.now() resolution is ms and not
+    // monotonic across NTP adjustments — a `Promise.all([write(A),
+    // write(B)])` with same pid+epoch+ms still collided previously,
+    // P0-A's fix did not cover that. randomBytes(4) gives 2^32 entropy
+    // per file; collision is astronomically unlikely. Date.now() is kept
+    // for human readability of recency in `ls -1` listings.
+    const file = path.join(
+      stagingDir,
+      `${today}--${process.pid}--${draft.stagingSessionEpoch}--${Date.now()}--${randomBytes(4).toString("hex")}.md`,
+    );
+    return { dir: stagingDir, file };
+  }
+  const dir = abrainAboutMeDirByRegion(abrainHome, draft.region);
+  return { dir, file: path.join(dir, `${slug}.md`) };
+}
+
+/** Scan identity+skills+habits for a slug collision; returns true iff
+ *  any zone already contains `<slug>.md`. */
+function aboutMeSlugCollidesAcrossZones(abrainHome: string, slug: string): boolean {
+  for (const dir of [abrainIdentityDir(abrainHome), abrainSkillsDir(abrainHome), abrainHabitsDir(abrainHome)]) {
+    if (fsSync.existsSync(path.join(dir, `${slug}.md`))) return true;
+  }
+  return false;
+}
+
+/**
+ * Write a Lane G about-me entry to identity/skills/habits/staging.
+ *
+ * Substrate mirrors writeAbrainWorkflow:
+ *   1. validation (schema + region-specific fields)
+ *   2. router enforcement (validateRouteDecision; auto-downgrade to
+ *      staging when confidence < threshold via applyStagingDowngrade)
+ *   3. sanitize free-text fields (title/body/triggerPhrases/tags/note)
+ *   4. build markdown (frontmatter v1 + body + Timeline)
+ *   5. lint (errors reject; warnings recorded)
+ *   6. dedupe across 3 zones (identity+skills+habits) by slug
+ *   7. lock (~/.abrain/.state/sediment/locks/about-me.lock)
+ *   8. atomic write + git commit + audit row (lane=about_me)
+ *
+ * On `git commit` failure: orphan file is unlinked and `git reset HEAD --
+ * <rel>` clears the staged ghost (parity with writeAbrainWorkflow).
+ */
+export async function writeAbrainAboutMe(
+  draft: AboutMeDraft,
+  opts: WriteAboutMeOptions,
+): Promise<WriteAboutMeResult> {
+  const started = Date.now();
+  const abrainHome = path.resolve(opts.abrainHome);
+  const sessionId = opts.auditContext?.sessionId ?? draft.sessionId;
+  const lane = "about_me";
+  const resultCtx = {
+    lane,
+    sessionId,
+    correlationId: opts.auditContext?.correlationId,
+    candidateId: opts.auditContext?.candidateId,
+  };
+
+  // 1. Validation.
+  const validationErrors = validateAboutMeDraft(draft);
+  if (validationErrors.length > 0) {
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "reject",
+      reason: "validation_error",
+      title: draft.title,
+      region: draft.region,
+      validationErrors,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug: slugify(draft.title || "about-me"),
+      path: abrainHome,
+      status: "rejected",
+      reason: "validation_error",
+      region: draft.region,
+      validationErrors,
+      auditPath,
+      ...resultCtx,
+    };
+  }
+
+  // 2. Router enforcement. Auto-downgrade low-confidence first; then
+  // validate. Caller is expected to pass `route_candidates` already.
+  const rawDecision: RouteDecision = {
+    lane: "about_me",
+    chosen_region: draft.region,
+    route_candidates: draft.routeCandidates,
+    routing_reason: draft.routingReason,
+    routing_confidence: draft.routingConfidence,
+  };
+  const decision = applyStagingDowngrade(rawDecision);
+
+  // P0-1 audit fix 2026-05-16 (round 3 opus-4-6): post-downgrade staging
+  // field check. applyStagingDowngrade may flip chosen_region to
+  // "staging" when confidence < threshold; in that case stagingProjectId
+  // / stagingSessionEpoch become REQUIRED but the upstream
+  // validateAboutMeDraft only checked them when draft.region was
+  // ALREADY "staging" (pre-downgrade). Without this, a downgrade-to-
+  // staging with missing stagingProjectId throws an unhandled exception
+  // at resolveAboutMeTarget's `draft.stagingProjectId!` non-null
+  // assertion — violating the writer's "always returns WriteAboutMeResult"
+  // contract. G2 wire-up triggers this on every low-confidence fence
+  // (the extractor doesn't supply stagingProjectId; it's a writer-time
+  // concept resolved from the active project).
+  if (decision.chosen_region === "staging" && draft.region !== "staging") {
+    const stagingValidationErrors: Array<{ field: string; message: string }> = [];
+    if (typeof draft.stagingProjectId !== "string" || draft.stagingProjectId.length === 0) {
+      stagingValidationErrors.push({
+        field: "stagingProjectId",
+        message: "stagingProjectId is required when router downgrades to staging (confidence < threshold)",
+      });
+    } else {
+      try { validateAbrainProjectId(draft.stagingProjectId); }
+      catch (e) { stagingValidationErrors.push({ field: "stagingProjectId", message: (e as Error).message }); }
+    }
+    if (typeof draft.stagingSessionEpoch !== "number" || !Number.isFinite(draft.stagingSessionEpoch)) {
+      stagingValidationErrors.push({
+        field: "stagingSessionEpoch",
+        message: "stagingSessionEpoch (number) is required when router downgrades to staging",
+      });
+    }
+    if (stagingValidationErrors.length > 0) {
+      const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+        operation: "reject",
+        reason: "validation_error",
+        title: draft.title,
+        region: decision.chosen_region,
+        router_downgrade: true,
+        validationErrors: stagingValidationErrors,
+        duration_ms: Date.now() - started,
+        ...resultCtx,
+      });
+      return {
+        slug: slugify(draft.title || "about-me"),
+        path: abrainHome,
+        status: "rejected",
+        reason: "validation_error",
+        region: decision.chosen_region,
+        validationErrors: stagingValidationErrors,
+        auditPath,
+        ...resultCtx,
+      };
+    }
+  }
+
+  try {
+    validateRouteDecision(decision);
+  } catch (e: unknown) {
+    const err = e instanceof RouterError ? e : new RouterError(0, e instanceof Error ? e.message : String(e));
+    // Per ADR 0014 §3.5: write a route_rejected audit row AND drop the
+    // original input into staging/rejected/ so the sample isn't silently
+    // lost. Staging-rejected files are best-effort (no lock; small).
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "route_rejected",
+      reason: err.message,
+      router_rule: err.rule,
+      title: draft.title,
+      region: draft.region,
+      routing_confidence: draft.routingConfidence,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    if (draft.stagingProjectId) {
+      try {
+        // P0-3 (2026-05-15) + P1-B/P2-A (2026-05-16 round 3):
+        // Filename shape `<date>--<pid>--<epoch>--<ms>--<hex8>.md`.
+        // Date.now() gives ms-resolution wall time (NOT monotonic — NTP
+        // step can roll back); the 8-hex-char crypto suffix
+        // (2^32 entropy) makes same-ms collisions astronomically
+        // unlikely under Promise.all concurrency. We use plain
+        // fs.writeFile (not `wx`) because the sample file is diagnostic
+        // only — the audit row above is the canonical record.
+        const today = new Date().toISOString().slice(0, 10);
+        const rejectedDir = path.join(
+          abrainProjectDir(abrainHome, draft.stagingProjectId),
+          "observations",
+          "staging",
+          "rejected",
+        );
+        await fs.mkdir(rejectedDir, { recursive: true });
+        const sample = path.join(
+          rejectedDir,
+          `${today}--${process.pid}--${draft.stagingSessionEpoch ?? "none"}--${Date.now()}--${randomBytes(4).toString("hex")}.md`,
+        );
+        await fs.writeFile(
+          sample,
+          `# rejected about-me sample\n\nrouter_rule: ${err.rule}\nreason: ${err.message}\nregion: ${draft.region}\nconfidence: ${draft.routingConfidence}\n\n---\n\n${draft.title}\n\n${draft.body}\n`,
+          "utf-8",
+        );
+      } catch { /* best-effort */ }
+    } else {
+      // P1-E audit fix 2026-05-16: caller without a project anchor still
+      // gets sample preservation, just under an abrain-home-level orphan
+      // dir. Without this branch a route_rejected with stagingProjectId
+      // missing would silently lose the input — violating ADR 0014 §3.5
+      // "避免静默丢入作样本". orphan-rejects lives under .state/ so it's
+      // local-only (not committed to abrain git), matching the sample
+      // file's diagnostic-only role.
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const orphanDir = path.join(abrainHome, ".state", "sediment", "orphan-rejects");
+        await fs.mkdir(orphanDir, { recursive: true });
+        // P1-B audit fix 2026-05-16 (round 3): add crypto-random suffix
+        // for the same reasons as staging happy + reject paths.
+        const sample = path.join(orphanDir, `${today}--${process.pid}--${Date.now()}--${randomBytes(4).toString("hex")}.md`);
+        await fs.writeFile(
+          sample,
+          `# orphan rejected about-me sample (no project anchor)\n\nrouter_rule: ${err.rule}\nreason: ${err.message}\nregion: ${draft.region}\nconfidence: ${draft.routingConfidence}\n\n---\n\n${draft.title}\n\n${draft.body}\n`,
+          "utf-8",
+        );
+      } catch { /* best-effort */ }
+    }
+    return {
+      slug: slugify(draft.title || "about-me"),
+      path: abrainHome,
+      status: "rejected",
+      reason: "route_rejected",
+      region: draft.region,
+      routeRejected: { rule: err.rule, message: err.message },
+      auditPath,
+      ...resultCtx,
+    };
+  }
+
+  // 3. Sanitize free-text fields.
+  const titleSan = sanitizeForMemory(draft.title);
+  const bodySan = sanitizeForMemory(draft.body);
+  const reasonSan = sanitizeForMemory(decision.routing_reason);
+  const noteSan = draft.timelineNote
+    ? sanitizeForMemory(draft.timelineNote)
+    : { ok: true as const, text: undefined, replacements: [] as string[] };
+  const trigSans = (draft.triggerPhrases ?? []).map((t) => sanitizeForMemory(t));
+  const tagSans = (draft.tags ?? []).map((t) => sanitizeForMemory(t));
+  const failed = [titleSan, bodySan, reasonSan, noteSan, ...trigSans, ...tagSans].find((r) => !r.ok);
+  if (failed) {
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "reject",
+      reason: (failed as { ok: false; error: string }).error,
+      title: draft.title,
+      region: decision.chosen_region,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug: slugify(draft.title),
+      path: abrainHome,
+      status: "rejected",
+      reason: (failed as { ok: false; error: string }).error,
+      region: decision.chosen_region,
+      auditPath,
+      ...resultCtx,
+    };
+  }
+
+  const sanitizedReplacements = [
+    ...titleSan.replacements,
+    ...bodySan.replacements,
+    ...reasonSan.replacements,
+    ...noteSan.replacements,
+    ...trigSans.flatMap((s) => s.replacements),
+    ...tagSans.flatMap((s) => s.replacements),
+  ];
+
+  const safeDraft: AboutMeDraft = {
+    ...draft,
+    title: titleSan.text ?? draft.title,
+    body: bodySan.text ?? draft.body,
+    region: decision.chosen_region,
+    routeCandidates: decision.route_candidates,
+    routingReason: reasonSan.text ?? decision.routing_reason,
+    routingConfidence: decision.routing_confidence,
+    timelineNote: draft.timelineNote ? noteSan.text : draft.timelineNote,
+    triggerPhrases: draft.triggerPhrases ? trigSans.map((s, i) => s.text ?? draft.triggerPhrases![i]) : draft.triggerPhrases,
+    tags: draft.tags ? tagSans.map((s, i) => s.text ?? draft.tags![i]) : draft.tags,
+    // P1-B audit fix 2026-05-16: timeline sessionId and audit sessionId
+    // must come from the same resolved value, otherwise markdown timeline
+    // shows draft.sessionId || "sediment" while audit shows opts.audit­
+    // Context.sessionId ?? draft.sessionId — cross-line reconciliation
+    // breaks. Force them equal via the resolved `sessionId` above.
+    sessionId,
+  };
+
+  const slug = (draft.slug && slugify(draft.slug)) || slugify(safeDraft.title);
+  const { dir: targetDir, file: target } = resolveAboutMeTarget(abrainHome, safeDraft, slug);
+  await fs.mkdir(targetDir, { recursive: true });
+
+  // 6. Dedupe (skip for staging — staging files are time-keyed, not
+  // slug-keyed; multiple staging samples per day are append-style).
+  if (safeDraft.region !== "staging" && aboutMeSlugCollidesAcrossZones(abrainHome, slug)) {
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "reject",
+      reason: "duplicate_slug",
+      target: `about-me:${safeDraft.region}:${slug}`,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "rejected",
+      reason: "duplicate_slug",
+      region: safeDraft.region,
+      auditPath,
+      ...resultCtx,
+    };
+  }
+
+  // 4. Build markdown + 5. lint.
+  const markdown = buildAboutMeMarkdown(safeDraft, slug);
+  const lintIssues = lintMarkdown(markdown, target);
+  const lintErrors = lintIssues.filter((i) => i.severity === "error").length;
+  const lintWarnings = lintIssues.filter((i) => i.severity === "warning").length;
+  if (lintErrors > 0) {
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "reject",
+      reason: "lint_error",
+      target: path.relative(abrainHome, target),
+      lint_errors: lintErrors,
+      lint_warnings: lintWarnings,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "rejected",
+      reason: "lint_error",
+      region: safeDraft.region,
+      lintErrors,
+      lintWarnings,
+      auditPath,
+      ...resultCtx,
+    };
+  }
+
+  if (opts.dryRun) {
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "dry_run",
+      target: path.relative(abrainHome, target),
+      region: safeDraft.region,
+      lint_warnings: lintWarnings,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "dry_run",
+      region: safeDraft.region,
+      lintWarnings,
+      auditPath,
+      sanitizedReplacements,
+      ...resultCtx,
+    };
+  }
+
+  // 7. Lock + 8. atomic write + git commit + audit row.
+  let lock: LockHandle | undefined;
+  try {
+    lock = await acquireAbrainAboutMeLock(abrainHome, opts.settings.lockTimeoutMs ?? 5000);
+    // Lock-held duplicate re-check (mirror writeAbrainWorkflow @ R6 P0).
+    if (safeDraft.region !== "staging" && aboutMeSlugCollidesAcrossZones(abrainHome, slug)) {
+      const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+        operation: "reject",
+        reason: "duplicate_slug_race",
+        target: `about-me:${safeDraft.region}:${slug}`,
+        duration_ms: Date.now() - started,
+        ...resultCtx,
+      });
+      return {
+        slug,
+        path: target,
+        status: "rejected",
+        reason: "duplicate_slug_race",
+        region: safeDraft.region,
+        auditPath,
+        ...resultCtx,
+      };
+    }
+    await atomicWrite(target, markdown);
+    const git = opts.settings.gitCommit
+      ? await gitCommitAbrainAboutMe(abrainHome, target, slug, safeDraft.region)
+      : null;
+    // Git rollback path (parity with writeAbrainWorkflow R9 P1-3 + R5
+    // P4): if git commit fails we have an orphan markdown + staged
+    // ghost. Clear both before returning rejected.
+    if (git === null && opts.settings.gitCommit) {
+      const rel = path.relative(abrainHome, target);
+      try { await execFileAsync("git", ["-C", abrainHome, "reset", "HEAD", "--", rel], { timeout: 5_000, maxBuffer: 128 * 1024 }); } catch { /* best-effort */ }
+      try { await fs.unlink(target); } catch { /* file may already be gone */ }
+      const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+        operation: "error",
+        target: rel,
+        region: safeDraft.region,
+        reason: "git_commit_failed_orphan_cleaned",
+        lint_result: "pass",
+        lint_warnings: lintWarnings,
+        git_commit: null,
+        duration_ms: Date.now() - started,
+        ...resultCtx,
+      });
+      return {
+        slug,
+        path: target,
+        status: "rejected",
+        reason: "git_commit_failed",
+        region: safeDraft.region,
+        auditPath,
+        ...resultCtx,
+      };
+    }
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "create",
+      target: path.relative(abrainHome, target),
+      region: safeDraft.region,
+      routing_confidence: safeDraft.routingConfidence,
+      route_candidates: safeDraft.routeCandidates,
+      routing_reason: safeDraft.routingReason,
+      lint_result: "pass",
+      lint_warnings: lintWarnings,
+      git_commit: git,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "created",
+      region: safeDraft.region,
+      lintErrors,
+      lintWarnings,
+      gitCommit: git,
+      auditPath,
+      sanitizedReplacements,
+      ...resultCtx,
+    };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : String(e);
+    const auditPath = await appendAbrainAboutMeAudit(abrainHome, {
+      operation: "error",
+      target: path.relative(abrainHome, target),
+      region: safeDraft.region,
+      reason: message,
+      duration_ms: Date.now() - started,
+      ...resultCtx,
+    });
+    return {
+      slug,
+      path: target,
+      status: "rejected",
+      reason: message,
+      region: safeDraft.region,
+      auditPath,
       ...resultCtx,
     };
   } finally {

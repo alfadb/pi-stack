@@ -43,7 +43,7 @@ Vendor 不属于 runtime surface；不要从 vendor 直接加载 pi 扩展，也
 | workflows | `~/.abrain/workflows/` 或 `~/.abrain/projects/<id>/workflows/`。 |
 | 七区 | `identity/ skills/ habits/ workflows/ projects/ knowledge/ vault/`。 |
 | 已有 writer 覆盖 | `projects/`、`knowledge/`、`workflows/`、`vault/`。 |
-| 仍待实现 writer | `identity/`、`skills/`、`habits/`（Lane G / about-me）。 |
+| Lane G writer G1 ✅ shipped | `identity/` / `skills/` / `habits/` 三区 writeAbrainAboutMe + parseExplicitAboutMeBlocks fence + validateRouteDecision（[ADR 0021](./adr/0021-lane-g-identity-skills-habits-writer.md)）。端到端：G2 `/about-me` slash、G3 LLM classifier、G4 review-staging、G5 region-aware ranking hint仍在 backlog。 |
 | 跨设备同步 | [ADR 0020](./adr/0020-abrain-auto-sync-to-remote.md)：sediment commit 后后台 `git push origin HEAD:main`；pi 启动 `git fetch + merge --ff-only`。冲突 ff 不可能 → `/abrain status` 提示 + `/abrain sync` 产出运行本。LLM 自动解冲突被明确拒绝（知识库幻觉风险）。 |
 
 ## 4. Project binding strict mode

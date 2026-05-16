@@ -50,6 +50,7 @@ import {
 } from "./vault-writer";
 import { releaseSecret, vaultFilePath, type ReleaseSecretResult } from "./vault-reader";
 import {
+  ensureAbrainStateGitignored,
   ensureBrainLayout,
 } from "./brain-layout";
 import {
@@ -641,6 +642,20 @@ export default function activate(pi: ExtensionAPI): void {
     }
   } catch (err: any) {
     console.error(`[abrain] brain layout failed:`, err);
+  }
+
+  // .state/ gitignore guard (P1-C audit fix 2026-05-16 round 3).
+  // Ensure `.state/` is in abrain `.gitignore` BEFORE any writer can
+  // produce orphan-rejects samples. Without this, an abrain repo that
+  // existed before /abrain bind would carry sanitized user input
+  // (title/body of route_rejected about-me samples) to the remote.
+  // Idempotent: only writes when line missing. Best-effort: a write
+  // failure logs but does not abort activation.
+  try {
+    const r = ensureAbrainStateGitignored(ABRAIN_HOME);
+    if (r.updated) console.error(`[abrain] added .state/ to ${r.path}`);
+  } catch (err: any) {
+    console.error(`[abrain] .state/ gitignore guard failed (non-fatal):`, err);
   }
 
   const registry = pi as unknown as CommandRegistry;

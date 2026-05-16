@@ -104,7 +104,13 @@ for (const file of [
   "i18n",
   "git-sync",
 ]) {
-  fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`)));
+  // P1-2 audit fix 2026-05-16 round 4: brain-layout.ts now imports
+  // `../_shared/runtime` for computeAbrainStateGitignoreNext. Rewrite
+  // the relative require uniformly; harmless no-op for files that don't
+  // import _shared today.
+  const compiled = transpile(path.join(repoRoot, "extensions", "abrain", `${file}.ts`))
+    .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
+  fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
 // _shared/runtime is required by index.ts via ../_shared/runtime

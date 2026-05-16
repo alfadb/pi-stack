@@ -19,6 +19,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { computeAbrainStateGitignoreNext } from "../_shared/runtime";
 
 /**
  * All 7 zone directory names (excluding vault, which is created by /vault init).
@@ -108,6 +109,57 @@ export function ensureBrainLayout(abrainHome: string): { created: string[]; warn
   }
 
   return { created, warnings };
+}
+
+/**
+ * Ensure `<abrainHome>/.gitignore` contains a `.state/` line.
+ *
+ * P1-C audit fix 2026-05-16 (round 3 gpt-5.5): previously the `.state/`
+ * gitignore line was only appended when `/abrain bind` ran
+ * (`_shared/runtime.ts::bindAbrainProject`). If a user had a git-inited
+ * `~/.abrain` but never bound a project, Lane G `route_rejected` orphan
+ * samples would land in `.state/sediment/orphan-rejects/<file>.md`
+ * (containing sanitized user title/body) and `git add .` could carry
+ * them to the abrain remote.
+ *
+ * Now invoked from abrain `activate()` (after `ensureBrainLayout`) so the
+ * gitignore guard exists before any writer can fire.
+ *
+ * Idempotent: only writes when the line is missing.
+ *
+ * Returns:
+ *   - { updated: false } if the line is already present. (If `abrainHome`
+ *     doesn't exist yet the underlying `writeFileSync` would ENOENT —
+ *     caller is expected to ensure the directory first, typically via
+ *     `ensureBrainLayout()`.)
+ *   - { updated: true, path } when the line was just appended.
+ *
+ * P2-A audit fix 2026-05-16 (round 4 opus-4-7): write is now ATOMIC
+ * (tmp + rename) instead of bare writeFileSync. `.gitignore` is the
+ * single guard preventing `.state/` (vault-events.jsonl, sediment
+ * audit.jsonl, orphan-rejects samples) from being `git add .`ed into
+ * the abrain remote. A crash mid-write previously could leave a 0-byte
+ * .gitignore, invalidating the guard until next boot.
+ */
+export function ensureAbrainStateGitignored(abrainHome: string): { updated: boolean; path: string } {
+  const resolved = path.resolve(abrainHome);
+  const gitignorePath = path.join(resolved, ".gitignore");
+  const raw = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, "utf-8") : "";
+  // Single-source-of-truth: regex + line text live in _shared/runtime.ts
+  // (P1-2 audit fix 2026-05-16 round 4). bindAbrainProject uses the same
+  // helper via the async path; this function is the sync activate-time
+  // path. Independent write impls (sync renameSync vs async
+  // atomicWriteText) are necessary because activate() can't await.
+  const next = computeAbrainStateGitignoreNext(raw);
+  if (next === null) {
+    return { updated: false, path: gitignorePath };
+  }
+  // Atomic write: same-partition rename is POSIX-atomic; on Windows node
+  // falls back to an equivalent atomic-on-success operation.
+  const tmp = `${gitignorePath}.tmp-${process.pid}-${Date.now()}`;
+  fs.writeFileSync(tmp, next, "utf-8");
+  fs.renameSync(tmp, gitignorePath);
+  return { updated: true, path: gitignorePath };
 }
 
 /**

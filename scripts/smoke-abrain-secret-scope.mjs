@@ -48,7 +48,16 @@ fs.writeFileSync(path.join(sharedTarget, "runtime.cjs"), transpile(path.join(rep
 fs.copyFileSync(path.join(sharedTarget, "runtime.cjs"), path.join(sharedTarget, "runtime.js"));
 
 for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "bootstrap", "backend-detect", "i18n", "brain-layout", "git-sync"]) {
-  fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), transpile(path.join(repoRoot, "extensions/abrain", `${file}.ts`)));
+  // P1-2 audit fix 2026-05-16 round 4: brain-layout.ts now imports
+  // `../_shared/runtime` for computeAbrainStateGitignoreNext. Rewrite
+  // the relative require to point at the shared helper we already wrote
+  // to <tmpDir>/_shared/runtime.cjs above. Other files happen not to
+  // import _shared today, but applying the rewrite uniformly is harmless
+  // (no-op when the pattern isn't present) and future-proofs new shared
+  // imports.
+  const compiled = transpile(path.join(repoRoot, "extensions/abrain", `${file}.ts`))
+    .replace(/require\("\.\.\/_shared\/runtime"\)/g, 'require("./_shared/runtime.cjs")');
+  fs.writeFileSync(path.join(tmpDir, `${file}.cjs`), compiled);
   fs.copyFileSync(path.join(tmpDir, `${file}.cjs`), path.join(tmpDir, `${file}.js`));
 }
 
