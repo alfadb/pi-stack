@@ -117,22 +117,25 @@ const MERGE_ENV: NodeJS.ProcessEnv = {
 };
 
 /**
- * Redact userinfo from a URL so credentials don't leak into logs or UI.
+ * `redactCredentials` moved to `./redact.ts` (ADR 0022 §D6.2 / INV-J).
+ * The single source of truth now lives next to `redactSecretAnswer` /
+ * `lengthBucket` so all credential / secret redaction sits in one
+ * primitive module shared by git-sync and prompt_user.
  *
- * Round 2 audit fix (opus M1 + deepseek m2): `git remote get-url origin`
- * returns the URL verbatim. If a user configured
- * `https://alice:ghp_xxx@git.example.com/repo.git` (a common antipattern),
- * the token would flow into `getStatus().remote`, `formatSyncStatus()`
- * UI output, and any push stderr captured into the audit `error` field
- * (e.g. `fatal: unable to access 'https://alice:ghp_xxx@...'`). The audit
- * log is on disk forever. Invariant 4 ("No secrets in argv") was symmetric-
- * asymmetric: argv-in was locked down but the output side leaked. This
- * redactor closes that gap. SSH-style URLs (`git@host:path`) are not
- * touched — they have no embedded secret.
+ * We `import` then `export` rather than the shorter `export ... from`
+ * form: this file STILL calls `redactCredentials(...)` internally
+ * (getStatus / formatSyncStatus / runMerge), and a bare re-export does
+ * NOT create a local binding for those calls. Combined import+export
+ * gives us both (a) a local symbol that resolves at runtime and
+ * (b) the external import surface that downstream code already uses.
+ *
+ * ADR 0020 INV 7 is preserved: behavior is identical (the function
+ * body moved unchanged), and smoke `smoke-abrain-redact.mjs` asserts
+ * `from "./git-sync"` and `from "./redact"` give the SAME function
+ * reference (no drift, no shadow definition).
  */
-export function redactCredentials(s: string): string {
-  return s.replace(/(https?:\/\/)[^@\s\/]+@/gi, "$1***@");
-}
+import { redactCredentials } from "./redact";
+export { redactCredentials };
 
 /**
  * POSIX shell-quote a filesystem path for safe paste-into-bash.

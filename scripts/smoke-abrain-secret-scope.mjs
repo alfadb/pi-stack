@@ -47,7 +47,10 @@ fs.mkdirSync(sharedTarget, { recursive: true });
 fs.writeFileSync(path.join(sharedTarget, "runtime.cjs"), transpile(path.join(repoRoot, "extensions/_shared/runtime.ts")));
 fs.copyFileSync(path.join(sharedTarget, "runtime.cjs"), path.join(sharedTarget, "runtime.js"));
 
-for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "bootstrap", "backend-detect", "i18n", "brain-layout", "git-sync"]) {
+// ADR 0022 P1: "redact" added — git-sync.ts re-exports redactCredentials
+// from ./redact. The for-loop already writes both .cjs and .js aliases,
+// so adding the name suffices.
+for (const file of ["vault-writer", "vault-reader", "vault-bash", "keychain", "bootstrap", "backend-detect", "i18n", "brain-layout", "git-sync", "redact"]) {
   // P1-2 audit fix 2026-05-16 round 4: brain-layout.ts now imports
   // `../_shared/runtime` for computeAbrainStateGitignoreNext. Rewrite
   // the relative require to point at the shared helper we already wrote

@@ -465,6 +465,9 @@ fs.writeFileSync(
 );
 fs.writeFileSync(path.join(tmpDir, "i18n.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/i18n.ts")));
 fs.writeFileSync(path.join(tmpDir, "git-sync.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/git-sync.ts")));
+// ADR 0022 P1: git-sync.ts now re-exports redactCredentials from ./redact.
+// transpile + extensionless .js alias so CJS `require("./redact")` resolves.
+fs.writeFileSync(path.join(tmpDir, "redact.cjs"), transpileTsToCjs(path.join(repoRoot, "extensions/abrain/redact.ts")));
 // vault-reader.cjs keeps its own relative imports (./keychain, ./vault-writer),
 // so provide extensionless .js companions in the tmp dir as well.
 fs.copyFileSync(path.join(tmpDir, "keychain.cjs"), path.join(tmpDir, "keychain.js"));
@@ -472,6 +475,7 @@ fs.copyFileSync(path.join(tmpDir, "vault-writer.cjs"), path.join(tmpDir, "vault-
 fs.copyFileSync(path.join(tmpDir, "vault-reader.cjs"), path.join(tmpDir, "vault-reader.js"));
 fs.copyFileSync(path.join(tmpDir, "brain-layout.cjs"), path.join(tmpDir, "brain-layout.js"));
 fs.copyFileSync(path.join(tmpDir, "git-sync.cjs"), path.join(tmpDir, "git-sync.js"));
+fs.copyFileSync(path.join(tmpDir, "redact.cjs"), path.join(tmpDir, "redact.js"));
 // _shared/runtime is required by index.ts via ../_shared/runtime; mirror that layout.
 const sharedTargetDir = path.join(tmpDir, "_shared");
 fs.mkdirSync(sharedTargetDir, { recursive: true });

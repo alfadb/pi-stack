@@ -93,6 +93,8 @@ const abrainHome = path.join(fakeHome, ".abrain");
 fs.mkdirSync(abrainHome, { recursive: true, mode: 0o700 });
 
 // Compile relevant abrain modules into the tmp dir (same pattern as other smokes).
+// ADR 0022 P1: "redact" added — git-sync.ts re-exports redactCredentials
+// from ./redact. The loop already writes both .cjs and .js aliases.
 for (const file of [
   "backend-detect",
   "bootstrap",
@@ -103,6 +105,7 @@ for (const file of [
   "brain-layout",
   "i18n",
   "git-sync",
+  "redact",
 ]) {
   // P1-2 audit fix 2026-05-16 round 4: brain-layout.ts now imports
   // `../_shared/runtime` for computeAbrainStateGitignoreNext. Rewrite

@@ -36,7 +36,8 @@
     "smoke:abrain-git-sync": "node scripts/smoke-abrain-git-sync.mjs",
     "smoke:abrain-active-project": "node scripts/smoke-abrain-active-project.mjs",
     "smoke:abrain-secret-scope": "node scripts/smoke-abrain-secret-scope.mjs",
-    "smoke:abrain-i18n": "node scripts/smoke-abrain-i18n.mjs"
+    "smoke:abrain-i18n": "node scripts/smoke-abrain-i18n.mjs",
+    "smoke:abrain-redact": "node scripts/smoke-abrain-redact.mjs"
   },
   "pi": {
     "extensions": ["./extensions"]
