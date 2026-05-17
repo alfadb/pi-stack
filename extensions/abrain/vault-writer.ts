@@ -228,7 +228,14 @@ export type VaultEventOp =
   | "bash_inject"
   | "bash_inject_block"
   | "bash_output_release"
-  | "bash_output_withhold";
+  | "bash_output_withhold"
+  // ADR 0022: prompt_user lane shares the VAULT_EVENTS jsonl file but
+  // uses `lane:"prompt_user"` so vault tooling can filter it out.
+  // Two rows per prompt (ask + answer/result), one row for blocked
+  // entries that never reach the dialog.
+  | "prompt_user_ask"
+  | "prompt_user_answer"
+  | "prompt_user_blocked";
 
 export interface VaultEvent {
   ts: string;

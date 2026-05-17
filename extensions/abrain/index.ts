@@ -74,6 +74,15 @@ import {
   type ResolveActiveProjectResult,
 } from "../_shared/runtime";
 import { extractUserMessageText, localizePrompt, recordUserMessage } from "./i18n";
+// ADR 0022 P2: prompt_user LLM tool surface. Types only at top level;
+// runtime symbols are `require()`d inside `activate()` so any consumer
+// that loads abrain/index.ts purely for its EXPORTS (smoke fixtures,
+// type-introspection tools) does NOT pull in the prompt_user subtree.
+import type {
+  PromptUserHandlerDeps,
+} from "./prompt-user/handler";
+import type { PromptAuditSink } from "./prompt-user/service";
+import type { PiTuiBag } from "./prompt-user/ui/PromptDialog";
 
 // ── ~/.abrain layout constants (single source — referenced from spec §3) ──
 // Priority: ABRAIN_ROOT env var > default ~/.abrain (aligned with memory/parser.ts)
@@ -872,6 +881,33 @@ export default function activate(pi: ExtensionAPI): void {
         }
         vaultBashRuns.clear();
       } catch { /* best-effort */ }
+      // ADR 0022 INV-B: drain any pending prompt_user dialogs so the
+      // promises resolve with `cancelled` instead of leaking. This
+      // also covers the case where the user hits Ctrl+C while a
+      // PromptDialog overlay is open. Lazy require so this code path
+      // is only realized when activate() has actually run.
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const promptManager = require("./prompt-user/manager") as {
+          cancelAllPending: (reason?: string) => number;
+        };
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const promptHandler = require("./prompt-user/handler") as {
+          resetSoftCapCounter: () => void;
+        };
+        const cancelled = promptManager.cancelAllPending("cancelled");
+        if (cancelled > 0) {
+          safeAuditAppend({
+            ts: new Date().toISOString(),
+            op: "prompt_user_blocked",
+            scope: "global",
+            lane: "prompt_user",
+            reason: "session_shutdown",
+            keys: [String(cancelled)],
+          });
+        }
+        promptHandler.resetSoftCapCounter();
+      } catch { /* best-effort — prompt_user may not be wired yet */ }
     });
   }
 
@@ -972,6 +1008,207 @@ export default function activate(pi: ExtensionAPI): void {
         }
       },
     });
+  }
+
+  // ── ADR 0022 P2: register prompt_user LLM tool ──────────────────
+  if (typeof toolRegistry.registerTool === "function") {
+    // Lazy require the prompt-user subtree + pi-tui. Doing this inside
+    // activate() (rather than at top-level import) keeps headless
+    // smoke fixtures that only need abrain EXPORTS from being forced
+    // to satisfy the prompt-user / pi-tui resolution graph.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const promptHandlerModule = require("./prompt-user/handler") as {
+      executePromptUserTool: typeof import("./prompt-user/handler").executePromptUserTool;
+    };
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const promptManagerModule = require("./prompt-user/manager") as {
+      getPendingPromptCount: () => number;
+    };
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const promptDialogModule = require("./prompt-user/ui/PromptDialog") as {
+      makeBuildDialog: typeof import("./prompt-user/ui/PromptDialog").makeBuildDialog;
+    };
+    let pitui: PiTuiBag | undefined;
+    try {
+      // The pitui surface is intentionally narrow (see PromptDialog.ts
+      // `PiTuiBag`). We rely on each named export being present;
+      // missing names would surface as runtime errors on first prompt.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const tuiModule = require("@earendil-works/pi-tui");
+      // DynamicBorder lives in pi-coding-agent, not pi-tui — pull from
+      // the coding-agent re-export so PromptDialog sees a unified bag.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const codingAgent = require("@earendil-works/pi-coding-agent");
+      pitui = {
+        Container: tuiModule.Container,
+        Text: tuiModule.Text,
+        Input: tuiModule.Input,
+        SelectList: tuiModule.SelectList,
+        DynamicBorder: codingAgent.DynamicBorder,
+      };
+    } catch (err) {
+      // pi-tui not available in this process — OK, prompt_user will
+      // gracefully reject with ui-unavailable when called.
+      void err;
+    }
+
+    // Audit sink: feeds prompt_user events into VAULT_EVENTS with
+    // lane:"prompt_user". Vault tooling that grep on lane="vault_release"
+    // (e.g. /abrain status) ignores these rows; new prompt_user smoke
+    // greps on lane="prompt_user" instead.
+    const promptAudit: PromptAuditSink = {
+      recordAsk(ev) {
+        safeAuditAppend({
+          ts: ev.startedAt,
+          op: "prompt_user_ask",
+          scope: "global",
+          lane: "prompt_user",
+          // We reuse `keys[]` to carry the prompt id and question types;
+          // VaultEvent.keys is typed `string[]` and intended for multi-key
+          // events, but the field is loose enough that the audit
+          // consumer (sediment evidence pre-pass, P3) can parse it.
+          keys: [`id:${ev.id}`, `n:${ev.questionCount}`, ...ev.types.map((t) => `t:${t}`)],
+          description: ev.reason.slice(0, 200),
+        });
+      },
+      recordResult(ev) {
+        safeAuditAppend({
+          ts: new Date().toISOString(),
+          op: "prompt_user_answer",
+          scope: "global",
+          lane: "prompt_user",
+          keys: [
+            `id:${ev.id}`,
+            `outcome:${ev.outcome}`,
+            `duration_ms:${ev.durationMs}`,
+            ...ev.perQuestion.map((pq) =>
+              `q:${pq.qid}=${pq.type}:${pq.lengthBucket ?? ""}`,
+            ),
+          ],
+          // Description carries the human-readable summary (already
+          // redacted; secret summaries are placeholders).
+          description: ev.perQuestion
+            .map((pq) => `${pq.qid}=${pq.summary}`)
+            .join(" | ")
+            .slice(0, 500),
+        });
+      },
+    };
+
+    const handlerDeps: PromptUserHandlerDeps = {
+      dialog: {
+        buildDialog: pitui
+          ? promptDialogModule.makeBuildDialog(pitui)
+          : () => {
+              throw new Error("prompt_user: pi-tui not loaded in this process");
+            },
+      },
+      audit: promptAudit,
+      recordBlocked(ev) {
+        safeAuditAppend({
+          ts: new Date().toISOString(),
+          op: "prompt_user_blocked",
+          scope: "global",
+          lane: "prompt_user",
+          reason: ev.reason,
+          description: ev.detail?.slice(0, 200),
+        });
+      },
+    };
+
+    toolRegistry.registerTool({
+      name: "prompt_user",
+      label: "Ask User a Structured Question",
+      description:
+        "Pause the turn and ask the user 1-4 structured questions (single / multi / text / secret). " +
+        "Returns user-attested answers without ending the turn. " +
+        "Use ONLY when you genuinely need a user decision that branching cannot determine " +
+        "(framework choice, irreversible deploy confirmation, ambiguous spec clarification). " +
+        "NOT a substitute for thinking out loud. Sub-pi processes register no prompt_user tool.",
+      promptSnippet:
+        "prompt_user({ reason, questions: [{ id, header, question, type, options? }], timeoutSec? })",
+      promptGuidelines: [
+        "Issue a single prompt_user call with multiple questions[] rather than chaining calls. Concurrent prompts are rejected (INV-I).",
+        "reason explains why you must pause (e.g. 'project framework choice affects scaffolding'), not a re-statement of the questions.",
+        "header \u2264 12 display cells (CJK char = 2 cells, ASCII = 1 cell); question is a complete sentence; option labels 1\u20135 words.",
+        "memory_search past preferences first (e.g. memory_search('user preference framework')) before asking.",
+        "For irreversibility (deploy, rm -rf, push to main), prefer type:'single' with explicit Yes/No labels rather than free-form text.",
+        "type:'secret' raw input never reaches you \u2014 you get a placeholder. Use vault_release for known stored secrets instead.",
+      ],
+      parameters: {
+        type: "object",
+        properties: {
+          reason: {
+            type: "string",
+            description:
+              "Why you must pause for user input. Concrete + irreversibility / ambiguity rationale.",
+          },
+          questions: {
+            type: "array",
+            minItems: 1,
+            maxItems: 4,
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string", description: "snake_case identifier; unique within the call." },
+                header: { type: "string", description: "\u2264 12 display cells; CJK = 2 each." },
+                question: { type: "string", description: "Complete sentence shown above options." },
+                type: { type: "string", enum: ["single", "multi", "text", "secret"] },
+                options: {
+                  type: "array",
+                  minItems: 2,
+                  maxItems: 4,
+                  description: "Required for single/multi; forbidden for text/secret. 'Other (specify)' is appended server-side.",
+                  items: {
+                    type: "object",
+                    properties: {
+                      label: { type: "string", description: "1\u20135 words." },
+                      description: { type: "string" },
+                      recommended: { type: "boolean", description: "At most one option per question." },
+                    },
+                    required: ["label"],
+                  },
+                },
+              },
+              required: ["id", "header", "question", "type"],
+            },
+          },
+          timeoutSec: {
+            type: "number",
+            description: "Clamped to [30, 1800]; default 600.",
+          },
+        },
+        required: ["reason", "questions"],
+      },
+      async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        // The handler accepts a richer ctx than the abrain Vault one;
+        // narrow with a cast. ui.custom is exposed by pi RPC + TUI.
+        const promptCtx = ctx as unknown as {
+          ui: {
+            custom?: unknown;
+            select?: unknown;
+            input?: unknown;
+            notify?: unknown;
+          };
+          signal?: AbortSignal;
+          hasUI?: boolean;
+        };
+        const json = await promptHandlerModule.executePromptUserTool(
+          params,
+          signal,
+          promptCtx as unknown as Parameters<typeof promptHandlerModule.executePromptUserTool>[2],
+          handlerDeps,
+        );
+        return json;
+      },
+    });
+
+    // Expose pending count for compaction-tuner / smoke introspection.
+    // We attach to globalThis (not the pi API) because compaction-tuner
+    // is a separate extension and a runtime fetch keeps the coupling
+    // explicit + breakable for tests.
+    (globalThis as { __abrainPromptUserGetPending?: () => number }).__abrainPromptUserGetPending =
+      () => promptManagerModule.getPendingPromptCount();
   }
 
   if (typeof registry.registerCommand !== "function") return;

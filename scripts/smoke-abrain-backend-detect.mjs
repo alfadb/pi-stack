@@ -476,6 +476,19 @@ fs.copyFileSync(path.join(tmpDir, "vault-reader.cjs"), path.join(tmpDir, "vault-
 fs.copyFileSync(path.join(tmpDir, "brain-layout.cjs"), path.join(tmpDir, "brain-layout.js"));
 fs.copyFileSync(path.join(tmpDir, "git-sync.cjs"), path.join(tmpDir, "git-sync.js"));
 fs.copyFileSync(path.join(tmpDir, "redact.cjs"), path.join(tmpDir, "redact.js"));
+// ADR 0022 P2: abrain/index.ts activate() lazy-requires the prompt-user
+// subtree when toolRegistry.registerTool is present. Mirror the layout.
+const promptUserDir = path.join(tmpDir, "prompt-user");
+const promptUserUiDir = path.join(promptUserDir, "ui");
+fs.mkdirSync(promptUserUiDir, { recursive: true });
+for (const m of ["types", "schema", "manager", "service", "handler"]) {
+  const cjsPath = path.join(promptUserDir, `${m}.cjs`);
+  fs.writeFileSync(cjsPath, transpileTsToCjs(path.join(repoRoot, "extensions/abrain/prompt-user", `${m}.ts`)));
+  fs.copyFileSync(cjsPath, path.join(promptUserDir, `${m}.js`));
+}
+const dialogCjs = path.join(promptUserUiDir, "PromptDialog.cjs");
+fs.writeFileSync(dialogCjs, transpileTsToCjs(path.join(repoRoot, "extensions/abrain/prompt-user/ui/PromptDialog.ts")));
+fs.copyFileSync(dialogCjs, path.join(promptUserUiDir, "PromptDialog.js"));
 // _shared/runtime is required by index.ts via ../_shared/runtime; mirror that layout.
 const sharedTargetDir = path.join(tmpDir, "_shared");
 fs.mkdirSync(sharedTargetDir, { recursive: true });

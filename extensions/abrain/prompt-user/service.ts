@@ -1,0 +1,423 @@
+/**
+ * Internal `askPromptUser` service (ADR 0022 P2).
+ *
+ * The handler.ts wraps this with the LLM tool surface. Future slash
+ * commands (e.g. `/about-me` from ADR 0021 G2) call `askPromptUser`
+ * DIRECTLY so they don't have to pretend to be LLMs.
+ *
+ * Responsibilities:
+ *   1. Acquire a pending slot via `manager.acquirePending`.
+ *   2. Open the PromptDialog overlay via `ctx.ui.custom(...)` OR fall
+ *      back to chained `ctx.ui.select/input` when `ctx.ui.custom` is
+ *      unavailable (ADR 0022 §D7, R4 fix: NOT first-line reject).
+ *   3. Convert the dialog's raw answer payload into the canonical
+ *      `PromptUserResult` shape, applying secret redaction.
+ *   4. Write audit rows BEFORE returning (one `prompt_user_ask` row,
+ *      one `prompt_user_answer` / `_failed` row per ADR 0022 §D6.3).
+ *   5. NEVER throw — translate any unexpected error into
+ *      `{ ok:false, reason:"cancelled", detail:"internal error: ..." }`.
+ *
+ * Note: `redactPromptParams` (the credential pre-pass of §D6.2) is the
+ * handler's job and runs BEFORE we get here; service.ts works on
+ * already-sanitized params.
+ */
+
+import type { PromptUserParams, PromptUserResult } from "./types";
+import { acquirePending } from "./manager";
+import { lengthBucket, redactSecretAnswer } from "../redact";
+
+// ── External adapters ───────────────────────────────────────────────
+
+/**
+ * Subset of pi's `ctx.ui` that we depend on. Kept minimal so the
+ * service is straightforward to mock in smoke fixtures.
+ *
+ * `custom` is intentionally typed `unknown` here because the precise
+ * generic signature lives in the pi-tui types which we don't want to
+ * pull in across the test boundary. The PromptDialog adapter typed
+ * below narrows that down at the wiring layer.
+ */
+export interface PromptUserCtx {
+  ui: {
+    custom?: (
+      factory: PromptDialogFactory,
+      opts: { overlay: true; overlayOptions?: Record<string, unknown> },
+    ) => Promise<RawDialogResult | null>;
+    select?: (
+      title: string,
+      items: string[],
+      opts?: { signal?: AbortSignal },
+    ) => Promise<string | undefined>;
+    input?: (
+      prompt: string,
+      opts?: { signal?: AbortSignal },
+    ) => Promise<string | undefined>;
+    notify?: (message: string, level?: string) => void;
+  };
+  signal?: AbortSignal;
+  hasUI?: boolean;
+}
+
+/** What the PromptDialog component passes back via `done(...)`. */
+export interface RawDialogResult {
+  /** "submit" — user submitted answers; "cancel" — user pressed Esc / Reject. */
+  outcome: "submit" | "cancel";
+  /** id -> array of selected labels (or single text/secret string). */
+  answers: Record<string, string[]>;
+  /** Raw secrets in plaintext, keyed by question id. Caller MUST
+   * redact these before they cross any I/O boundary. The PromptDialog
+   * passes them here so service.ts can compute `lengthBucket` for
+   * audit metadata; immediately after that, they are dropped. */
+  rawSecrets: Record<string, string>;
+}
+
+export type PromptDialogFactory = (
+  tui: unknown,
+  theme: unknown,
+  kb: unknown,
+  done: (value: RawDialogResult | null) => void,
+) => unknown;
+
+/**
+ * Audit sink. Concrete wiring lives in `extensions/abrain/index.ts`
+ * where it shares `appendVaultReadAudit` (same VAULT_EVENTS file, just
+ * a different `lane`). Service takes it as a callable so smoke can
+ * inject a recorder.
+ */
+export interface PromptAuditSink {
+  recordAsk(ev: {
+    id: string;
+    reason: string;
+    questionCount: number;
+    types: string[];
+    startedAt: string;
+  }): void;
+  recordResult(ev: {
+    id: string;
+    outcome: "answered" | "rejected" | "timeout" | "cancelled" | "ui_unavailable";
+    durationMs: number;
+    /** Per-question metadata. Secrets carry only `lengthBucket`. */
+    perQuestion: Array<{
+      qid: string;
+      type: string;
+      // For non-secret: short summary of the chosen label(s).
+      // For secret: `[REDACTED_SECRET:<id>]`.
+      summary: string;
+      lengthBucket?: "1-8" | "9-32" | ">32";
+    }>;
+  }): void;
+}
+
+// ── PromptDialog factory adapter ────────────────────────────────────
+
+/**
+ * Type of the lazy importer for the actual TUI component. service.ts
+ * does NOT statically `import "./ui/PromptDialog"` because the dialog
+ * pulls in `@earendil-works/pi-tui` runtime — fine in pi process,
+ * heavy for smoke. Caller passes the factory in via `deps`.
+ */
+export interface PromptDialogDeps {
+  buildDialog: (args: {
+    params: PromptUserParams;
+    variant: "question" | "vault_release" | "bash_output_release";
+    onDone: (result: RawDialogResult | null) => void;
+    tui: unknown;
+    theme: unknown;
+    keybindings: unknown;
+  }) => unknown;
+}
+
+// ── Service entry ───────────────────────────────────────────────────
+
+export interface AskPromptUserOptions {
+  /** Variant only matters when caller is vault_release / vault-bash;
+   * LLM-facing `prompt_user(...)` always passes "question". P3 wires
+   * the other two. */
+  variant?: "question" | "vault_release" | "bash_output_release";
+}
+
+/**
+ * Open a PromptDialog overlay and resolve with a canonical
+ * `PromptUserResult`. This is the single funnel through which all
+ * paused-turn UX flows.
+ *
+ * Caller invariants:
+ *   - `params` must already be schema-validated and credential-redacted.
+ *   - `ctx.hasUI` must be true (handler rejects with `ui-unavailable`
+ *     otherwise).
+ *   - Sub-pi guard must have been checked upstream (handler /
+ *     dispatch); this layer trusts its caller.
+ */
+export async function askPromptUser(
+  ctx: PromptUserCtx,
+  params: PromptUserParams,
+  deps: PromptDialogDeps,
+  audit: PromptAuditSink,
+  options: AskPromptUserOptions = {},
+): Promise<PromptUserResult> {
+  const startedAt = Date.now();
+  const variant = options.variant ?? "question";
+  const timeoutSec = params.timeoutSec ?? 600;
+
+  const handle = acquirePending({
+    timeoutSec,
+    upstreamSignal: ctx.signal,
+  });
+
+  // ── Audit: prompt_user_ask ──
+  audit.recordAsk({
+    id: handle.id,
+    reason: params.reason,
+    questionCount: params.questions.length,
+    types: params.questions.map((q) => q.type),
+    startedAt: new Date(startedAt).toISOString(),
+  });
+
+  // ── Resolve helper that also writes the result audit row ──
+  const finalizeWithAudit = (result: PromptUserResult): PromptUserResult => {
+    const outcome: "answered" | "rejected" | "timeout" | "cancelled" | "ui_unavailable" =
+      result.ok
+        ? "answered"
+        : result.reason === "timeout"
+          ? "timeout"
+          : result.reason === "user-rejected"
+            ? "rejected"
+            : result.reason === "ui-unavailable"
+              ? "ui_unavailable"
+              : "cancelled";
+    const perQuestion = params.questions.map((q) => {
+      if (q.type === "secret") {
+        // For secret: NEVER record raw. We MAY have a length bucket
+        // when we successfully read a raw value before redacting.
+        // The detail is supplied via `result.detail` flag set by
+        // the dialog→service bridge below.
+        const raw = (result as { __secretLengths?: Record<string, string> })
+          .__secretLengths?.[q.id];
+        return {
+          qid: q.id,
+          type: q.type,
+          summary: `[REDACTED_SECRET:${q.id}]`,
+          lengthBucket: (raw as "1-8" | "9-32" | ">32" | undefined),
+        };
+      }
+      const a = result.ok ? result.answers[q.id] ?? [] : [];
+      const summary = a.length === 0
+        ? "(no answer)"
+        : a.length === 1
+          ? a[0]
+          : `[${a.length} selected: ${a.join(", ")}]`;
+      return { qid: q.id, type: q.type, summary };
+    });
+    audit.recordResult({
+      id: handle.id,
+      outcome,
+      durationMs: result.durationMs,
+      perQuestion,
+    });
+    // Strip the internal channel before returning to caller.
+    const clean = { ...result } as PromptUserResult & { __secretLengths?: unknown };
+    delete clean.__secretLengths;
+    return clean;
+  };
+
+  // ── Choose path: ctx.ui.custom (primary) or chained fallback (§D7) ──
+  if (typeof ctx.ui.custom === "function") {
+    // PRIMARY PATH ──────────────────────────────────────────────────
+    // Pump dialog result through the manager promise. We do NOT await
+    // ctx.ui.custom directly; instead the factory's `done(...)` callback
+    // resolves the manager handle. This means timeout / signal / shutdown
+    // all win the race uniformly without needing custom() to be
+    // cancellable.
+    let customPromise: Promise<unknown> | null = null;
+    try {
+      customPromise = ctx.ui.custom(
+        (tui, theme, kb, done) =>
+          deps.buildDialog({
+            params,
+            variant,
+            tui,
+            theme,
+            keybindings: kb,
+            onDone: (result) => done(result),
+          }) as unknown,
+        { overlay: true, overlayOptions: { width: "70%", minWidth: 60 } },
+      );
+    } catch (err) {
+      // ctx.ui.custom can throw synchronously when overlay subsystem
+      // is unhealthy — degrade to chained fallback.
+      ctx.ui.notify?.(`prompt_user: overlay failed, falling back: ${(err as Error)?.message}`, "warning");
+      return finalizeWithAudit(
+        await chainedFallback(ctx, params, handle, startedAt),
+      );
+    }
+
+    // Wire custom's promise into manager so async errors don't strand us.
+    customPromise.then(
+      (rawResult) => {
+        // ctx.ui.custom resolves with whatever `done()` was called with,
+        // or null if the user dismissed without `done`.
+        if (!rawResult) {
+          handle.resolve({
+            ok: false,
+            reason: "user-rejected",
+            durationMs: Date.now() - startedAt,
+          });
+          return;
+        }
+        const raw = rawResult as RawDialogResult;
+        if (raw.outcome === "cancel") {
+          handle.resolve({
+            ok: false,
+            reason: "user-rejected",
+            durationMs: Date.now() - startedAt,
+          });
+          return;
+        }
+        // Build the canonical answers / redactions structure.
+        const redactions: Record<string, { type: "secret"; placeholder: string }> = {};
+        const secretLengths: Record<string, "1-8" | "9-32" | ">32"> = {};
+        const answers: Record<string, string[]> = {};
+        for (const q of params.questions) {
+          if (q.type === "secret") {
+            const raw0 = raw.rawSecrets[q.id] ?? "";
+            const placeholder = redactSecretAnswer(raw0, q.id);
+            answers[q.id] = [placeholder];
+            redactions[q.id] = { type: "secret", placeholder };
+            secretLengths[q.id] = lengthBucket(raw0);
+            // No further reference to raw0 in this closure.
+          } else {
+            answers[q.id] = raw.answers[q.id] ?? [];
+          }
+        }
+        const hasSecret = Object.keys(redactions).length > 0;
+        handle.resolve({
+          ok: true,
+          answers,
+          durationMs: Date.now() - startedAt,
+          ...(hasSecret ? { redactions } : {}),
+          // Stashed for audit metadata; stripped before returning.
+          __secretLengths: secretLengths,
+        } as PromptUserResult & { __secretLengths: Record<string, string> });
+      },
+      (err) => {
+        ctx.ui.notify?.(
+          `prompt_user: overlay error: ${(err as Error)?.message}`,
+          "warning",
+        );
+        handle.resolve({
+          ok: false,
+          reason: "cancelled",
+          durationMs: Date.now() - startedAt,
+          detail: `overlay error: ${(err as Error)?.message}`.slice(0, 200),
+        });
+      },
+    );
+
+    const result = await handle.promise;
+    return finalizeWithAudit(result);
+  }
+
+  // FALLBACK PATH ──────────────────────────────────────────────────
+  return finalizeWithAudit(
+    await chainedFallback(ctx, params, handle, startedAt),
+  );
+}
+
+/**
+ * §D7 chained fallback: when `ctx.ui.custom` is unavailable, drive
+ * each question through `ctx.ui.select` (single/multi) or
+ * `ctx.ui.input` (text) in sequence. `type:"secret"` cannot fall back
+ * — there is no masked input — so we return `ui-unavailable`
+ * (also matches INV-A note: secret + custom-unavailable → reject).
+ */
+async function chainedFallback(
+  ctx: PromptUserCtx,
+  params: PromptUserParams,
+  handle: { id: string; resolve: (r: PromptUserResult) => void; promise: Promise<PromptUserResult>; signal: AbortSignal },
+  startedAt: number,
+): Promise<PromptUserResult> {
+  // If we hit "secret" without ui.custom we cannot proceed safely.
+  if (params.questions.some((q) => q.type === "secret")) {
+    handle.resolve({
+      ok: false,
+      reason: "ui-unavailable",
+      durationMs: Date.now() - startedAt,
+      detail: "type:\"secret\" requires PromptDialog overlay (no masked input in fallback chain)",
+    });
+    return handle.promise;
+  }
+  if (typeof ctx.ui.select !== "function" || typeof ctx.ui.input !== "function") {
+    handle.resolve({
+      ok: false,
+      reason: "ui-unavailable",
+      durationMs: Date.now() - startedAt,
+      detail: "ctx.ui.custom unavailable AND ctx.ui.select/input missing",
+    });
+    return handle.promise;
+  }
+
+  // Run questions sequentially; cancellation tears the chain down via
+  // handle.signal.
+  const answers: Record<string, string[]> = {};
+  for (const q of params.questions) {
+    if (handle.signal.aborted) {
+      // Manager already resolved with timeout/cancelled; nothing more
+      // to do. Return promise so caller sees the manager's verdict.
+      return handle.promise;
+    }
+    if (q.type === "single" || q.type === "multi") {
+      const labels = (q.options ?? []).map((o) => o.label);
+      // Always append "Other (specify)" — INV: LLM cannot disable Other
+      const otherSentinel = "Other (specify)";
+      const items = [...labels, otherSentinel];
+      const pick = await ctx.ui.select(`${q.header}: ${q.question}`, items, {
+        signal: handle.signal,
+      });
+      if (pick === undefined) {
+        handle.resolve({
+          ok: false,
+          reason: "user-rejected",
+          durationMs: Date.now() - startedAt,
+        });
+        return handle.promise;
+      }
+      let final = pick;
+      if (pick === otherSentinel) {
+        const free = await ctx.ui.input("Enter your answer:", {
+          signal: handle.signal,
+        });
+        if (!free) {
+          handle.resolve({
+            ok: false,
+            reason: "user-rejected",
+            durationMs: Date.now() - startedAt,
+          });
+          return handle.promise;
+        }
+        final = free;
+      }
+      answers[q.id] = [final];
+    } else {
+      // text
+      const ans = await ctx.ui.input(`${q.header}: ${q.question}`, {
+        signal: handle.signal,
+      });
+      if (ans === undefined) {
+        handle.resolve({
+          ok: false,
+          reason: "user-rejected",
+          durationMs: Date.now() - startedAt,
+        });
+        return handle.promise;
+      }
+      answers[q.id] = [ans];
+    }
+  }
+  handle.resolve({
+    ok: true,
+    answers,
+    durationMs: Date.now() - startedAt,
+    detail: "answered via fallback chain (ctx.ui.custom unavailable)",
+  });
+  return handle.promise;
+}
