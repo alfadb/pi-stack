@@ -612,13 +612,49 @@ export default function activate(pi: ExtensionAPI): void {
   // session starts with the freshest knowledge sediment from other devices.
   // Fast-forward only — divergence aborts silently (user runs /abrain sync
   // to see the runbook). Skipped when there's no git remote.
-  if (process.env.PI_ABRAIN_NO_AUTOSYNC !== "1") {
+  // 2026-05-17 (ADR 0020 rev.): divergence now triggers `git merge`
+  // (3-way, no LLM); only a textual conflict surfaces a runbook. When
+  // auto-merge produces a local merge commit we also schedule a push
+  // so the merge becomes visible to other devices (Round 3 MAJOR-D).
+  // ORDERING (Round 4 gpt MAJOR-1): the runStartupAutoSync() call below
+  // MUST happen AFTER the .state/ gitignore guard so the working-tree-
+  // clean preflight sees the canonical "ignore .state/" rule on first
+  // run — otherwise an older abrain repo with .state/git-sync.jsonl
+  // present but ungitignored would be permanently flagged as dirty by
+  // the preflight. We wrap in a function (rather than reordering code
+  // blocks) so the ordering is enforced by call-site, not by line
+  // position which is fragile under future edits.
+  const runStartupAutoSync = (): void => {
+    if (process.env.PI_ABRAIN_NO_AUTOSYNC === "1") return;
     fetchAndFF({ abrainHome: ABRAIN_HOME })
       .then((event) => {
-        if (event.result === "ok" && event.behind && event.behind > 0) {
+        if (event.result === "ok" && event.merged && event.merged > 0) {
+          console.error(`[abrain] git fetch: auto-merged ${event.merged} commit(s) from origin/main (no conflicts); pushing merge…`);
+          // Fire-and-forget: pushAsync has its own audit + single-flight.
+          // Round 4 gpt MINOR-1: always emit a terminal line so the
+          // "pushing…" announcement is never left hanging — even for
+          // noop (someone else already pushed the merge) or skipped
+          // (origin removed between merge and push).
+          pushAsync({ abrainHome: ABRAIN_HOME })
+            .then((pushEv) => {
+              if (pushEv.result === "ok") {
+                console.error(`[abrain] git push: auto-merge commit landed on origin/main`);
+              } else if (pushEv.result === "noop") {
+                console.error(`[abrain] git push: auto-merge already on origin/main (noop)`);
+              } else if (pushEv.result === "skipped") {
+                console.error(`[abrain] git push: skipped (origin remote no longer configured)`);
+              } else {
+                console.error(`[abrain] git push of auto-merge ${pushEv.result}: ${pushEv.error || "unknown"} (next sediment commit will retry)`);
+              }
+            })
+            .catch(() => { /* pushAsync never throws; defense in depth */ });
+        } else if (event.result === "ok" && event.behind && event.behind > 0) {
           console.error(`[abrain] git fetch: fast-forwarded ${event.behind} commit(s) from origin/main`);
-        } else if (event.result === "diverged") {
-          console.error(`[abrain] git fetch: diverged (local ahead ${event.ahead}, remote ahead ${event.behind}). Run /abrain sync for resolution runbook.`);
+        } else if (event.result === "conflict") {
+          const where = event.conflictPaths && event.conflictPaths.length > 0
+            ? ` in ${event.conflictPaths.length} file(s): ${event.conflictPaths.slice(0, 3).join(", ")}${event.conflictPaths.length > 3 ? ", ..." : ""}`
+            : "";
+          console.error(`[abrain] git fetch: merge conflict${where}. Working tree restored. Run /abrain sync for runbook.`);
         } else if (event.result === "failed" || event.result === "timeout") {
           console.error(`[abrain] git fetch ${event.result}: ${event.error || "unknown"} (auto-sync continues; use /abrain sync to retry)`);
         }
@@ -627,7 +663,7 @@ export default function activate(pi: ExtensionAPI): void {
         // git-sync ops should never throw, but belt-and-suspenders:
         console.error(`[abrain] git fetch threw (should be caught internally):`, err);
       });
-  }
+  };
 
   // ── 7-zone layout bootstrap ──────────────────────────────────
   // Ensure brain directory structure exists (idempotent). Vault zone
@@ -657,6 +693,11 @@ export default function activate(pi: ExtensionAPI): void {
   } catch (err: any) {
     console.error(`[abrain] .state/ gitignore guard failed (non-fatal):`, err);
   }
+
+  // Round 4 (gpt MAJOR-1) ordering: invoke startup git sync AFTER the
+  // .state/ gitignore guard has run, so the dirty-tree preflight inside
+  // fetchAndFF never sees `.state/git-sync.jsonl` as untracked content.
+  runStartupAutoSync();
 
   const registry = pi as unknown as CommandRegistry;
   const toolRegistry = pi as unknown as ToolRegistry;
@@ -1488,9 +1529,13 @@ async function handleAbrain(rawArgs: string, ui: { notify(message: string, type?
       console.error(`[abrain] getGitSyncStatus failed:`, msg);
     }
     const syncMsg = syncStatus ? formatSyncStatus(syncStatus) : "";
-    const diverged = syncStatus ? (syncStatus.ahead > 0 && syncStatus.behind > 0) : false;
+    // 2026-05-17: warning is now triggered by last fetch hitting a textual
+    // conflict — the only state that genuinely needs user attention after
+    // the auto-merge revision of fetchAndFF. Mere ahead+behind both >0 is
+    // transient pre-fetch state, not a problem.
+    const needsAttention = syncStatus?.lastFetch?.result === "conflict";
     const fullMsg = syncMsg ? `${bindingMsg}\n\n${syncMsg}` : bindingMsg;
-    ui.notify(fullMsg, diverged ? "warning" : (current.activeProject ? "info" : "warning"));
+    ui.notify(fullMsg, needsAttention ? "warning" : (current.activeProject ? "info" : "warning"));
     return;
   }
   if (sub === "sync") {

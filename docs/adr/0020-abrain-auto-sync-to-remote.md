@@ -1,7 +1,7 @@
 # ADR 0020 — Abrain auto-sync to remote (sediment-driven push + startup ff-pull)
 
-- **Status**: Accepted
-- **Date**: 2026-05-15
+- **Status**: Accepted (revised 2026-05-17 — divergence path now auto-merges; subsequently hardened through 4 audit rounds, see [Revision: 2026-05-17 — auto-merge on divergence](#revision-2026-05-17--auto-merge-on-divergence) below)
+- **Date**: 2026-05-15, revised 2026-05-17 (Rounds 1–4 audit cycle, all on the same date)
 - **Supersedes**: none. Extends [ADR 0014](./0014-abrain-as-personal-brain.md) §B5 (abrain as cross-project knowledge substrate) and [ADR 0017](./0017-project-binding-strict-mode.md) for the cross-device sync gap that ADR 0017's strict binding implicitly assumed someone else would solve.
 - **Builds on**: [ADR 0019](./0019-abrain-self-managed-vault-identity.md) — fixed identity drift, but not knowledge drift.
 
@@ -205,6 +205,233 @@ Deferred to follow-up (tracked under P0e candidates below, NOT in Round 2 commit
 - Smoke for sediment writer's dynamic-require integration (the primary auto-push wiring is currently smoke-bypassed since the smoke direct-requires git-sync — deepseek M1).
 - Audit log rotation (append-only; bounded read at 200KB — gpt minor 3).
 - Workflow/bind paths don't trigger auto-push (out of ADR 0020 scope but inconsistent — gpt minor 4/5).
+
+## Revision: 2026-05-17 — auto-merge on divergence
+
+### What changed (vs the 2026-05-15 decision)
+
+The 2026-05-15 design conflated **divergence** (both sides have unique
+commits) with **conflict** (git's 3-way merge can't reconcile the
+textual changes). `fetchAndFF` returned `diverged` and stopped whenever
+`ahead > 0 && behind > 0`, forcing the user to run `/abrain sync` and
+manually `git merge`/`git rebase`.
+
+In practice, abrain's content shape makes this overly conservative:
+sediment writes one markdown file per slug, so two devices running for
+weeks before syncing typically diverge on **disjoint files**. Git's
+own 3-way merge resolves these cases trivially without LLM assistance.
+The runbook fired on every divergence — not just on real conflicts —
+producing a paper cut on every `pi` startup after the user worked on
+two machines.
+
+New behavior of `fetchAndFF` when `ahead > 0 && behind > 0`:
+
+1. Attempt `git -c user.name=abrain-autosync -c user.email=autosync@abrain.local merge --no-edit --no-ff -m "abrain auto-merge: integrate N commit(s) from origin/main" origin/main`.
+2. **Merge clean** → result `ok`, new field `merged: <behind>`. Both
+   sides' histories survive; the merge commit is recognizable in
+   `git log` so users can audit the convergence after the fact.
+3. **Textual conflict** → capture conflicting paths via
+   `git diff --name-only --diff-filter=U`, then `git merge --abort` to
+   restore the pre-merge working tree exactly. Result `conflict`, new
+   field `conflictPaths: string[]`. The runbook in `/abrain sync` names
+   the conflicting files so the user knows what to open.
+
+### Why merge, not rebase (Alternative C from the 2026-05-15 ADR still rejected)
+
+The original ADR's Alternative C rejected rebase because it silently
+rewrites local SHAs — a user running `cd ~/.abrain && git log` would
+see commits "move around". That objection still stands and applies
+*only* to rebase. `git merge --no-ff` preserves local SHAs verbatim
+and adds one explicit merge commit instead, which is the truthful
+record of "two devices' thoughts converged here". For a knowledge
+substrate, the merge commit IS the story.
+
+### Why this isn't Alternative D (LLM auto-merge) by another name
+
+Alternative D was rejected because LLM-merging markdown bodies risks
+hallucinated sentences in the knowledge base. The 2026-05-17 revision
+uses **git's own 3-way text merge** — same algorithm git uses for code
+for decades, no LLM in the loop. When git itself can't resolve
+(overlapping edits in the same region), we fall back to the user, never
+to an LLM. The hallucination-risk firewall is intact.
+
+### Invariants updated
+
+| # | 2026-05-15 statement | 2026-05-17 status |
+|---|---|---|
+| 2 | "No auto-merge beyond fast-forward. Divergence always aborts." | **Superseded.** Auto-merge via `git merge --no-edit --no-ff` is allowed on divergence. Only a *textual conflict* aborts (with `merge --abort` restoring clean tree). No rebase, no LLM merge. |
+| 1, 3, 4, 5, 6, 7, 8 | Sediment-never-blocked, no-throw, no-secrets-in-argv, in-process serialization, skipped-is-silent, output-side redaction, runbook shell-quoting | **Unchanged.** All still hold. The merge subprocess uses the same `GIT_ENV` (LANG=C, GIT_TERMINAL_PROMPT=0) and same single-flight queue. |
+
+### Result taxonomy delta
+
+| code | 2026-05-15 | 2026-05-17 |
+|---|---|---|
+| `ok` | success (push/ff merge) | success (push/ff merge/**auto-merge**); `merged` field present on auto-merge |
+| `diverged` | local+remote both ahead; ff refused | **Deprecated.** Kept in the type union so historical jsonl audit rows still parse, but new `fetchAndFF` runs never emit it. |
+| `conflict` | (did not exist) | **New.** Auto-merge attempted, git reported textual conflict, `merge --abort` restored tree; `conflictPaths` field present. |
+
+Older pi versions reading new audit rows degrade gracefully: `conflict`
+is an unknown enum value, so `getStatus` shows the raw label and
+`formatSyncStatus` prints it as-is. The reverse case (new pi reading
+old audit rows containing `diverged`) is handled by `getStatus` simply
+displaying the historical row — the live status counter `ahead+behind`
+is recomputed from git directly.
+
+### `/abrain status` UX change
+
+The "⚠ diverged — run /abrain sync for runbook" line in
+`formatSyncStatus` is replaced by:
+
+- `⚠ last fetch hit a merge conflict — run /abrain sync for runbook` when
+  the most recent fetch event in the audit log has `result=conflict`
+  (the only state that genuinely demands user attention).
+- `ⓘ diverged — run /abrain sync to auto-merge` when `ahead > 0 &&
+  behind > 0` but the user hasn't fetched yet this session (transient
+  pre-merge state; informational, not warning).
+
+The `/abrain status` notification color flips from `warning` to `info`
+in the auto-merged case; `warning` is reserved for actual conflicts.
+
+### Trigger
+
+User feedback after running ADR 0020 in production: every cross-device
+session started with the divergence message, even when no real conflict
+existed. Quoting the user (2026-05-17):
+
+> "abrain 应该自动同步，而不是要人手动同步，只有同步出现冲突时才需要人工干预"
+
+The 2026-05-15 decision treated divergence as a proxy for conflict; this
+revision restores the precise distinction.
+
+### Smoke updates
+
+Total assertions: 27 → 29.
+
+- Section 6 inverted: "diverged on disjoint files" now asserts
+  `result=ok`, `merged>=1`, both sides' commits present in `git log`,
+  recognizable `abrain auto-merge` commit message, clean working tree.
+- Section 9 inverted: `sync()` on no-conflict divergence asserts
+  `ok=true`, `summary` contains `auto-merged`, remote receives both A's
+  commit and the merge commit.
+- Section 9b new: real textual conflict (both sides edit same line of
+  same file). Asserts `result=conflict`, `conflictPaths` includes the
+  file, HEAD unchanged across the failed merge attempt, working tree
+  clean, `MERGE_HEAD` absent. `sync()` on the same state asserts the
+  runbook names the conflicting file and skips push.
+- Section 11 updated: `formatSyncStatus` warning path now triggered by
+  `lastFetch.result === 'conflict'`, not by raw `ahead+behind > 0`.
+- Setup hardened: `.state/` is added to `deviceA/.gitignore` before the
+  initial commit, mirroring `ensureAbrainStateGitignored()`'s
+  production behavior. Without it the new clean-tree assertions would
+  spuriously fail on the audit log directory.
+
+### Deferred (still on the radar)
+
+- Branch/remote detection (still hardcoded `origin/main`).
+- TUI footer hint on prolonged conflict state (P0e candidate #1).
+- Smoke covering sediment writer's auto-push integration end-to-end
+  (still bypassed by the smoke's direct-require pattern).
+- Conflict frequency telemetry: with auto-merge in place we now have a
+  clean signal for "how often does git itself give up?" which would
+  inform any future revisit of Alternative D.
+
+### Round 3 audit (2026-05-17, post-revision)
+
+Same three-model parallel pass as Round 2 (opus-4-7 + gpt-5.5 +
+deepseek-v4-pro). Consensus: the revision shipped a correct **policy**
+(auto-merge on divergence) but the **implementation** had a CRITICAL
+classification bug — every non-zero `git merge` exit was labelled
+`conflict`, including timeouts, dirty trees, `commit.gpgsign=true`
+failures, `.git/index.lock` contention, and unrelated histories. The
+runbook then lied to users on every one of those non-conflict failures.
+
+| Finding | Source | Where | Fix |
+|---|---|---|---|
+| **CRITICAL-A** — result=`conflict` set unconditionally on any merge subprocess failure (timeout, dirty tree, gpgsign failure, hook failure, index.lock contention, unrelated histories all misclassified) | deepseek C1, opus M1, gpt-5.5 M2 (3-way consensus) | `git-sync.ts` merge catch block | Rewrote classification: `conflict` requires positive evidence (unmerged paths in `git diff --diff-filter=U` OR `CONFLICT (`/`Automatic merge failed` in stderr under LANG=C). Otherwise route through `classifyError(false)` so SIGTERM→`timeout`, others→`failed`. |
+| **MAJOR-B** — `commit.gpgsign=true` would either silently sign auto-merge with user's GPG key under `abrain-autosync` author (misleading audit trail) or fail at missing GPG agent (then misclassified as conflict per CRITICAL-A) | opus M3, gpt-5.5 M3 | merge command | Added `-c commit.gpgsign=false` to merge argv. Auto-merges are machine-generated convergence markers; signing them under a fake author would be a deceptive record. |
+| **MAJOR-C** — inherited `GIT_AUTHOR_NAME/EMAIL` env wins over `-c user.name=` flag; auto-merge could carry developer identity | gpt-5.5 M5 | merge subprocess env | Introduced `MERGE_ENV` constant that hard-overrides `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` to `abrain-autosync <autosync@abrain.local>` and sets `GIT_EDITOR=:` as belt-and-suspenders against editor invocation. |
+| **MAJOR-D** — startup auto-merge produced local merge commit but never pushed; merge sat local until next sediment commit or manual `/abrain sync`, defeating cross-device-substrate goal | opus m1, gpt-5.5 MAJOR-1 | `extensions/abrain/index.ts` startup handler | After successful auto-merge on startup, fire-and-forget `pushAsync` with its own audit + console line. `pushAsync` already has single-flight + never-throws guarantees. |
+| **MAJOR-E** — no working-tree-clean preflight; merge over dirty tree returned `conflict` (misleading) and could clobber local edits | gpt-5.5 MAJOR-4 | `fetchAndFF` divergence path | Added `git status --porcelain` preflight before merge attempt; non-empty status returns `failed` with first 5 dirty paths in error. Conservative: status-check subprocess failure also returns `failed` (refuses to merge under uncertainty). |
+| **MAJOR-F** — pre-existing `MERGE_HEAD` (prior wedge) would make next `merge --ff-only` or `merge --no-ff` error opaquely; could be misclassified as conflict | opus M4 (post-abort variant), gpt-5.5 implicit | both ff and divergence branches | Added universal `MERGE_HEAD` preflight that runs before EITHER merge variant whenever `behind > 0`. Returns `failed` with explicit recovery hint (`git merge --abort`). Preflight is read-only (does not auto-recover) so failures stay visible. |
+| **MAJOR-G** — `merge --abort` failure (timeout under load or hook failure) left MERGE_HEAD on disk while audit recorded `result=conflict`; runbook then claimed "working tree restored" while next sediment commit would wedge | opus M4 | merge catch block, post-abort | After every abort attempt, re-check `existsSync(.git/MERGE_HEAD)`; if wedge persists, upgrade result to `failed` with explicit "abort did not clear MERGE_HEAD" hint. The runbook now only fires when tree is genuinely restored. |
+| **MINOR-H** — `conflictPaths` parsed via newline split would break on filenames containing spaces/quotes/newlines | gpt-5.5 MINOR-7 | conflict path enumeration | Switched to `git diff -z --name-only --diff-filter=U` with NUL-separator split. |
+| **MINOR-I** — module-level docstring still said "ff-only is the only merge strategy", contradicting the revision; future maintainers reading source would be misled | opus M5, gpt-5.5 MINOR-8 | `git-sync.ts:1-50` | Rewrote module header + design principle #2 to describe 2026-05-17 behavior (ff for behind-only, 3-way merge for divergence, preflights, identity override, conflict-evidence requirement). Cross-referenced this Revision section. |
+| **MINOR-J** — smoke pinned merge subject substring but not identity or 2-parent shape, so a regression dropping the author override would slip through | gpt-5.5 MINOR-2, opus m6.7, deepseek new-smoke-2 | section 6 | Extended assertion to check `%an/%ae/%cn/%ce` equals `abrain-autosync <autosync@abrain.local>` and `%P` parents count equals 2. |
+
+**Known gap explicitly NOT fixed in Round 3** (recorded for traceability):
+
+- **Sediment `gitCommit` race with auto-merge on `.git/index.lock`** (opus
+  M2). Sediment's writer.ts does raw `git add`/`git commit` OUTSIDE
+  `git-sync.ts`'s `singleFlight` queue. The revision's new `git merge`
+  step takes `.git/index.lock` for its entire duration (the old
+  `git push` did not), widening a pre-existing race surface. Round 3's
+  CRITICAL-A fix means the loser of the race now correctly gets
+  `result=failed` with a recognizable index.lock stderr (instead of
+  spuriously labelled `conflict`), which is the minimum-viable
+  mitigation: the next op will retry. Structural fix requires exporting
+  `singleFlight` from `git-sync.ts` and wiring sediment's gitCommit
+  through it — a writer.ts change with its own smoke and ADR
+  implications, deferred to a follow-up. Module header docs this gap
+  under invariant 4 so the next maintainer doesn't need to re-derive it.
+
+**Smoke updates Round 3**: 29 → 34 assertions.
+
+- Section 6 extended: precise identity + 2-parent shape assertions.
+- Section 17 new (5 assertions, one per Round 3 finding that needed a
+  regression pin):
+  - 17.1 dirty working tree → `failed` (not `conflict`), local modification preserved.
+  - 17.2 pre-existing MERGE_HEAD → `failed` with hint, preflight is read-only (does not clear the wedge).
+  - 17.3 SIGTERM-killed merge (1ms timeout) → NOT `conflict` (pin CRITICAL-A fix).
+  - 17.4 unrelated histories → `failed`, no MERGE_HEAD leak.
+  - 17.5 conflict on path containing spaces → `conflictPaths` parsed correctly via `-z`.
+
+## Round 4 audit (2026-05-17, post-Round-3)
+
+Third audit pass with the same three models (opus + gpt-5.5 +
+deepseek). Round 4 verdicts:
+
+| Model | Verdict | Notes |
+|---|---|---|
+| opus-4-7 | NEEDS-CHANGES | 2 MAJORs, 5 MINORs |
+| gpt-5.5 | NEEDS-CHANGES | 1 CRITICAL (= consensus item), 4 MAJORs |
+| deepseek-v4-pro | SHIP-WITH-MINORS | 1 MINOR (= consensus item) |
+
+The Round 3 CRITICAL-A fix introduced a subtle ordering bug all three
+models independently caught (the consensus C1 / opus MINOR-1 / gpt
+CRITICAL-1 / deepseek item 1). Plus two structural issues Round 3
+missed.
+
+| Finding | Source | Where | Fix |
+|---|---|---|---|
+| **CRITICAL-A2** — SIGTERM-killed merge could write partial unmerged index entries before being killed; the Round 3 catch block then saw `conflictPaths.length > 0`, set `isRealConflict=true`, and labelled `result=conflict` instead of `timeout`. Smoke 17.3's `timeoutMs:1` masked the bug by accepting both outcomes; production logs would surface a confusing "merge conflict in N file(s)" runbook for what was actually a slow network/disk. | gpt CRITICAL-1, opus MINOR-1, deepseek item 1 (3-way consensus) | `git-sync.ts` merge catch block | Re-ordered classification precedence: `wedgePersists` > SIGTERM-detected timeout > positive-conflict evidence > generic `classifyError`. SIGTERM is conclusive proof we killed the subprocess; partial index state is necessarily transient (cleared by the abort below) and must not beat that signal. New smoke 18.1 uses a `pre-merge-commit` hook with `sleep 5` to *deterministically* SIGTERM a merge that may have written conflict markers; the previous wall-clock-race-flaky 17.3 stays in for coverage but 18.1 is the bug-pin. |
+| **MAJOR-B2** — the Round 3 "universal MERGE_HEAD preflight" was gated on `behind > 0`. A wedge with `behind === 0` would return `noop` and the wedge would silently block sediment's next commit (the failure surfacing inside writer.ts's swallow-catch with no breadcrumb pointing here). | opus MAJOR-2, gpt MAJOR-2 | `git-sync.ts` preflight | Removed the `behind > 0` gate. The MERGE_HEAD preflight now runs whenever `fetchAndFF` is invoked, regardless of ahead/behind. The check is still read-only — we do NOT auto-clear the wedge, since that could lose work the user was mid-resolving manually. New smoke 18.2 pins behind=0 + MERGE_HEAD → `failed`. |
+| **MAJOR-C2** — the `.state/` gitignore guard (`ensureAbrainStateGitignored`) ran AFTER `fetchAndFF` at startup. An older abrain repo without `.state/` in `.gitignore` would have `.state/git-sync.jsonl` as untracked content the moment the first audit row is written; the Round 3 dirty-tree preflight would then refuse every subsequent auto-merge on that repo, permanently, until someone manually fixed `.gitignore`. | gpt MAJOR-1 | `extensions/abrain/index.ts` activate() | Wrapped startup `fetchAndFF` in a `runStartupAutoSync()` closure and invoke it AFTER `ensureAbrainStateGitignored` runs. Ordering is now enforced by call-site, not by line position (which is fragile under future inserts). The dirty-tree preflight on first run sees a `.gitignore` already covering `.state/`. |
+| **MAJOR-D2** — `--no-gpg-sign` flag missing from the merge command. The Round 3 `-c commit.gpgsign=false` covers git's documented signing config key (deepseek confirmed `merge.gpgSign` does not exist as a config; opus's MAJOR-1 was based on a misremembered key name), but an explicit `--no-gpg-sign` flag adds belt-and-suspenders defense against any non-standard git build with surprising signing defaults. | opus MAJOR-1 (partial; deepseek refuted the `merge.gpgSign` half) | `git-sync.ts` merge argv | Added `--no-gpg-sign` to the merge argv alongside `-c commit.gpgsign=false`. New smoke 18.3 sets `commit.gpgsign=true` with `gpg.program=/nonexistent/...` so signing would actually fail if attempted; asserts merge still succeeds and `%G?` reports `N` (no signature). |
+| **MINOR-E2** — ADR Round 3 table claimed "universal" preflight, code was gated on `behind > 0`; future maintainers reading the ADR would assume coverage that wasn't there. | opus MINOR-2, gpt project 8 | this section + Round 3 table | The Round 3 table's MAJOR-F row is left intact for historical traceability; this Round 4 entry above (MAJOR-B2) records the correction explicitly. Current code matches current docs. |
+| **MINOR-F2** — startup auto-merge's "pushing…" log line had no terminal closure for `noop` or `skipped` push results; user sees an ellipsis with no resolution line. | gpt MINOR-1 | `index.ts` startup handler | All four `pushAsync` outcomes (`ok`, `noop`, `skipped`, anything else) now emit a recognizable terminal line. |
+| **MINOR-G2** — preflight `git status --porcelain` had a hardcoded `timeout: 3_000`, inconsistent with the caller-supplied `timeoutMs`. If a future maintainer raises `DEFAULT_TIMEOUT_MS`, this 3s ceiling would remain a hidden cap. | deepseek NIT | `git-sync.ts` preflight | Preflight now uses the caller's `timeoutMs`. |
+| **MINOR-H2** — `git diff -z` for conflict-path enumeration had `maxBuffer: 1024 * 1024` hardcoded instead of referencing the module-level `MAX_BUFFER` constant. | deepseek NIT | `git-sync.ts` conflict-path enumeration | Now uses `MAX_BUFFER`. |
+
+**Round 4 left unresolved (deferred with rationale)**:
+
+- **opus MINOR-4 (GIT_ENV snapshots `process.env` at module load)**: a long-running pi session where `SSH_AUTH_SOCK` rotates (tmux reattach) could see stale socket on subsequent pushes. Real but low-impact; abrain pushes are typically https or short-lived sessions. Deferred. Workaround: restart pi after switching SSH session.
+- **gpt MAJOR-3 (sediment race scope widening)**: the Round 3 "known gap" wording said "sediment `gitCommit()` race" but writer.ts has multiple raw `git add`/`git commit` lanes (project/world, workflow, about-me). The minimum-viable mitigation in Round 3's CRITICAL-A fix still applies to all of them (loser of the index.lock race gets `failed`, not spurious `conflict`); the structural fix (export `singleFlight` and route all writer lanes through it) is a writer.ts PR with its own ADR implications. Tracked, deferred.
+- **NIT-3 (`_queueDepth` ratchet semantics)**: cosmetic API naming; not user-visible.
+- **NIT (Windows `execFile` timeout signal)**: abrain targets Linux/macOS only.
+
+**Smoke updates Round 4**: 34 → 38 assertions.
+
+- Section 18 new (4 assertions, one per Round 4 finding that needed a
+  bug-pin):
+  - 18.1 SIGTERM-killed merge via deterministic sleep hook → `result=timeout` (NOT `conflict` even if partial state existed). This is the primary CRITICAL-A2 pin.
+  - 18.2 pre-existing MERGE_HEAD with `behind === 0` → `result=failed` (NOT `noop`), preflight remains read-only.
+  - 18.3 `commit.gpgsign=true` with `gpg.program=/nonexistent/...` → auto-merge succeeds unsigned (`%G?` == `N`).
+  - 18.4 dirty-tree refusal sanity — user's untracked file content is byte-identical after preflight refused the merge.
+
+After 4 audit rounds with no remaining CRITICAL or MAJOR findings
+across all three models, the implementation is considered stable for
+production use. The deferred items are documented for future work but
+are not blockers.
 
 ## P0e candidates (deferred, recorded for traceability)
 

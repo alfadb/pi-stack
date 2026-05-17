@@ -1,24 +1,33 @@
 /**
- * Abrain auto-sync to remote (ADR 0020).
+ * Abrain auto-sync to remote (ADR 0020, revised 2026-05-17).
  *
  * Provides four operations against the `~/.abrain` git repo:
  *
  *   - pushAsync()    fire-and-forget after sediment commits; single-flight locked
- *   - fetchAndFF()   pi startup fetch + fast-forward only (never merge / rebase)
- *   - sync()         /abrain sync slash command: fetch+ff+push in one call
+ *   - fetchAndFF()   pi startup fetch + fast-forward; auto-merges (git 3-way,
+ *                    no LLM) on divergence; only textual conflicts surface a
+ *                    runbook. NEVER rebases (would rewrite local SHAs).
+ *   - sync()         /abrain sync slash command: fetch+ff/merge+push in one call
  *   - getStatus()    /abrain status: ahead/behind/last-sync/last-error
  *
- * Design principles (per ADR 0020 + 2026-05-15 decision):
+ * Design principles (per ADR 0020 + 2026-05-17 revision):
  *
  *   1. ALL git ops are silent-by-default. Failures write to
  *      ~/.abrain/.state/git-sync.jsonl (audit) and never throw to caller.
  *      Sediment's commit path must NEVER be blocked by network/auth issues.
  *
- *   2. Conflict resolution is OUT OF SCOPE: ff-only is the only merge
- *      strategy. Divergence → abort + audit + user-visible hint via the
- *      `/abrain status` slash command. No LLM auto-merge (explicitly
- *      rejected in design discussion — hallucination risk in knowledge
- *      base content is unacceptable for a long-term substrate).
+ *   2. Divergence is auto-resolved via `git merge --no-edit --no-ff` (3-way
+ *      text merge — same algorithm git uses for code; no LLM in the loop).
+ *      A textual conflict (unmerged paths) aborts with `merge --abort`,
+ *      restores the working tree, and surfaces a runbook naming the
+ *      conflicting files. We NEVER rebase (would silently rewrite local
+ *      SHAs) and NEVER LLM-merge (hallucination risk in knowledge body
+ *      text). Merge subprocess uses a hard env override for author/
+ *      committer identity and disables commit signing so a user's
+ *      `commit.gpgsign=true` config can't make merges fail at GPG
+ *      pinentry. Working-tree-clean preflight runs before the merge so a
+ *      dirty tree is reported as `failed` rather than misclassified as
+ *      a conflict by the merge subprocess's overwrite-refusal.
  *
  *   3. No git ops when there's no `origin` remote — silently skipped.
  *      This keeps users who run abrain locally without a remote unaffected.
@@ -28,6 +37,13 @@
  *      in-memory promise singleton. Cross-process protection (multiple pi
  *      instances) relies on git's own .git/index.lock — that's the
  *      fail-soft path (one wins, others audit-log a failed result).
+ *      KNOWN GAP (2026-05-17, tracked as ADR 0020 followup): sediment's
+ *      own `gitCommit()` in writer.ts does NOT route through this
+ *      singleFlight, so it can still race the new auto-merge step on
+ *      `.git/index.lock`. The current mitigation is the result-taxonomy
+ *      fix (catch block correctly labels lock contention as `failed`
+ *      rather than `conflict`); a structural fix requires exporting
+ *      `singleFlight` and wiring sediment through it.
  *
  *   5. Argv contains zero secrets. We only pass branch names and standard
  *      git verbs; credentials come from the system git credential helper
@@ -70,6 +86,34 @@ const GIT_ENV: NodeJS.ProcessEnv = {
   LANG: "C",
   LC_ALL: "C",
   GIT_TERMINAL_PROMPT: "0",
+};
+
+/**
+ * Env used specifically for the auto-merge subprocess (2026-05-17 revision
+ * of ADR 0020). On top of GIT_ENV:
+ *
+ *   - Forces author/committer to `abrain-autosync` even if the parent
+ *     process has GIT_AUTHOR_NAME/GIT_COMMITTER_EMAIL set (those would
+ *     otherwise win over the `-c user.name=` flag, which only seeds
+ *     `git config` reads). Without this override, an auto-merge launched
+ *     from a process that inherited a developer's author env would record
+ *     the developer as the merge committer, blurring "this commit is a
+ *     machine-generated convergence marker" semantics.
+ *   - GIT_EDITOR=: defense in depth against any code path that ignores
+ *     `--no-edit` and tries to open an editor (would otherwise hang until
+ *     our timeout).
+ *
+ * commit.gpgsign=false is set via `-c` rather than env (no env knob exists
+ * for it). Both are intentional: an auto-merge commit signed by the user's
+ * GPG key under a fake author would be a misleading audit trail.
+ */
+const MERGE_ENV: NodeJS.ProcessEnv = {
+  ...GIT_ENV,
+  GIT_AUTHOR_NAME: "abrain-autosync",
+  GIT_AUTHOR_EMAIL: "autosync@abrain.local",
+  GIT_COMMITTER_NAME: "abrain-autosync",
+  GIT_COMMITTER_EMAIL: "autosync@abrain.local",
+  GIT_EDITOR: ":",
 };
 
 /**
@@ -119,10 +163,16 @@ export type GitSyncOp = "push" | "fetch" | "sync";
  * Sync result taxonomy. Distinct codes for the audit log so `/abrain status`
  * can surface the right hint without parsing error strings.
  *
- *   ok            success (push completed / ff merged)
+ *   ok            success (push completed / ff merged / auto-merge merged)
  *   noop          nothing to do (ahead=0 for push; behind=0 for fetch)
  *   skipped       no git repo or no origin remote — silently inactive
- *   diverged      fetch found local+remote both have new commits; ff refused
+ *   conflict      auto-merge attempted on divergence but git found a
+ *                 textual conflict; merge --abort restored clean state;
+ *                 user must resolve manually via /abrain sync runbook
+ *   diverged      DEPRECATED 2026-05-17. Older audit rows may still carry
+ *                 this value; new fetchAndFF runs never produce it (the
+ *                 auto-merge path produces `ok` or `conflict`). Kept in
+ *                 the union so historical jsonl rows still parse.
  *   push_rejected git push rejected (remote ahead; user must pull first)
  *   timeout       git command exceeded timeout (likely network)
  *   failed        any other error (auth, fs, network reset, etc.)
@@ -131,6 +181,7 @@ export type GitSyncResult =
   | "ok"
   | "noop"
   | "skipped"
+  | "conflict"
   | "diverged"
   | "push_rejected"
   | "timeout"
@@ -142,6 +193,18 @@ export interface GitSyncEvent {
   result: GitSyncResult;
   ahead?: number;
   behind?: number;
+  /**
+   * For `fetch` ops where divergence triggered auto-merge: number of
+   * commits that were merged in from origin/main (equal to `behind` at
+   * the start of the merge). Absent for pure fast-forward and noop.
+   */
+  merged?: number;
+  /**
+   * For `result=conflict`: list of paths git reported as unmerged after
+   * the failed auto-merge attempt. Captured before `git merge --abort`
+   * so the runbook can name the files even after working tree is reset.
+   */
+  conflictPaths?: string[];
   durationMs?: number;
   error?: string;
 }
@@ -371,15 +434,27 @@ export async function pushAsync(opts: GitSyncOptions): Promise<GitSyncEvent> {
 }
 
 /**
- * Fetch origin and fast-forward main. If ff isn't possible (diverged or
- * conflicting), abort and report "diverged" — NEVER auto-merge or rebase.
+ * Fetch origin and reconcile local main with it.
+ *
+ * 2026-05-17 revision (supersedes the original ff-only behavior in this
+ * function): we now attempt a real merge on divergence. Git's own
+ * 3-way merge handles non-overlapping changes — the common case for
+ * abrain, where two devices write *different* slug markdown files. We
+ * only fall back to surfacing a runbook when git itself reports a
+ * textual conflict.
  *
  * Behavior:
  *   - no remote / not a repo → result: "skipped"
  *   - behind = 0             → result: "noop" (don't merge)
  *   - ahead = 0 + behind > 0 → ff merge → result: "ok"
- *   - ahead > 0 + behind > 0 → result: "diverged" (manual resolve)
- *   - any error              → result: "failed" or "timeout"
+ *   - ahead > 0 + behind > 0 → try `git merge --no-edit --no-ff origin/main`:
+ *       - merge clean         → result: "ok", merged=<behind>
+ *       - textual conflict    → `git merge --abort`, result: "conflict",
+ *                               conflictPaths=<unmerged files>
+ *   - any other error          → result: "failed" or "timeout"
+ *
+ * We still NEVER rebase (would silently rewrite local SHAs) and NEVER
+ * LLM-merge a conflict (hallucination risk in knowledge substrate).
  *
  * Never throws.
  */
@@ -417,6 +492,27 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
       event.ahead = ahead;
       event.behind = behind;
 
+      // Universal MERGE_HEAD preflight (Round 4 audit fix — was Round 3's
+      // "universal" claim but actually gated on behind>0). A pre-existing
+      // MERGE_HEAD means a prior merge was never concluded. Even if we'd
+      // return `noop` (behind=0) the wedge still blocks the next sediment
+      // commit ("fatal: You have not concluded your merge"), and that
+      // failure would surface inside writer.ts's swallow-catch with no
+      // breadcrumb pointing back here. Surface it explicitly on every
+      // fetchAndFF, regardless of ahead/behind, with a recovery hint.
+      // Preflight is intentionally read-only: it never calls `merge --abort`
+      // for the user. Auto-clearing a wedge could lose work the user was
+      // mid-resolving manually. (Round 4: opus MAJOR-2 + gpt MAJOR-2.)
+      if (existsSync(path.join(opts.abrainHome, ".git", "MERGE_HEAD"))) {
+        event.result = "failed";
+        event.error =
+          "pre-existing MERGE_HEAD detected (prior merge wedge); " +
+          "run `git -C <abrainHome> merge --abort` to recover";
+        event.durationMs = Date.now() - start;
+        await audit(opts.abrainHome, event);
+        return event;
+      }
+
       if (behind === 0) {
         // Nothing new on remote.
         event.result = "noop";
@@ -429,9 +525,196 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
         );
         event.result = "ok";
       } else {
-        // Both have unique commits — diverged. Refuse to merge.
-        event.result = "diverged";
-        event.error = `local ahead ${ahead}, remote ahead ${behind}; ff-only refused`;
+        // Both have unique commits — divergence. Attempt a real merge
+        // (3-way, git's own merge algorithm — no LLM). 2026-05-17 revision
+        // of ADR 0020: abrain knowledge entries are typically file-per-slug
+        // so different devices write disjoint files; git can resolve those
+        // without our help. We only fall back to `conflict` when git
+        // itself reports an unresolvable textual conflict (unmerged paths
+        // present in the index after merge failed).
+        //
+        // Round 3 audit fixes (2026-05-17):
+        //   - PREFLIGHT: working-tree-clean check. Without it, a dirty tree
+        //     (sediment mid-write, user manual edit, autocrlf phantom) makes
+        //     `git merge` fail with "local changes ... would be overwritten"
+        //     and the catch block previously misclassified that as `conflict`.
+        //   - PREFLIGHT: pre-existing MERGE_HEAD. If a previous merge wedge
+        //     was never cleaned up, retrying merge would error opaquely;
+        //     surface it explicitly as `failed` with a recovery hint.
+        //   - `-c commit.gpgsign=false`: a user with `commit.gpgsign=true`
+        //     would otherwise have the merge fail at gpg pinentry/missing-
+        //     agent, again misclassified as conflict. An auto-merge commit
+        //     signed under fake author identity is also a misleading audit
+        //     trail — better to leave it unsigned.
+        //   - MERGE_ENV: forces author/committer identity over any inherited
+        //     `GIT_AUTHOR_NAME/EMAIL` env (which would beat `-c user.name=`).
+        //   - CATCH CLASSIFICATION: only label result=`conflict` when there
+        //     is *positive evidence* of a textual conflict (unmerged paths,
+        //     or `CONFLICT (`/`Automatic merge failed` in stderr under
+        //     LANG=C). Otherwise route through classifyError(false) so
+        //     timeouts/locks/hook-failures/etc. get their correct codes.
+        //   - POST-ABORT VERIFY: re-check `.git/MERGE_HEAD` existence. If
+        //     abort itself failed and the wedge persists, upgrade result
+        //     to `failed` (with a recovery hint) so the runbook doesn't
+        //     claim a clean tree that doesn't exist.
+
+        // (MERGE_HEAD wedge already handled by the universal preflight above.)
+        // Preflight: dirty working tree. Use `git status --porcelain`
+        // (covers staged, modified, untracked-but-not-ignored). `.state/`
+        // is in .gitignore so the audit log doesn't trigger this.
+        // Round 4 deepseek NIT: preflight timeout now matches caller's
+        // `timeoutMs` so a maintainer raising the merge timeout doesn't
+        // leave a hidden 3s ceiling on the preflight.
+        try {
+          const { stdout: statusOut } = await execFileAsync(
+            "git",
+            ["-C", opts.abrainHome, "status", "--porcelain"],
+            { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
+          );
+          if (statusOut.trim() !== "") {
+            const dirtyFiles = statusOut.trim().split("\n").slice(0, 5).join(", ");
+            event.result = "failed";
+            event.error =
+              `working tree not clean; refusing to auto-merge over local changes ` +
+              `(${statusOut.trim().split("\n").length} dirty path(s): ${dirtyFiles}${statusOut.trim().split("\n").length > 5 ? ", ..." : ""})`;
+            event.durationMs = Date.now() - start;
+            await audit(opts.abrainHome, event);
+            return event;
+          }
+        } catch {
+          // Status check failed — we don't know if tree is clean. Skip
+          // the merge attempt rather than risk merging over uncommitted
+          // work; that's the conservative choice for a knowledge substrate.
+          event.result = "failed";
+          event.error = "working-tree-clean preflight failed; refusing to auto-merge";
+          event.durationMs = Date.now() - start;
+          await audit(opts.abrainHome, event);
+          return event;
+        }
+
+        const mergeMsg = `abrain auto-merge: integrate ${behind} commit(s) from origin/main`;
+        try {
+          await execFileAsync(
+            "git",
+            [
+              "-C", opts.abrainHome,
+              "-c", "user.name=abrain-autosync",
+              "-c", "user.email=autosync@abrain.local",
+              "-c", "commit.gpgsign=false",
+              // Round 4 audit (opus MAJOR-1, partially): `-c commit.gpgsign=false`
+              // alone covers git's documented signing config key. But
+              // `git merge` also accepts an explicit `--no-gpg-sign` flag
+              // that is checked independently of any config; we pass it as
+              // belt-and-suspenders so even an unusual git build with a
+              // non-standard signing-default config can't surprise us.
+              "merge", "--no-edit", "--no-ff", "--no-gpg-sign", "-m", mergeMsg,
+              "origin/main",
+            ],
+            { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: MERGE_ENV },
+          );
+          event.result = "ok";
+          event.merged = behind;
+        } catch (mergeErr: unknown) {
+          // Round 4 audit (3-way consensus: opus MINOR-1 + gpt CRITICAL-1
+          // + deepseek item 1): SIGTERM evidence must beat positive-
+          // conflict evidence. A merge subprocess that wrote partial
+          // unmerged index entries before our timeout SIGTERM'd it would
+          // otherwise be misclassified as `conflict` (because
+          // conflictPaths.length > 0) instead of `timeout`. Smoke 17.3's
+          // timeoutMs:1 paper-cut was a symptom of this. Order of
+          // precedence in classification:
+          //   1. wedgePersists  → failed (lying about clean tree is worst)
+          //   2. SIGTERM        → timeout (we killed it; conclusive)
+          //   3. real conflict  → conflict
+          //   4. anything else  → classifyError (failed/etc.)
+          const errObj = mergeErr as { killed?: boolean; signal?: string; stderr?: string; message?: string };
+          const wasTimeout = errObj?.killed === true && errObj?.signal === "SIGTERM";
+
+          // Capture conflict path list BEFORE aborting. After abort, the
+          // unmerged index entries are gone. `-z` + NUL split is the only
+          // safe parse for paths containing spaces/quotes/newlines.
+          // Round 4 deepseek NIT: reference MAX_BUFFER constant instead of
+          // hardcoding 1024*1024 so a maintainer raising the module-level
+          // buffer doesn't leave this site behind.
+          let conflictPaths: string[] = [];
+          try {
+            const { stdout } = await execFileAsync(
+              "git",
+              ["-C", opts.abrainHome, "diff", "-z", "--name-only", "--diff-filter=U"],
+              { timeout: timeoutMs, maxBuffer: MAX_BUFFER, env: GIT_ENV },
+            );
+            conflictPaths = stdout.split("\0").filter(Boolean);
+          } catch {
+            // Couldn't enumerate — leave empty; classification below will
+            // route this to `failed`/`timeout` rather than `conflict` (no
+            // positive evidence of unmerged paths).
+          }
+
+          const rawStderr = String(errObj?.stderr || "") + "\n" + String(errObj?.message || "");
+
+          // Always attempt abort (even on non-conflict failures) so we
+          // don't leave a merge state on disk for the next op to trip on.
+          // Timeout matches merge timeout so a slow disk doesn't leave a
+          // wedge with a stricter abort deadline (Round 3 opus M4).
+          let abortFailed = false;
+          try {
+            await execFileAsync(
+              "git",
+              ["-C", opts.abrainHome, "merge", "--abort"],
+              { timeout: timeoutMs, maxBuffer: 64 * 1024, env: GIT_ENV },
+            );
+          } catch {
+            abortFailed = true;
+          }
+          const wedgePersists = existsSync(path.join(opts.abrainHome, ".git", "MERGE_HEAD"));
+
+          if (wedgePersists) {
+            // Worst case: abort failed AND a merge state remains. This is
+            // qualitatively different from a clean conflict — the next
+            // sediment commit will hit `MERGE_HEAD exists` and wedge. We
+            // refuse to call this a `conflict` (the runbook would lie
+            // about "working tree restored"). Surface as `failed` with an
+            // explicit recovery hint.
+            event.result = "failed";
+            event.error =
+              `merge failed and abort did not clear MERGE_HEAD; ` +
+              `run \`git -C <abrainHome> merge --abort\` manually to recover` +
+              (abortFailed ? " (abort subprocess errored)" : "");
+          } else if (wasTimeout) {
+            // SIGTERM trumps any positive-conflict signal: even if git
+            // wrote a partial unmerged index before we killed it, the
+            // result the user cares about is "we ran out of time", not
+            // "there's a conflict" — the partial state was cleared by
+            // the abort above.
+            event.result = "timeout";
+            event.error = `merge timed out after ${timeoutMs}ms`;
+          } else {
+            // Positive evidence of textual conflict: either git reported
+            // unmerged paths, OR stderr contains the stable LANG=C
+            // conflict markers. Either alone is sufficient — conflictPaths
+            // could be empty if `git diff` itself fell over, and stderr
+            // markers cover the case where index enumeration succeeded
+            // but returned nothing for some edge reason.
+            const stderrMentionsConflict = /CONFLICT \(|Automatic merge failed/i.test(rawStderr);
+            const isRealConflict = conflictPaths.length > 0 || stderrMentionsConflict;
+            if (isRealConflict) {
+              event.result = "conflict";
+              event.conflictPaths = conflictPaths;
+              event.error =
+                conflictPaths.length > 0
+                  ? `merge conflict in ${conflictPaths.length} file(s): ${conflictPaths.slice(0, 5).join(", ")}${conflictPaths.length > 5 ? ", ..." : ""}`
+                  : `merge conflict (paths not enumerable): ${redactCredentials(rawStderr).slice(0, 160)}`;
+            } else {
+              // No positive conflict evidence and not a timeout — must be
+              // lock/hook/gpg/unrelated-histories/etc. Route through the
+              // shared classifyError. allowPushRejected=false (this is a
+              // merge, not a push).
+              const { result, message } = classifyError(mergeErr, false);
+              event.result = result;
+              event.error = message;
+            }
+          }
+        }
       }
       event.durationMs = Date.now() - start;
     } catch (e: unknown) {
@@ -449,13 +732,13 @@ export async function fetchAndFF(opts: GitSyncOptions): Promise<GitSyncEvent> {
 }
 
 /**
- * Manual /abrain sync slash command driver. fetch+ff first, then push.
- * Returns a human-readable summary string for `ui.notify` and the raw
- * events for audit/inspection.
+ * Manual /abrain sync slash command driver. fetch+ff/auto-merge first,
+ * then push. Returns a human-readable summary string for `ui.notify`
+ * and the raw events for audit/inspection.
  *
- * If fetch results in "diverged", we skip push (no point — remote would
- * reject anyway) and surface a runbook string telling the user exactly
- * what commands to run manually.
+ * If fetch returns `conflict` (auto-merge hit an unresolvable textual
+ * conflict and was aborted), we skip push and surface a runbook with
+ * the conflicting paths.
  */
 export async function sync(opts: GitSyncOptions): Promise<{
   events: GitSyncEvent[];
@@ -464,7 +747,7 @@ export async function sync(opts: GitSyncOptions): Promise<{
 }> {
   const fetchEvent = await fetchAndFF(opts);
 
-  if (fetchEvent.result === "diverged") {
+  if (fetchEvent.result === "conflict") {
     // Round 2 audit fix (opus M2): the runbook contains `cd <path>` that
     // users will copy/paste into a shell. If abrainHome contained shell
     // metacharacters (via ABRAIN_ROOT env injection from an earlier
@@ -474,14 +757,19 @@ export async function sync(opts: GitSyncOptions): Promise<{
     //   2. If the path contains a newline or control char, refuse the
     //      inline form and tell the user to cd manually.
     const quotedHome = shellQuotePath(opts.abrainHome);
+    const paths = fetchEvent.conflictPaths || [];
+    const pathsLine =
+      paths.length > 0
+        ? `conflicting files (${paths.length}): ${paths.slice(0, 10).join(", ")}${paths.length > 10 ? ", ..." : ""}\n`
+        : "";
     const summary =
-      `diverged: local has ${fetchEvent.ahead} commit(s), remote has ${fetchEvent.behind} commit(s) not in local.\n` +
-      `ff-only merge refused. resolve manually:\n` +
+      `conflict: auto-merge of ${fetchEvent.behind} remote commit(s) into ${fetchEvent.ahead} local commit(s) failed.\n` +
+      pathsLine +
+      `working tree restored (merge --abort). resolve manually:\n` +
       `  cd ${quotedHome}\n` +
-      `  git fetch origin && git status\n` +
-      `  # then either: git merge origin/main   (creates merge commit)\n` +
-      `  #         or: git rebase origin/main   (replays your commits on top)\n` +
-      `  # then run /abrain sync again`;
+      `  git fetch origin && git merge origin/main   # then resolve conflicts in your editor\n` +
+      `  git add <resolved files> && git commit       # finish the merge\n` +
+      `  # then run /abrain sync again to push`;
     return { events: [fetchEvent], ok: false, summary };
   }
 
@@ -506,8 +794,12 @@ export async function sync(opts: GitSyncOptions): Promise<{
   const pushedHint = pushEvent.result === "ok" && pushEvent.ahead
     ? ` (${pushEvent.ahead} commit(s) pushed)` : "";
 
+  const mergedHint =
+    fetchEvent.result === "ok" && fetchEvent.merged && fetchEvent.merged > 0
+      ? ` (auto-merged ${fetchEvent.merged} commit(s) from origin/main)`
+      : "";
   const summary = ok
-    ? `synced: fetch=${fetchEvent.result}, push=${pushEvent.result}${pushedHint}`
+    ? `synced: fetch=${fetchEvent.result}${mergedHint}, push=${pushEvent.result}${pushedHint}`
     : `fetch=${fetchEvent.result}, push=${pushEvent.result}: ${pushEvent.error || "unknown"}`;
 
   return { events: [fetchEvent, pushEvent], ok, summary };
@@ -612,7 +904,7 @@ export function formatSyncStatus(status: AbrainSyncStatus): string {
   if (status.branch) lines.push(`  branch: ${status.branch}`);
   if (status.remote) {
     lines.push(`  ahead:  ${status.ahead}${status.ahead > 0 ? " (run /abrain sync to push)" : ""}`);
-    lines.push(`  behind: ${status.behind}${status.behind > 0 ? " (run /abrain sync to ff-pull)" : ""}`);
+    lines.push(`  behind: ${status.behind}${status.behind > 0 ? " (run /abrain sync to pull/auto-merge)" : ""}`);
   }
   const fmtEvent = (label: string, ev?: GitSyncEvent): string => {
     if (!ev) return `  last ${label}: (none recorded)`;
@@ -622,8 +914,15 @@ export function formatSyncStatus(status: AbrainSyncStatus): string {
   };
   lines.push(fmtEvent("push", status.lastPush));
   lines.push(fmtEvent("fetch", status.lastFetch));
-  if (status.ahead > 0 && status.behind > 0) {
-    lines.push("  ⚠ diverged — run /abrain sync for runbook");
+  // 2026-05-17: ahead+behind>0 is no longer a steady state — fetchAndFF
+  // auto-merges. If it persists, it means the most recent fetch hit a
+  // textual conflict (last fetch result === 'conflict'); surface that
+  // signal precisely rather than the old generic 'diverged' line.
+  if (status.lastFetch?.result === "conflict") {
+    lines.push("  ⚠ last fetch hit a merge conflict — run /abrain sync for runbook");
+  } else if (status.ahead > 0 && status.behind > 0) {
+    // Transient: pre-auto-merge state (haven't fetched yet this session).
+    lines.push("  ⓘ diverged — run /abrain sync to auto-merge");
   }
   return lines.join("\n");
 }
