@@ -351,6 +351,18 @@ export function secretDefaultRejection(reason: string): string {
 let bootActiveProject: ResolveActiveProjectResult | null = null;
 let bootActiveProjectAt: number | null = null;
 
+/**
+ * Module-level guard so the startup auto-sync runs exactly once per pi
+ * process even though we register the trigger on `session_start` (which
+ * fires once per session, including session switches / fork / restart).
+ *
+ * 2026-05-17 Round 5 UX fix: startup sync moved from activate() top-level
+ * (no ctx, raw console.error) to session_start (ctx.ui.notify available,
+ * pi TUI styled output). This flag is the gate that prevents repeated
+ * sync attempts on every new session within the same pi process.
+ */
+let startupAutoSyncDone = false;
+
 function snapshotBootActiveProject(cwd = process.cwd()): ResolveActiveProjectResult {
   return resolveActiveProject(cwd, { abrainHome: ABRAIN_HOME });
 }
@@ -616,20 +628,49 @@ export default function activate(pi: ExtensionAPI): void {
   // (3-way, no LLM); only a textual conflict surfaces a runbook. When
   // auto-merge produces a local merge commit we also schedule a push
   // so the merge becomes visible to other devices (Round 3 MAJOR-D).
-  // ORDERING (Round 4 gpt MAJOR-1): the runStartupAutoSync() call below
-  // MUST happen AFTER the .state/ gitignore guard so the working-tree-
-  // clean preflight sees the canonical "ignore .state/" rule on first
-  // run — otherwise an older abrain repo with .state/git-sync.jsonl
-  // present but ungitignored would be permanently flagged as dirty by
-  // the preflight. We wrap in a function (rather than reordering code
-  // blocks) so the ordering is enforced by call-site, not by line
-  // position which is fragile under future edits.
-  const runStartupAutoSync = (): void => {
+  //
+  // 2026-05-17 (Round 5 UX fix): the startup sync USED TO emit `console.
+  // error(...)` lines, which is the raw stderr path — ugly and
+  // intercalated with pi's TUI rendering. Sediment uses `ctx.ui.notify`
+  // (which the pi TUI styles per `type` and integrates with the chat
+  // stream); abrain should too. But `activate(pi)` has no ctx — we get
+  // ctx only inside an event handler. So we register a one-shot
+  // `session_start` listener whose ctx.ui.notify we capture early and
+  // pass into `runStartupAutoSync(notify)`. Headless/RPC mode (no ui)
+  // falls back to console.error so the audit trail still surfaces.
+  //
+  // ORDERING (Round 4 gpt MAJOR-1): runStartupAutoSync is INVOKED at
+  // session_start time, but session_start fires AFTER activate()
+  // finishes, by which point `.state/` gitignore guard has already run
+  // — so the dirty-tree preflight inside fetchAndFF still sees the
+  // canonical "ignore .state/" rule on first run. The ordering
+  // invariant is preserved.
+  // Notify type signature is widened to `string` to match VaultReleaseUi
+  // (the existing pi runtime contract for ctx.ui.notify on this codebase).
+  // pi only renders "info" | "warning" | "error" specially; other strings
+  // fall back to the default style, so the wider signature is safe at
+  // both ends.
+  const runStartupAutoSync = (notify?: (msg: string, type?: string) => void): void => {
+    if (startupAutoSyncDone) return;
+    startupAutoSyncDone = true;
     if (process.env.PI_ABRAIN_NO_AUTOSYNC === "1") return;
+
+    // Capture-and-bind pattern (mirrors sediment writer.ts): bind notify
+    // synchronously so any subsequent ctx-staleness during our async
+    // work doesn't blow up the announce path. If notify is missing
+    // (headless/RPC/print mode), fall back to console.error so the
+    // audit trail still surfaces somewhere a user can find it.
+    const announce = (msg: string, type: "info" | "warning" | "error" = "info"): void => {
+      if (notify) {
+        try { notify(msg, type); return; } catch { /* fall through to console */ }
+      }
+      console.error(`[abrain] ${msg}`);
+    };
+
     fetchAndFF({ abrainHome: ABRAIN_HOME })
       .then((event) => {
         if (event.result === "ok" && event.merged && event.merged > 0) {
-          console.error(`[abrain] git fetch: auto-merged ${event.merged} commit(s) from origin/main (no conflicts); pushing merge…`);
+          announce(`abrain: auto-merged ${event.merged} commit(s) from origin/main; pushing merge…`, "info");
           // Fire-and-forget: pushAsync has its own audit + single-flight.
           // Round 4 gpt MINOR-1: always emit a terminal line so the
           // "pushing…" announcement is never left hanging — even for
@@ -638,30 +679,32 @@ export default function activate(pi: ExtensionAPI): void {
           pushAsync({ abrainHome: ABRAIN_HOME })
             .then((pushEv) => {
               if (pushEv.result === "ok") {
-                console.error(`[abrain] git push: auto-merge commit landed on origin/main`);
+                announce(`abrain: auto-merge commit landed on origin/main`, "info");
               } else if (pushEv.result === "noop") {
-                console.error(`[abrain] git push: auto-merge already on origin/main (noop)`);
+                announce(`abrain: auto-merge already on origin/main`, "info");
               } else if (pushEv.result === "skipped") {
-                console.error(`[abrain] git push: skipped (origin remote no longer configured)`);
+                announce(`abrain: push skipped (no origin remote)`, "info");
               } else {
-                console.error(`[abrain] git push of auto-merge ${pushEv.result}: ${pushEv.error || "unknown"} (next sediment commit will retry)`);
+                announce(`abrain: push of auto-merge ${pushEv.result} — ${pushEv.error || "unknown"} (next sediment commit will retry)`, "warning");
               }
             })
             .catch(() => { /* pushAsync never throws; defense in depth */ });
         } else if (event.result === "ok" && event.behind && event.behind > 0) {
-          console.error(`[abrain] git fetch: fast-forwarded ${event.behind} commit(s) from origin/main`);
+          announce(`abrain: fast-forwarded ${event.behind} commit(s) from origin/main`, "info");
         } else if (event.result === "conflict") {
           const where = event.conflictPaths && event.conflictPaths.length > 0
             ? ` in ${event.conflictPaths.length} file(s): ${event.conflictPaths.slice(0, 3).join(", ")}${event.conflictPaths.length > 3 ? ", ..." : ""}`
             : "";
-          console.error(`[abrain] git fetch: merge conflict${where}. Working tree restored. Run /abrain sync for runbook.`);
+          announce(`abrain: merge conflict${where} — working tree restored. Run /abrain sync for runbook.`, "warning");
         } else if (event.result === "failed" || event.result === "timeout") {
-          console.error(`[abrain] git fetch ${event.result}: ${event.error || "unknown"} (auto-sync continues; use /abrain sync to retry)`);
+          announce(`abrain: fetch ${event.result} — ${event.error || "unknown"} (auto-sync continues; use /abrain sync to retry)`, "warning");
         }
+        // result === "ok" with no merged + no behind → nothing happened,
+        // stay silent. result === "noop"/"skipped" also silent.
       })
       .catch((err) => {
         // git-sync ops should never throw, but belt-and-suspenders:
-        console.error(`[abrain] git fetch threw (should be caught internally):`, err);
+        announce(`abrain: fetch threw (should be caught internally) — ${err && (err as Error).message ? (err as Error).message : String(err)}`, "error");
       });
   };
 
@@ -694,16 +737,33 @@ export default function activate(pi: ExtensionAPI): void {
     console.error(`[abrain] .state/ gitignore guard failed (non-fatal):`, err);
   }
 
-  // Round 4 (gpt MAJOR-1) ordering: invoke startup git sync AFTER the
-  // .state/ gitignore guard has run, so the dirty-tree preflight inside
-  // fetchAndFF never sees `.state/git-sync.jsonl` as untracked content.
-  runStartupAutoSync();
+  // NOTE: startup git sync runs in the session_start event handler
+  // below (not here at activate() time) so we can capture ctx.ui.notify
+  // and surface results via pi's TUI instead of raw stderr. See the
+  // comment block on runStartupAutoSync above for rationale.
 
   const registry = pi as unknown as CommandRegistry;
   const toolRegistry = pi as unknown as ToolRegistry;
   const eventRegistry = pi as unknown as EventRegistry;
 
   if (typeof eventRegistry.on === "function") {
+    // Startup git sync trigger (Round 5 UX fix, 2026-05-17). We capture
+    // ctx.ui.notify SYNCHRONOUSLY at handler entry (sediment's stale-ctx
+    // pattern) and pass it into runStartupAutoSync's announce(). The
+    // module-level startupAutoSyncDone flag ensures this runs exactly
+    // once per pi process even though session_start fires on every new
+    // session / fork / restart. Headless/RPC mode (no ctx.ui) falls back
+    // to console.error inside announce(). Never throws to pi runtime.
+    eventRegistry.on("session_start", async (_event, ctx) => {
+      try {
+        const notify = ctx?.ui?.notify?.bind(ctx.ui);
+        runStartupAutoSync(notify);
+      } catch (err) {
+        // Defensive: never let our sync trigger break the session.
+        console.error(`[abrain] session_start auto-sync trigger threw:`, err);
+      }
+    });
+
     // Track the user's current conversation language by sampling recent user
     // messages. Used by i18n.localizePrompt to translate vault authorization
     // prompts into the language the user is speaking.
