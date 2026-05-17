@@ -26,6 +26,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+// ADR 0022 INV-K: cross-extension defer check. Imported from its own
+// leaf module so smoke can exercise it in isolation. See
+// ./prompt-user-defer.ts for the why.
+import { isPendingPromptUserBlocking } from "./prompt-user-defer";
 import {
   compactionTunerAuditPath,
   compactionTunerDir,
@@ -92,6 +96,20 @@ function readSessionId(sm: CompactionTunerCtx["sessionManager"]): string | undef
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Audit a single skip row. Mirrors `appendAudit` but exists as a
+ * named helper so the INV-K defer path reads cleanly above and the
+ * smoke can inject a recorder.
+ */
+async function recordSimpleSkip(
+  projectRoot: string,
+  row: Record<string, unknown>,
+): Promise<void> {
+  try {
+    await appendAudit(projectRoot, row);
+  } catch { /* never let audit failures break compaction */ }
 }
 
 async function appendAudit(projectRoot: string, row: Record<string, unknown>): Promise<void> {
@@ -180,6 +198,27 @@ export default function (pi: ExtensionAPI) {
 
     // decision === "trigger"
     const ts = Date.now();
+
+    // ADR 0022 INV-K: defer compaction while a prompt_user dialog
+    // is pending. We check AFTER classifyDecision returned "trigger"
+    // but BEFORE consuming rearm state — so the next agent_end after
+    // the prompt resolves will re-classify and trigger normally
+    // (no missed compaction; just delayed one turn).
+    //
+    // Unlike the silent skips above, we DO audit this branch because
+    // (a) the cardinality is low (only fires while user is at the
+    // keyboard), and (b) operators chasing "why didn't compaction
+    // fire at 90%?" need an observable trace.
+    if (isPendingPromptUserBlocking()) {
+      await recordSimpleSkip(cwd, {
+        ts: new Date(ts).toISOString(),
+        decision: "skip",
+        reason: "prompt_user_pending",
+        usage_percent: percent,
+      });
+      return;
+    }
+
     armedBySession.set(stateKey, false);
 
     if (hasUI && settings.notifyOnTrigger && notify) {
